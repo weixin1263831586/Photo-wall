@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>照片墙 — Photo Shape Wall</title>
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div class="app">
+
+    <!-- ======================== Sidebar ======================== -->
+    <aside class="sidebar">
+        <div class="sidebar-header">
+            <h1>📸 照片拼贴墙</h1>
+            <p class="subtitle">上传照片，拼出你想要的形状</p>
+        </div>
+
+        <!-- Shape selection -->
+        <section class="panel">
+            <h3 class="panel-title">选择形状</h3>
+            <div class="shape-buttons" id="shape-buttons"></div>
+
+            <!-- Custom text shape -->
+            <div class="text-shape-row">
+                <input type="text" id="text-shape-input" placeholder="输入文字/数字 如 520" maxlength="12">
+                <button class="btn btn-mini" id="text-shape-btn">生成</button>
+            </div>
+
+            <!-- Custom image shape -->
+            <button class="btn btn-ghost btn-block" id="custom-shape-btn" style="margin-top:8px;">
+                🖼️ 用图片作为形状
+            </button>
+            <input type="file" id="shape-file-input" accept="image/*" hidden>
+        </section>
+
+        <!-- Upload -->
+        <section class="panel">
+            <h3 class="panel-title">上传照片</h3>
+            <div class="drop-zone" id="drop-zone">
+                <div class="drop-zone-icon">📁</div>
+                <p class="drop-zone-text">点击或拖放照片到这里</p>
+                <p class="drop-zone-hint">支持 JPG / PNG / WebP，可多选</p>
+            </div>
+            <input type="file" id="file-input" multiple accept="image/*" hidden>
+            <div class="photo-count-bar">
+                已上传 <strong id="photo-count">0</strong> 张照片
+            </div>
+        </section>
+
+        <!-- Layout mode -->
+        <section class="panel">
+            <h3 class="panel-title">排版方式</h3>
+            <div class="mode-buttons" id="mode-buttons">
+                <button class="mode-btn active" data-mode="grid">紧密方格</button>
+                <button class="mode-btn" data-mode="brick">错落拼贴</button>
+                <button class="mode-btn" data-mode="organic">自然分布</button>
+            </div>
+            <p class="setting-hint" id="mode-hint">无缝铺满，适合清晰轮廓</p>
+        </section>
+
+        <!-- Photo shape -->
+        <section class="panel">
+            <h3 class="panel-title">照片形状</h3>
+            <div class="photo-shape-buttons" id="photo-shape-buttons">
+                <button class="ps-btn" data-pshape="circle" title="圆形照片">
+                    <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/></svg>
+                </button>
+                <button class="ps-btn active" data-pshape="square" title="圆角方形照片">
+                    <svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="3"/></svg>
+                </button>
+                <button class="ps-btn" data-pshape="hexagon">
+                    <svg viewBox="0 0 24 24"><polygon points="12,2 21,7 21,17 12,22 3,17 3,7"/></svg>
+                </button>
+                <button class="ps-btn" data-pshape="heart">
+                    <svg viewBox="0 0 24 24"><path d="M12 21s-8-5.5-8-11a5 5 0 0 1 8-4 5 5 0 0 1 8 4c0 5.5-8 11-8 11z"/></svg>
+                </button>
+            </div>
+        </section>
+
+        <!-- Settings -->
+        <section class="panel">
+            <h3 class="panel-title">填充设置</h3>
+
+            <div class="setting-row">
+                <label for="density-slider">填充密度</label>
+                <span class="setting-value" id="density-value">100%</span>
+            </div>
+            <input type="range" id="density-slider" min="0.5" max="1.5" step="0.05" value="1" class="range-slider">
+
+            <div class="setting-row" style="margin-top:14px;">
+                <label for="overlap-slider">照片间距</label>
+                <span class="setting-value" id="overlap-value">0%</span>
+            </div>
+            <input type="range" id="overlap-slider" min="0" max="0.12" step="0.01" value="0" class="range-slider">
+
+            <div class="setting-row" style="margin-top:16px;">
+                <label for="smart-toggle">智能排版</label>
+                <label class="switch">
+                    <input type="checkbox" id="smart-toggle" checked>
+                    <span class="switch-track"></span>
+                </label>
+            </div>
+            <p class="setting-hint">开启后按照片色彩形成柔和渐变</p>
+        </section>
+
+        <section class="panel photo-library-panel" id="photo-library-panel" hidden>
+            <div class="panel-title-row">
+                <h3 class="panel-title">照片顺序</h3>
+                <span class="drag-tip">拖拽排序</span>
+            </div>
+            <div class="photo-library" id="photo-library"></div>
+        </section>
+
+        <!-- Actions -->
+        <section class="panel">
+            <div class="btn-row">
+                <button class="btn btn-ghost" id="shuffle-btn">🔀 重新排列</button>
+                <button class="btn btn-ghost" id="clear-btn">🗑️ 清空</button>
+            </div>
+            <button class="btn btn-primary btn-block" id="export-btn" style="margin-top:8px;">
+                💾 导出图片
+            </button>
+        </section>
+
+        <div class="sidebar-footer">
+            <p>💡 照片越多，格位会自动变小</p>
+            <p>🖱️ 在画布上拖一张到另一张即可交换</p>
+        </div>
+    </aside>
+
+    <!-- ======================== Main ======================== -->
+    <main class="main-area">
+        <div class="canvas-toolbar">
+            <span class="status-dot"></span>
+            <span id="canvas-status">所有照片仅在本地处理</span>
+        </div>
+        <canvas id="wall-canvas"></canvas>
+        <div class="empty-state" id="empty-state">
+            <div class="empty-icon">🖼️</div>
+            <p>选择一个形状，然后上传照片</p>
+            <p class="empty-hint">照片会自动填充到你选择的形状中</p>
+        </div>
+    </main>
+</div>
+
+<!-- ======================== Shape extractor ======================== -->
+<div class="shape-editor" id="shape-editor" role="dialog" aria-modal="true" aria-labelledby="shape-editor-title">
+    <div class="shape-editor-card">
+        <div class="shape-editor-header">
+            <div>
+                <h2 id="shape-editor-title">提取图片轮廓</h2>
+                <p>调整黑白蒙版，白色区域将用于填充照片</p>
+            </div>
+            <button class="editor-close" id="shape-editor-close" aria-label="关闭">×</button>
+        </div>
+        <div class="shape-preview-grid">
+            <figure>
+                <canvas id="shape-source-preview"></canvas>
+                <figcaption>原始图片</figcaption>
+            </figure>
+            <figure>
+                <canvas id="shape-mask-preview"></canvas>
+                <figcaption>轮廓蒙版</figcaption>
+            </figure>
+        </div>
+        <div class="shape-editor-controls">
+            <label class="editor-field">
+                <span>提取方式</span>
+                <select id="shape-extract-mode">
+                    <option value="auto">智能识别背景</option>
+                    <option value="threshold">明暗阈值</option>
+                </select>
+            </label>
+            <label class="editor-field editor-range-field">
+                <span>识别阈值 <strong id="shape-threshold-value">42</strong></span>
+                <input type="range" id="shape-threshold" min="0" max="255" step="1" value="42">
+            </label>
+            <label class="editor-field editor-range-field">
+                <span>边缘平滑 <strong id="shape-smooth-value">1</strong></span>
+                <input type="range" id="shape-smooth" min="0" max="3" step="1" value="1">
+            </label>
+            <div class="editor-checks">
+                <label><input type="checkbox" id="shape-largest" checked> 仅保留最大主体</label>
+                <label><input type="checkbox" id="shape-invert"> 反选轮廓</label>
+            </div>
+        </div>
+        <div class="shape-editor-actions">
+            <button class="btn btn-ghost" id="shape-editor-cancel">取消</button>
+            <button class="btn btn-primary" id="shape-editor-confirm">使用此轮廓</button>
+        </div>
+    </div>
+</div>
+
+<!-- ======================== Lightbox ======================== -->
+<div class="lightbox" id="lightbox">
+    <button class="lb-close" id="lightbox-close" title="关闭 (Esc)">×</button>
+    <button class="lb-nav lb-prev" id="lightbox-prev" title="上一张 (←)">‹</button>
+    <button class="lb-nav lb-next" id="lightbox-next" title="下一张 (→)">›</button>
+    <div class="lb-content">
+        <img id="lightbox-img" src="" alt="放大查看">
+        <p class="lb-info" id="lightbox-info"></p>
+    </div>
+</div>
+
+<!-- ======================== Loading ======================== -->
+<div class="loading-overlay" id="loading-overlay">
+    <div class="spinner"></div>
+    <p id="loading-text">正在加载照片…</p>
+</div>
+
+<!-- ======================== Toast ======================== -->
+<div class="toast" id="toast"></div>
+
+<script src="js/shapes.js"></script>
+<script src="js/photowall.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
