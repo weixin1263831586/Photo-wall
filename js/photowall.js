@@ -26,11 +26,14 @@
         this.dragOverIndex = -1;
         this.pointer = null;
         this.onPhotoClick = null;
+        this.onBeforeSwap = null;
         this.onSwap = null;
         this.onLayout = null;
         this._animStart = 0;
         this._animRAF = null;
         this._pointerDown = null;
+        this._layerCanvas = document.createElement('canvas');
+        this._layerContext = this._layerCanvas.getContext('2d');
         this._bindEvents();
     }
 
@@ -68,6 +71,8 @@
         this.canvas.height = Math.round(this.cssHeight * this.dpr);
         this.canvas.style.width = this.cssWidth + 'px';
         this.canvas.style.height = this.cssHeight + 'px';
+        this._layerCanvas.width = this.canvas.width;
+        this._layerCanvas.height = this.canvas.height;
         this.ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
         if (this.shape) this.generateLayout(false, true);
     };
@@ -150,12 +155,13 @@
                 // Dynamic masks are stored as opaque black/white canvases, while
                 // built-in paths use transparent/white pixels. Requiring both a
                 // light colour and visible alpha handles both representations.
-                var inside = imageData[pixel + 3] > 127 && imageData[pixel] > 127 ? 1 : 0;
+                var softAlpha = Math.round(imageData[pixel + 3] * imageData[pixel] / 255);
+                var inside = softAlpha > 127 ? 1 : 0;
                 mask[y * w + x] = inside;
                 cleanMask.data[pixel] = 255;
                 cleanMask.data[pixel + 1] = 255;
                 cleanMask.data[pixel + 2] = 255;
-                cleanMask.data[pixel + 3] = inside ? 255 : 0;
+                cleanMask.data[pixel + 3] = softAlpha;
                 rowSum += inside;
                 integral[(y + 1) * (w + 1) + x + 1] = integral[y * (w + 1) + x + 1] + rowSum;
                 if (inside) {
@@ -271,7 +277,7 @@
         this._animRAF = requestAnimationFrame(frame);
     };
 
-    PhotoWall.prototype.render = function (progress) {
+    PhotoWall.prototype.render = function (progress, exportMode) {
         if (!this.cssWidth) return;
         var w = Math.round(this.cssWidth), h = Math.round(this.cssHeight);
         var ctx = this.ctx;
@@ -279,32 +285,41 @@
         ctx.clearRect(0, 0, w, h);
         if (!this.maskData) return;
 
-        ctx.save();
-        ctx.globalAlpha = 0.08;
-        ctx.drawImage(this.maskData.maskCanvas, 0, 0, w, h);
-        ctx.restore();
+        if (!exportMode) {
+            ctx.save();
+            ctx.globalAlpha = 0.08;
+            ctx.drawImage(this.maskData.maskCanvas, 0, 0, w, h);
+            ctx.restore();
+        }
         if (!this.layout.length) return;
 
-        var layer = document.createElement('canvas'); layer.width = w; layer.height = h;
-        var lx = layer.getContext('2d');
+        var layer = this._layerCanvas, lx = this._layerContext;
+        var targetWidth = Math.round(w * this.dpr), targetHeight = Math.round(h * this.dpr);
+        if (layer.width !== targetWidth || layer.height !== targetHeight) {
+            layer.width = targetWidth; layer.height = targetHeight;
+        }
+        lx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+        lx.clearRect(0, 0, w, h);
+        lx.globalCompositeOperation = 'source-over';
+        lx.globalAlpha = 1;
         var t = progress === undefined ? 1 : Math.max(0, Math.min(1, progress));
         var eased = 1 - Math.pow(1 - t, 3);
         for (var i = 0; i < this.layout.length; i++) {
-            if (i === this.draggingIndex) continue;
-            this._drawPhoto(lx, this.layout[i], i === this.hoveredIndex, eased, i === this.dragOverIndex);
+            if (!exportMode && i === this.draggingIndex) continue;
+            this._drawPhoto(lx, this.layout[i], !exportMode && i === this.hoveredIndex, eased, !exportMode && i === this.dragOverIndex);
         }
         lx.globalCompositeOperation = 'destination-in';
-        lx.drawImage(this.maskData.maskCanvas, 0, 0);
+        lx.drawImage(this.maskData.maskCanvas, 0, 0, w, h);
         ctx.drawImage(layer, 0, 0, w, h);
 
-        if (this.draggingIndex >= 0 && this.pointer) {
+        if (!exportMode && this.draggingIndex >= 0 && this.pointer) {
             var dragged = this.layout[this.draggingIndex];
             var ghost = Object.assign({}, dragged, { x: this.pointer.x, y: this.pointer.y });
             ctx.save(); ctx.globalAlpha = 0.82;
             this._drawPhoto(ctx, ghost, true, 1, false);
             ctx.restore();
         }
-        this._drawOutline(ctx);
+        if (!exportMode) this._drawOutline(ctx);
     };
 
     PhotoWall.prototype._drawPhoto = function (ctx, item, hovered, scale, dropTarget) {
@@ -363,20 +378,52 @@
         ctx.restore();
     };
 
-    PhotoWall.prototype.exportPNG = function (scale) {
-        scale = Math.max(1, Math.min(4, scale || 2));
-        this.render();
+    PhotoWall.prototype.createExportCanvas = function (options) {
+        options = options || {};
+        var scale = Math.max(1, Math.min(3, Number(options.scale) || 2));
+        var background = options.background === undefined ? '#ffffff' : options.background;
         var out = document.createElement('canvas');
         out.width = Math.round(this.cssWidth * scale); out.height = Math.round(this.cssHeight * scale);
         var ox = out.getContext('2d');
-        // The editor canvas is transparent outside the silhouette. Fill the
-        // exported bitmap first so image viewers do not show a checkerboard.
-        ox.fillStyle = '#ffffff';
-        ox.fillRect(0, 0, out.width, out.height);
         ox.imageSmoothingEnabled = true;
         ox.imageSmoothingQuality = 'high';
-        ox.drawImage(this.canvas, 0, 0, out.width, out.height);
-        return out.toDataURL('image/png');
+
+        // Render from the original photos at the requested scale. Scaling the
+        // visible editor canvas made 2×/3× exports larger, but not truly sharper.
+        ox.setTransform(scale, 0, 0, scale, 0, 0);
+        for (var i = 0; i < this.layout.length; i++) {
+            this._drawPhoto(ox, this.layout[i], false, 1, false);
+        }
+        ox.setTransform(1, 0, 0, 1, 0, 0);
+        ox.globalCompositeOperation = 'destination-in';
+        ox.drawImage(this.maskData.maskCanvas, 0, 0, out.width, out.height);
+
+        if (background && background !== 'transparent') {
+            ox.globalCompositeOperation = 'destination-over';
+            ox.fillStyle = background;
+            ox.fillRect(0, 0, out.width, out.height);
+        }
+        ox.globalCompositeOperation = 'source-over';
+        return out;
+    };
+
+    PhotoWall.prototype.exportPNG = function (scale) {
+        return this.createExportCanvas({ scale: scale, background: '#ffffff' }).toDataURL('image/png');
+    };
+
+    PhotoWall.prototype.getArrangement = function () {
+        return this.layout.map(function (item) { return item.photoIndex; });
+    };
+
+    PhotoWall.prototype.setArrangement = function (arrangement) {
+        if (!arrangement || !arrangement.length || !this.photos.length) return;
+        for (var i = 0; i < this.layout.length; i++) {
+            var photoIndex = arrangement[i % arrangement.length];
+            if (photoIndex < 0 || photoIndex >= this.photos.length) continue;
+            this.layout[i].photoIndex = photoIndex;
+            this.layout[i].photo = this.photos[photoIndex];
+        }
+        this.render();
     };
 
     PhotoWall.prototype._eventPoint = function (e) {
@@ -432,6 +479,7 @@
             var source = self._pointerDown.index, target = self.dragOverIndex;
             var wasDrag = self.draggingIndex >= 0;
             if (wasDrag && target >= 0) {
+                if (self.onBeforeSwap) self.onBeforeSwap(source, target);
                 self._swapAssignments(source, target);
                 if (self.onSwap) self.onSwap(source, target);
             } else if (!wasDrag && self.onPhotoClick) self.onPhotoClick(self.layout[source], source);

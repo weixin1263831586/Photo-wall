@@ -28,7 +28,7 @@
             </div>
 
             <!-- Custom image shape -->
-            <button class="btn btn-ghost btn-block" id="custom-shape-btn" style="margin-top:8px;">
+            <button class="btn btn-ghost btn-block custom-shape-trigger" id="custom-shape-btn">
                 🖼️ 用图片作为形状
             </button>
             <input type="file" id="shape-file-input" accept="image/*" hidden>
@@ -40,9 +40,9 @@
             <div class="drop-zone" id="drop-zone">
                 <div class="drop-zone-icon">📁</div>
                 <p class="drop-zone-text">点击或拖放照片到这里</p>
-                <p class="drop-zone-hint">支持 JPG / PNG / WebP，可多选</p>
+                <p class="drop-zone-hint">JPG / PNG / WebP · 最多 200 张 · 单张 40 MB</p>
             </div>
-            <input type="file" id="file-input" multiple accept="image/*" hidden>
+            <input type="file" id="file-input" multiple accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp" hidden>
             <div class="photo-count-bar">
                 已上传 <strong id="photo-count">0</strong> 张照片
             </div>
@@ -107,20 +107,12 @@
         <section class="panel photo-library-panel" id="photo-library-panel" hidden>
             <div class="panel-title-row">
                 <h3 class="panel-title">照片顺序</h3>
-                <span class="drag-tip">拖拽排序</span>
+                <div class="panel-title-actions">
+                    <span class="drag-tip">拖拽排序</span>
+                    <button class="text-action danger" id="clear-btn" type="button">清空</button>
+                </div>
             </div>
             <div class="photo-library" id="photo-library"></div>
-        </section>
-
-        <!-- Actions -->
-        <section class="panel">
-            <div class="btn-row">
-                <button class="btn btn-ghost" id="shuffle-btn">🔀 重新排列</button>
-                <button class="btn btn-ghost" id="clear-btn">🗑️ 清空</button>
-            </div>
-            <button class="btn btn-primary btn-block" id="export-btn" style="margin-top:8px;">
-                💾 导出图片
-            </button>
         </section>
 
         <div class="sidebar-footer">
@@ -131,17 +123,100 @@
 
     <!-- ======================== Main ======================== -->
     <main class="main-area">
-        <div class="canvas-toolbar">
-            <span class="status-dot"></span>
-            <span id="canvas-status">所有照片仅在本地处理</span>
-        </div>
-        <canvas id="wall-canvas"></canvas>
-        <div class="empty-state" id="empty-state">
-            <div class="empty-icon">🖼️</div>
-            <p>选择一个形状，然后上传照片</p>
-            <p class="empty-hint">照片会自动填充到你选择的形状中</p>
+        <header class="workspace-bar" aria-label="画布工具栏">
+            <div class="canvas-status-wrap">
+                <span class="status-dot"></span>
+                <span id="canvas-status">所有照片仅在本地处理</span>
+            </div>
+            <div class="workspace-actions">
+                <div class="history-actions" aria-label="历史操作">
+                    <button class="toolbar-icon-btn" id="undo-btn" type="button" title="撤销 (Ctrl/⌘ Z)" aria-label="撤销" disabled>
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 7H5v-4M5.6 7.1A8 8 0 1 1 4 14"/></svg>
+                    </button>
+                    <button class="toolbar-icon-btn" id="redo-btn" type="button" title="重做 (Ctrl/⌘ Shift Z)" aria-label="重做" disabled>
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 7h4v-4M18.4 7.1A8 8 0 1 0 20 14"/></svg>
+                    </button>
+                </div>
+                <button class="toolbar-btn" id="add-photos-btn" type="button">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+                    <span>添加照片</span>
+                </button>
+                <button class="toolbar-btn" id="shuffle-btn" type="button" disabled>
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16 3h5v5M4 20l5.5-5.5M21 16v5h-5M15 5l-11 11M14.5 14.5 21 21"/></svg>
+                    <span>重新排列</span>
+                </button>
+                <button class="toolbar-btn toolbar-primary" id="export-btn" type="button" disabled>
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg>
+                    <span>导出图片</span>
+                </button>
+            </div>
+        </header>
+        <div class="canvas-help" id="canvas-help">拖拽照片可交换位置 · 点击照片可查看原图</div>
+        <div class="canvas-stage" id="canvas-stage">
+            <canvas id="wall-canvas"></canvas>
+            <div class="empty-state" id="empty-state">
+                <div class="empty-visual" aria-hidden="true">
+                    <svg viewBox="0 0 72 72"><rect x="9" y="14" width="54" height="44" rx="8"/><circle cx="27" cy="30" r="5"/><path d="M14 52l15-14 10 9 7-6 12 11"/></svg>
+                </div>
+                <p>把照片变成专属拼贴墙</p>
+                <p class="empty-hint">拖放照片到画布，或点击下方按钮开始</p>
+                <button class="btn btn-primary empty-upload-btn" id="empty-upload-btn" type="button">选择照片</button>
+            </div>
         </div>
     </main>
+</div>
+
+<!-- ======================== Export dialog ======================== -->
+<div class="modal" id="export-dialog" role="dialog" aria-modal="true" aria-labelledby="export-title" aria-hidden="true">
+    <div class="modal-card export-card">
+        <div class="modal-header">
+            <div>
+                <span class="modal-eyebrow">完成作品</span>
+                <h2 id="export-title">导出图片</h2>
+                <p>选择适合分享或打印的输出设置</p>
+            </div>
+            <button class="editor-close" id="export-close" type="button" aria-label="关闭">×</button>
+        </div>
+        <div class="export-form">
+            <label class="export-field">
+                <span>文件名</span>
+                <input type="text" id="export-name" value="我的照片墙" maxlength="60">
+            </label>
+            <fieldset class="export-field">
+                <legend>图片格式</legend>
+                <div class="option-segments" id="export-format-options">
+                    <label><input type="radio" name="export-format" value="png" checked><span>PNG<small>画质最佳</small></span></label>
+                    <label><input type="radio" name="export-format" value="jpeg"><span>JPG<small>文件较小</small></span></label>
+                    <label><input type="radio" name="export-format" value="webp"><span>WebP<small>体积更小</small></span></label>
+                </div>
+            </fieldset>
+            <fieldset class="export-field">
+                <legend>清晰度</legend>
+                <div class="option-segments compact" id="export-scale-options">
+                    <label><input type="radio" name="export-scale" value="1"><span>标准 <small>1×</small></span></label>
+                    <label><input type="radio" name="export-scale" value="2" checked><span>高清 <small>2×</small></span></label>
+                    <label><input type="radio" name="export-scale" value="3"><span>超清 <small>3×</small></span></label>
+                </div>
+            </fieldset>
+            <fieldset class="export-field">
+                <legend>画布背景</legend>
+                <div class="background-options" id="export-background-options">
+                    <label><input type="radio" name="export-background" value="#ffffff" checked><span class="background-swatch white"></span><span>白色</span></label>
+                    <label><input type="radio" name="export-background" value="#111118"><span class="background-swatch dark"></span><span>深色</span></label>
+                    <label id="transparent-background-option"><input type="radio" name="export-background" value="transparent"><span class="background-swatch transparent"></span><span>透明</span></label>
+                    <label class="custom-colour-option"><input type="radio" name="export-background" value="custom"><input type="color" id="export-background-color" value="#e9e6ff" aria-label="自定义背景色"><span>自定义</span></label>
+                </div>
+            </fieldset>
+        </div>
+        <div class="export-summary">
+            <span>输出尺寸</span>
+            <strong id="export-dimensions">—</strong>
+        </div>
+        <div class="modal-actions">
+            <button class="btn btn-ghost" id="export-cancel" type="button">取消</button>
+            <button class="btn btn-primary export-confirm" id="export-confirm" type="button">导出并保存</button>
+        </div>
+    </div>
 </div>
 
 <!-- ======================== Shape extractor ======================== -->
@@ -161,28 +236,56 @@
             </figure>
             <figure>
                 <canvas id="shape-mask-preview"></canvas>
-                <figcaption>轮廓蒙版</figcaption>
+                <figcaption id="shape-mask-caption">轮廓蒙版</figcaption>
             </figure>
         </div>
         <div class="shape-editor-controls">
             <label class="editor-field">
                 <span>提取方式</span>
                 <select id="shape-extract-mode">
-                    <option value="auto">智能识别背景</option>
+                    <option value="portrait">人像智能抠图（推荐）</option>
+                    <option value="auto">纯色背景识别</option>
                     <option value="threshold">明暗阈值</option>
                 </select>
             </label>
             <label class="editor-field editor-range-field">
-                <span>识别阈值 <strong id="shape-threshold-value">42</strong></span>
-                <input type="range" id="shape-threshold" min="0" max="255" step="1" value="42">
+                <span>背景去除强度 <strong id="shape-threshold-value">46</strong></span>
+                <input type="range" id="shape-threshold" min="0" max="255" step="1" value="46">
             </label>
             <label class="editor-field editor-range-field">
                 <span>边缘平滑 <strong id="shape-smooth-value">1</strong></span>
                 <input type="range" id="shape-smooth" min="0" max="3" step="1" value="1">
             </label>
+            <label class="editor-field editor-range-field">
+                <span>智能降噪 <strong id="shape-denoise-value">2</strong></span>
+                <input type="range" id="shape-denoise" min="0" max="4" step="1" value="2">
+            </label>
             <div class="editor-checks">
                 <label><input type="checkbox" id="shape-largest" checked> 仅保留最大主体</label>
                 <label><input type="checkbox" id="shape-invert"> 反选轮廓</label>
+            </div>
+            <p class="shape-extract-tip" id="shape-extract-tip">适合人物照片：从图片边缘识别背景，并保护相近肤色</p>
+            <div class="mask-brush-editor">
+                <div class="mask-brush-header">
+                    <div>
+                        <strong>手动修补轮廓</strong>
+                        <span>直接在右侧蒙版上涂抹</span>
+                    </div>
+                    <div class="mask-brush-actions">
+                        <button type="button" class="text-action" id="mask-undo-stroke" disabled>撤销一笔</button>
+                        <button type="button" class="text-action danger" id="mask-reset-strokes" disabled>清除修补</button>
+                    </div>
+                </div>
+                <div class="mask-brush-controls">
+                    <div class="brush-mode-buttons" id="brush-mode-buttons">
+                        <button type="button" class="brush-mode-btn active" data-brush-mode="keep"><span class="brush-dot keep"></span>保留主体</button>
+                        <button type="button" class="brush-mode-btn" data-brush-mode="erase"><span class="brush-dot erase"></span>擦除背景</button>
+                    </div>
+                    <label class="brush-size-field">
+                        <span>笔刷 <strong id="mask-brush-size-value">28</strong></span>
+                        <input type="range" id="mask-brush-size" min="8" max="64" step="2" value="28">
+                    </label>
+                </div>
             </div>
         </div>
         <div class="shape-editor-actions">

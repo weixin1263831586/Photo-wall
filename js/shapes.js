@@ -163,6 +163,7 @@
                         height: Math.round(canvasH * viewScale)
                     },
                     paths: [thumbPath || 'M0,0 L1,0 L1,1 L0,1 Z'],
+                    thumbnailViewBox: { width: thumbW, height: thumbH },
                     maskCanvas: canvas,
                     maskCanvasW: canvasW,
                     maskCanvasH: canvasH,
@@ -182,6 +183,7 @@
         var threshold = Number(options.threshold === undefined ? 42 : options.threshold);
         var mode = options.mode || 'auto';
         var smooth = Math.max(0, Math.min(3, Number(options.smooth) || 0));
+        var denoise = Math.max(0, Math.min(4, Number(options.denoise) || 0));
         var scale = Math.min(maxDim / img.naturalWidth, maxDim / img.naturalHeight, 1);
         var w = Math.max(1, Math.ceil(img.naturalWidth * scale));
         var h = Math.max(1, Math.ceil(img.naturalHeight * scale));
@@ -191,46 +193,60 @@
         sourceCtx.drawImage(img, 0, 0, w, h);
         var imageData = sourceCtx.getImageData(0, 0, w, h);
         var data = imageData.data, total = w * h;
-        var transparentCount = 0, borderR = 0, borderG = 0, borderB = 0, borderSamples = 0;
+        var transparentCount = 0;
 
         for (var by = 0; by < h; by++) {
             for (var bx = 0; bx < w; bx++) {
                 var bi = (by * w + bx) * 4;
                 if (data[bi + 3] < 245) transparentCount++;
-                if (by < 3 || by >= h - 3 || bx < 3 || bx >= w - 3) {
-                    borderR += data[bi]; borderG += data[bi + 1]; borderB += data[bi + 2];
-                    borderSamples++;
-                }
             }
         }
-        borderR /= Math.max(1, borderSamples);
-        borderG /= Math.max(1, borderSamples);
-        borderB /= Math.max(1, borderSamples);
-        var useAlpha = mode === 'auto' && transparentCount > total * 0.01;
+        var useAlpha = mode !== 'threshold' && transparentCount > total * 0.01;
         var mask = new Uint8Array(total), detectedCount = 0;
 
-        for (var i = 0; i < total; i++) {
-            var p = i * 4, r = data[p], g = data[p + 1], b = data[p + 2], a = data[p + 3];
-            var brightness = (r + g + b) / 3;
-            var colourDistance = Math.sqrt(
-                (r - borderR) * (r - borderR) +
-                (g - borderG) * (g - borderG) +
-                (b - borderB) * (b - borderB)
-            ) / Math.sqrt(3);
-            var inside;
-            if (useAlpha) inside = a > threshold;
-            else if (mode === 'threshold') inside = brightness < threshold;
-            else inside = a > 40 && colourDistance > threshold;
-            if (options.invert) inside = !inside && a > 15;
-            mask[i] = inside ? 1 : 0;
-            if (inside) detectedCount++;
+        if (!useAlpha && mode === 'portrait') {
+            mask = ShapeFactory._extractPortraitMask(data, w, h, threshold, denoise);
+        } else {
+            var palette = ShapeFactory._sampleBackgroundPalette(data, w, h);
+            for (var i = 0; i < total; i++) {
+                var p = i * 4, r = data[p], g = data[p + 1], b = data[p + 2], a = data[p + 3];
+                var brightness = (r + g + b) / 3;
+                var colourDistance = ShapeFactory._nearestPaletteDistance(r, g, b, palette);
+                var inside;
+                if (useAlpha) inside = a > threshold;
+                else if (mode === 'threshold') inside = brightness < threshold;
+                else inside = a > 40 && colourDistance > threshold;
+                mask[i] = inside ? 1 : 0;
+            }
+        }
+
+        for (var mi = 0; mi < total; mi++) {
+            if (options.invert) mask[mi] = !mask[mi] && data[mi * 4 + 3] > 15 ? 1 : 0;
+            if (mask[mi]) detectedCount++;
         }
 
         if (detectedCount < total * 0.001) {
             for (var fallback = 0; fallback < total; fallback++) mask[fallback] = data[fallback * 4 + 3] > 40 ? 1 : 0;
         }
+        for (var noisePass = 0; noisePass < Math.ceil(denoise / 2); noisePass++) {
+            mask = ShapeFactory._despeckleMask(mask, w, h);
+        }
+        if (denoise > 0 && options.keepLargest === false) {
+            var minimumArea = Math.max(2, Math.round(total * denoise * denoise * 0.000035));
+            mask = ShapeFactory._removeSmallComponents(mask, w, h, minimumArea);
+        }
+        if (mode === 'portrait' && !options.invert) {
+            // A light closing pass repairs tiny breaks without the detail loss
+            // caused by the old opening pass (hair and fingers were eroded).
+            var bridgeRadius = Math.max(1, Math.round(Math.min(w, h) * (0.0025 + denoise * 0.0007)));
+            mask = ShapeFactory._closeMask(mask, w, h, bridgeRadius);
+        }
         if (options.keepLargest !== false) mask = ShapeFactory._keepLargestComponent(mask, w, h);
+        if (mode === 'portrait' && !options.invert) {
+            mask = ShapeFactory._fillMaskHoles(mask, w, h);
+        }
         for (var pass = 0; pass < smooth; pass++) mask = ShapeFactory._smoothMask(mask, w, h);
+        if (mode === 'portrait' && !options.invert) mask = ShapeFactory._fillMaskHoles(mask, w, h);
 
         var canvas = document.createElement('canvas');
         canvas.width = w; canvas.height = h;
@@ -241,12 +257,340 @@
             output.data[oi] = value; output.data[oi + 1] = value; output.data[oi + 2] = value; output.data[oi + 3] = 255;
         }
         ctx.putImageData(output, 0, 0);
-        return { canvas: canvas, sourceCanvas: source, width: w, height: h, mask: mask };
+        if (options.strokes && options.strokes.length) {
+            mask = ShapeFactory._paintMaskStrokes(ctx, mask, w, h, options.strokes);
+        }
+        var finalCount = 0;
+        for (var countIndex = 0; countIndex < mask.length; countIndex++) finalCount += mask[countIndex];
+        var stats = ShapeFactory._measureMask(mask, w, h);
+        return {
+            canvas: canvas,
+            sourceCanvas: source,
+            width: w,
+            height: h,
+            mask: mask,
+            coverage: finalCount / Math.max(1, total),
+            stats: stats
+        };
+    };
+
+    ShapeFactory._colourDistance = function (r1, g1, b1, r2, g2, b2) {
+        return Math.sqrt(
+            (r1 - r2) * (r1 - r2) +
+            (g1 - g2) * (g1 - g2) +
+            (b1 - b2) * (b1 - b2)
+        ) / Math.sqrt(3);
+    };
+
+    /**
+     * Sample several small corner/edge patches instead of averaging the whole
+     * border. A portrait often touches the bottom edge, so a full-border mean
+     * is easily contaminated by clothes or hair.
+     */
+    ShapeFactory._sampleBackgroundPalette = function (data, w, h) {
+        var patch = Math.max(3, Math.round(Math.min(w, h) * 0.055));
+        var points = [
+            [0, 0], [w - patch, 0], [0, h - patch], [w - patch, h - patch],
+            [Math.round(w * 0.2), 0], [Math.round(w * 0.8) - patch, 0],
+            [0, Math.round(h * 0.28)], [w - patch, Math.round(h * 0.28)]
+        ];
+        return points.map(function (point) {
+            var rs = [], gs = [], bs = [];
+            var x0 = Math.max(0, Math.min(w - patch, point[0]));
+            var y0 = Math.max(0, Math.min(h - patch, point[1]));
+            for (var y = y0; y < y0 + patch; y++) {
+                for (var x = x0; x < x0 + patch; x++) {
+                    var p = (y * w + x) * 4;
+                    if (data[p + 3] < 32) continue;
+                    rs.push(data[p]); gs.push(data[p + 1]); bs.push(data[p + 2]);
+                }
+            }
+            rs.sort(function (a, b) { return a - b; });
+            gs.sort(function (a, b) { return a - b; });
+            bs.sort(function (a, b) { return a - b; });
+            var middle = Math.floor(rs.length / 2);
+            return { r: rs[middle] || 0, g: gs[middle] || 0, b: bs[middle] || 0 };
+        });
+    };
+
+    ShapeFactory._nearestPaletteDistance = function (r, g, b, palette) {
+        var best = Infinity;
+        for (var i = 0; i < palette.length; i++) {
+            var colour = palette[i];
+            var distance = ShapeFactory._colourDistance(r, g, b, colour.r, colour.g, colour.b);
+            if (distance < best) best = distance;
+        }
+        return best;
+    };
+
+    /** Convert to perceptual-ish YCbCr channels and apply a small bilateral
+     * prefilter. It suppresses JPEG grain and wood texture without averaging
+     * colours across a face/background boundary. */
+    ShapeFactory._buildPortraitChannels = function (data, w, h, denoise) {
+        var total = w * h;
+        var rawY = new Float32Array(total), rawCb = new Float32Array(total), rawCr = new Float32Array(total);
+        for (var i = 0; i < total; i++) {
+            var p = i * 4, r = data[p], g = data[p + 1], b = data[p + 2];
+            rawY[i] = 0.299 * r + 0.587 * g + 0.114 * b;
+            rawCb[i] = 128 - 0.168736 * r - 0.331264 * g + 0.5 * b;
+            rawCr[i] = 128 + 0.5 * r - 0.418688 * g - 0.081312 * b;
+        }
+        if (!denoise) return { y: rawY, cb: rawCb, cr: rawCr };
+
+        var radius = denoise >= 3 ? 2 : 1;
+        var rangeLimit = 16 + denoise * 5;
+        var outY = new Float32Array(total), outCb = new Float32Array(total), outCr = new Float32Array(total);
+        for (var py = 0; py < h; py++) {
+            for (var px = 0; px < w; px++) {
+                var index = py * w + px;
+                var sumY = rawY[index] * 2, sumCb = rawCb[index] * 2, sumCr = rawCr[index] * 2, weight = 2;
+                for (var oy = -radius; oy <= radius; oy++) {
+                    var ny = py + oy;
+                    if (ny < 0 || ny >= h) continue;
+                    for (var ox = -radius; ox <= radius; ox++) {
+                        var nx = px + ox;
+                        if ((ox === 0 && oy === 0) || nx < 0 || nx >= w) continue;
+                        var neighbour = ny * w + nx;
+                        var colourDelta = Math.abs(rawY[index] - rawY[neighbour]) * 0.55 +
+                            (Math.abs(rawCb[index] - rawCb[neighbour]) + Math.abs(rawCr[index] - rawCr[neighbour])) * 0.9;
+                        if (colourDelta > rangeLimit) continue;
+                        sumY += rawY[neighbour]; sumCb += rawCb[neighbour]; sumCr += rawCr[neighbour]; weight++;
+                    }
+                }
+                outY[index] = sumY / weight;
+                outCb[index] = sumCb / weight;
+                outCr[index] = sumCr / weight;
+            }
+        }
+        return { y: outY, cb: outCb, cr: outCr };
+    };
+
+    /** Build several robust background models, then discard edge patches that
+     * are not supported by another patch (usually clothes touching a corner). */
+    ShapeFactory._samplePortraitBackground = function (channels, w, h) {
+        var patch = Math.max(3, Math.round(Math.min(w, h) * 0.045));
+        var points = [
+            [0, 0], [w - patch, 0], [0, h - patch], [w - patch, h - patch],
+            [Math.round(w * 0.22), 0], [Math.round(w * 0.5) - Math.floor(patch / 2), 0],
+            [Math.round(w * 0.78) - patch, 0], [0, Math.round(h * 0.22)],
+            [w - patch, Math.round(h * 0.22)], [0, Math.round(h * 0.52)],
+            [w - patch, Math.round(h * 0.52)]
+        ];
+        var models = points.map(function (point) {
+            var ys = [], cbs = [], crs = [];
+            var x0 = Math.max(0, Math.min(w - patch, point[0]));
+            var y0 = Math.max(0, Math.min(h - patch, point[1]));
+            for (var y = y0; y < Math.min(h, y0 + patch); y++) {
+                for (var x = x0; x < Math.min(w, x0 + patch); x++) {
+                    var index = y * w + x;
+                    ys.push(channels.y[index]); cbs.push(channels.cb[index]); crs.push(channels.cr[index]);
+                }
+            }
+            ys.sort(function (a, b) { return a - b; });
+            cbs.sort(function (a, b) { return a - b; });
+            crs.sort(function (a, b) { return a - b; });
+            var middle = Math.floor(ys.length / 2);
+            return { y: ys[middle] || 0, cb: cbs[middle] || 128, cr: crs[middle] || 128 };
+        });
+        var supportCounts = models.map(function (model, index) {
+            var support = 0;
+            for (var i = 0; i < models.length; i++) {
+                if (i === index) continue;
+                var other = models[i];
+                var dy = Math.abs(model.y - other.y);
+                var dc = Math.hypot(model.cb - other.cb, model.cr - other.cr);
+                if (dy * 0.45 + dc * 1.4 < 26) support++;
+            }
+            return support;
+        });
+        var maxSupport = Math.max.apply(Math, supportCounts);
+        var supported = models.filter(function (model, index) {
+            return supportCounts[index] >= Math.max(1, maxSupport - 2);
+        });
+        return supported.length >= 2 ? supported : models;
+    };
+
+    /**
+     * Edge-aware portrait silhouette extraction. A pixel is background only
+     * when it resembles a robust edge model and is reachable from the image
+     * border. Chroma is weighted above brightness so shadows and wall seams are
+     * removed while beige skin remains protected by the strong-edge barrier.
+     */
+    ShapeFactory._extractPortraitMask = function (data, w, h, threshold, denoise) {
+        var total = w * h;
+        var channels = ShapeFactory._buildPortraitChannels(data, w, h, denoise);
+        var models = ShapeFactory._samplePortraitBackground(channels, w, h);
+        var candidate = new Uint8Array(total), outside = new Uint8Array(total), edge = new Float32Array(total);
+        var queue = new Int32Array(total), head = 0, tail = 0;
+        var localLimit = Math.max(13, threshold * 0.55);
+        var edgeLimit = Math.max(22, threshold * 0.78);
+
+        for (var y = 0; y < h; y++) {
+            for (var x = 0; x < w; x++) {
+                var index = y * w + x;
+                var best = Infinity;
+                for (var modelIndex = 0; modelIndex < models.length; modelIndex++) {
+                    var model = models[modelIndex];
+                    var dy = Math.abs(channels.y[index] - model.y);
+                    var dc = Math.hypot(channels.cb[index] - model.cb, channels.cr[index] - model.cr);
+                    var score = Math.hypot(dy * 0.58, dc * 1.55);
+                    if (score < best) best = score;
+                }
+                candidate[index] = data[index * 4 + 3] < 20 || best <= threshold ? 1 : 0;
+
+                var left = y * w + Math.max(0, x - 1), right = y * w + Math.min(w - 1, x + 1);
+                var top = Math.max(0, y - 1) * w + x, bottom = Math.min(h - 1, y + 1) * w + x;
+                var horizontal = Math.abs(channels.y[left] - channels.y[right]) * 0.55 +
+                    Math.hypot(channels.cb[left] - channels.cb[right], channels.cr[left] - channels.cr[right]) * 1.25;
+                var vertical = Math.abs(channels.y[top] - channels.y[bottom]) * 0.55 +
+                    Math.hypot(channels.cb[top] - channels.cb[bottom], channels.cr[top] - channels.cr[bottom]) * 1.25;
+                edge[index] = Math.max(horizontal, vertical);
+            }
+        }
+
+        function enqueue(index) {
+            if (index < 0 || index >= total || outside[index] || !candidate[index]) return;
+            outside[index] = 1; queue[tail++] = index;
+        }
+        for (var sx = 0; sx < w; sx++) { enqueue(sx); enqueue((h - 1) * w + sx); }
+        for (var sy = 1; sy < h - 1; sy++) { enqueue(sy * w); enqueue(sy * w + w - 1); }
+
+        function visit(current, next) {
+            if (outside[next] || !candidate[next]) return;
+            var dy = Math.abs(channels.y[current] - channels.y[next]);
+            var dc = Math.hypot(channels.cb[current] - channels.cb[next], channels.cr[current] - channels.cr[next]);
+            if (dy * 0.55 + dc * 1.25 > localLimit || edge[next] > edgeLimit) return;
+            outside[next] = 1; queue[tail++] = next;
+        }
+        while (head < tail) {
+            var current = queue[head++], cx = current % w;
+            if (cx > 0) visit(current, current - 1);
+            if (cx < w - 1) visit(current, current + 1);
+            if (current >= w) visit(current, current - w);
+            if (current < total - w) visit(current, current + w);
+        }
+
+        var mask = new Uint8Array(total);
+        for (var m = 0; m < total; m++) mask[m] = !outside[m] && data[m * 4 + 3] > 15 ? 1 : 0;
+        return mask;
+    };
+
+    ShapeFactory._fillMaskHoles = function (mask, w, h) {
+        var outside = new Uint8Array(mask.length), queue = new Int32Array(mask.length);
+        var head = 0, tail = 0;
+        function enqueue(index) {
+            if (index < 0 || index >= mask.length || mask[index] || outside[index]) return;
+            outside[index] = 1; queue[tail++] = index;
+        }
+        for (var x = 0; x < w; x++) { enqueue(x); enqueue((h - 1) * w + x); }
+        for (var y = 1; y < h - 1; y++) { enqueue(y * w); enqueue(y * w + w - 1); }
+        while (head < tail) {
+            var current = queue[head++], cx = current % w;
+            if (cx > 0) enqueue(current - 1);
+            if (cx < w - 1) enqueue(current + 1);
+            if (current >= w) enqueue(current - w);
+            if (current < mask.length - w) enqueue(current + w);
+        }
+        var result = new Uint8Array(mask.length);
+        for (var i = 0; i < mask.length; i++) result[i] = mask[i] || !outside[i] ? 1 : 0;
+        return result;
+    };
+
+    /** Close tiny gaps between face, neck and clothing before component filtering. */
+    ShapeFactory._closeMask = function (mask, w, h, radius) {
+        var dilated = new Uint8Array(mask.length);
+        var result = new Uint8Array(mask.length);
+        for (var y = 0; y < h; y++) {
+            for (var x = 0; x < w; x++) {
+                var found = false;
+                for (var oy = -radius; oy <= radius && !found; oy++) {
+                    var ny = y + oy;
+                    if (ny < 0 || ny >= h) continue;
+                    for (var ox = -radius; ox <= radius; ox++) {
+                        var nx = x + ox;
+                        if (nx >= 0 && nx < w && mask[ny * w + nx]) { found = true; break; }
+                    }
+                }
+                dilated[y * w + x] = found ? 1 : 0;
+            }
+        }
+        for (var ey = 0; ey < h; ey++) {
+            for (var ex = 0; ex < w; ex++) {
+                var filled = true;
+                for (var eoy = -radius; eoy <= radius && filled; eoy++) {
+                    var eny = ey + eoy;
+                    if (eny < 0 || eny >= h) continue;
+                    for (var eox = -radius; eox <= radius; eox++) {
+                        var enx = ex + eox;
+                        if (enx < 0 || enx >= w) continue;
+                        if (!dilated[eny * w + enx]) { filled = false; break; }
+                    }
+                }
+                result[ey * w + ex] = filled ? 1 : 0;
+            }
+        }
+        return result;
+    };
+
+    /** Remove isolated hairline artefacts such as wall seams and image noise. */
+    ShapeFactory._openMask = function (mask, w, h, radius) {
+        var eroded = new Uint8Array(mask.length);
+        var result = new Uint8Array(mask.length);
+        for (var y = 0; y < h; y++) {
+            for (var x = 0; x < w; x++) {
+                var filled = true;
+                for (var oy = -radius; oy <= radius && filled; oy++) {
+                    var ny = y + oy;
+                    if (ny < 0 || ny >= h) { filled = false; break; }
+                    for (var ox = -radius; ox <= radius; ox++) {
+                        var nx = x + ox;
+                        if (nx < 0 || nx >= w || !mask[ny * w + nx]) { filled = false; break; }
+                    }
+                }
+                eroded[y * w + x] = filled ? 1 : 0;
+            }
+        }
+        for (var dy = 0; dy < h; dy++) {
+            for (var dx = 0; dx < w; dx++) {
+                var found = false;
+                for (var doy = -radius; doy <= radius && !found; doy++) {
+                    var dny = dy + doy;
+                    if (dny < 0 || dny >= h) continue;
+                    for (var dox = -radius; dox <= radius; dox++) {
+                        var dnx = dx + dox;
+                        if (dnx >= 0 && dnx < w && eroded[dny * w + dnx]) { found = true; break; }
+                    }
+                }
+                result[dy * w + dx] = found ? 1 : 0;
+            }
+        }
+        return result;
+    };
+
+    /**
+     * A photo-wall shape needs an outer silhouette, not facial features or gaps
+     * between folded arms. Fill bounded gaps across every meaningful scanline.
+     */
+    ShapeFactory._solidifySilhouette = function (mask, w, h) {
+        var result = new Uint8Array(mask);
+        var minimumSpan = Math.max(3, Math.round(w * 0.025));
+        for (var y = 0; y < h; y++) {
+            var left = w, right = -1, count = 0;
+            for (var x = 0; x < w; x++) {
+                if (!mask[y * w + x]) continue;
+                if (x < left) left = x;
+                right = x;
+                count++;
+            }
+            if (right - left + 1 < minimumSpan || count < 2) continue;
+            for (var fillX = left; fillX <= right; fillX++) result[y * w + fillX] = 1;
+        }
+        return result;
     };
 
     ShapeFactory._keepLargestComponent = function (mask, w, h) {
         var visited = new Uint8Array(mask.length), queue = new Int32Array(mask.length);
-        var best = [], directions = [-1, 1, -w, w];
+        var best = [], directions = [-1, 1, -w, w, -w - 1, -w + 1, w - 1, w + 1];
         for (var start = 0; start < mask.length; start++) {
             if (!mask[start] || visited[start]) continue;
             var head = 0, tail = 0, component = [];
@@ -255,7 +599,8 @@
                 var current = queue[head++]; component.push(current);
                 var x = current % w;
                 for (var d = 0; d < directions.length; d++) {
-                    if ((d === 0 && x === 0) || (d === 1 && x === w - 1)) continue;
+                    if (((d === 0 || d === 4 || d === 6) && x === 0) ||
+                        ((d === 1 || d === 5 || d === 7) && x === w - 1)) continue;
                     var next = current + directions[d];
                     if (next >= 0 && next < mask.length && mask[next] && !visited[next]) {
                         visited[next] = 1; queue[tail++] = next;
@@ -266,6 +611,53 @@
         }
         var result = new Uint8Array(mask.length);
         for (var i = 0; i < best.length; i++) result[best[i]] = 1;
+        return result;
+    };
+
+    /** Remove only truly small foreground islands. Unlike morphological
+     * opening this keeps thin but connected details such as hair and fingers. */
+    ShapeFactory._removeSmallComponents = function (mask, w, h, minimumArea) {
+        var visited = new Uint8Array(mask.length), queue = new Int32Array(mask.length);
+        var result = new Uint8Array(mask.length);
+        var directions = [-1, 1, -w, w, -w - 1, -w + 1, w - 1, w + 1];
+        for (var start = 0; start < mask.length; start++) {
+            if (!mask[start] || visited[start]) continue;
+            var head = 0, tail = 0, component = [];
+            queue[tail++] = start; visited[start] = 1;
+            while (head < tail) {
+                var current = queue[head++], x = current % w;
+                component.push(current);
+                for (var d = 0; d < directions.length; d++) {
+                    if (((d === 0 || d === 4 || d === 6) && x === 0) ||
+                        ((d === 1 || d === 5 || d === 7) && x === w - 1)) continue;
+                    var next = current + directions[d];
+                    if (next >= 0 && next < mask.length && mask[next] && !visited[next]) {
+                        visited[next] = 1; queue[tail++] = next;
+                    }
+                }
+            }
+            if (component.length < minimumArea) continue;
+            for (var c = 0; c < component.length; c++) result[component[c]] = 1;
+        }
+        return result;
+    };
+
+    /** Conservative impulse filter: remove isolated foreground pixels and fill
+     * isolated pinholes, but leave ordinary contour pixels unchanged. */
+    ShapeFactory._despeckleMask = function (mask, w, h) {
+        var result = new Uint8Array(mask);
+        for (var y = 1; y < h - 1; y++) {
+            for (var x = 1; x < w - 1; x++) {
+                var index = y * w + x, neighbours = 0;
+                for (var oy = -1; oy <= 1; oy++) {
+                    for (var ox = -1; ox <= 1; ox++) {
+                        if (ox || oy) neighbours += mask[(y + oy) * w + x + ox];
+                    }
+                }
+                if (mask[index] && neighbours <= 1) result[index] = 0;
+                else if (!mask[index] && neighbours >= 7) result[index] = 1;
+            }
+        }
         return result;
     };
 
@@ -288,12 +680,65 @@
         return result;
     };
 
+    ShapeFactory._paintMaskStrokes = function (ctx, mask, w, h, strokes) {
+        ctx.save();
+        ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+        strokes.forEach(function (stroke) {
+            if (!stroke.points || !stroke.points.length) return;
+            ctx.strokeStyle = stroke.mode === 'erase' ? '#000' : '#fff';
+            ctx.fillStyle = ctx.strokeStyle;
+            ctx.lineWidth = Math.max(2, stroke.size * Math.min(w, h));
+            ctx.beginPath();
+            var first = stroke.points[0];
+            ctx.moveTo(first.x * w, first.y * h);
+            for (var i = 1; i < stroke.points.length; i++) {
+                ctx.lineTo(stroke.points[i].x * w, stroke.points[i].y * h);
+            }
+            if (stroke.points.length === 1) {
+                ctx.arc(first.x * w, first.y * h, ctx.lineWidth / 2, 0, Math.PI * 2);
+                ctx.fill();
+            } else {
+                ctx.stroke();
+            }
+        });
+        ctx.restore();
+        var painted = ctx.getImageData(0, 0, w, h).data;
+        var result = new Uint8Array(mask.length);
+        for (var index = 0; index < result.length; index++) result[index] = painted[index * 4] > 127 ? 1 : 0;
+        return result;
+    };
+
+    ShapeFactory._measureMask = function (mask, w, h) {
+        var visited = new Uint8Array(mask.length), queue = new Int32Array(mask.length);
+        var components = 0, smallComponents = 0, edgePixels = 0;
+        for (var y = 0; y < h; y++) {
+            for (var x = 0; x < w; x++) {
+                var index = y * w + x;
+                if (mask[index] && (x === 0 || x === w - 1 || y === 0 || y === h - 1 ||
+                    !mask[index - 1] || !mask[index + 1] || !mask[index - w] || !mask[index + w])) edgePixels++;
+                if (!mask[index] || visited[index]) continue;
+                components++;
+                var head = 0, tail = 0;
+                queue[tail++] = index; visited[index] = 1;
+                while (head < tail) {
+                    var current = queue[head++], cx = current % w;
+                    if (cx > 0 && mask[current - 1] && !visited[current - 1]) { visited[current - 1] = 1; queue[tail++] = current - 1; }
+                    if (cx < w - 1 && mask[current + 1] && !visited[current + 1]) { visited[current + 1] = 1; queue[tail++] = current + 1; }
+                    if (current >= w && mask[current - w] && !visited[current - w]) { visited[current - w] = 1; queue[tail++] = current - w; }
+                    if (current < mask.length - w && mask[current + w] && !visited[current + w]) { visited[current + w] = 1; queue[tail++] = current + w; }
+                }
+                if (tail < Math.max(3, mask.length * 0.00008)) smallComponents++;
+            }
+        }
+        return { components: components, smallComponents: smallComponents, edgeRatio: edgePixels / Math.max(1, w * h) };
+    };
+
     ShapeFactory.fromImage = function (img, options) {
         return new Promise(function (resolve, reject) {
             setTimeout(function () {
                 try {
                     if (typeof options === 'number') options = { threshold: options };
-                    var result = ShapeFactory.createImageMask(img, options || {}, 400);
+                    var result = ShapeFactory.createImageMask(img, options || {}, 640);
                     var canvas = result.canvas, w = result.width, h = result.height;
                     var thumbW = 80, thumbH = Math.max(1, Math.round(thumbW * h / w));
                     var thumbCanvas = document.createElement('canvas');
@@ -306,6 +751,7 @@
                         name: '自定义形状',
                         viewBox: { width: Math.round(w * viewScale), height: Math.round(h * viewScale) },
                         paths: [thumbPath || 'M0,0 L1,0 L1,1 L0,1 Z'],
+                        thumbnailViewBox: { width: thumbW, height: thumbH },
                         maskCanvas: canvas, maskCanvasW: w, maskCanvasH: h, dynamic: true
                     });
                 } catch (error) { reject(error); }
