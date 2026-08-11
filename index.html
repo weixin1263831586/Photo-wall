@@ -69,6 +69,9 @@
                 <button class="ps-btn active" data-pshape="square" title="圆角方形照片">
                     <svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="3"/></svg>
                 </button>
+                <button class="ps-btn" data-pshape="diamond" title="菱形照片">
+                    <svg viewBox="0 0 24 24"><polygon points="12,2 22,12 12,22 2,12"/></svg>
+                </button>
                 <button class="ps-btn" data-pshape="hexagon">
                     <svg viewBox="0 0 24 24"><polygon points="12,2 21,7 21,17 12,22 3,17 3,7"/></svg>
                 </button>
@@ -93,6 +96,12 @@
                 <span class="setting-value" id="overlap-value">0%</span>
             </div>
             <input type="range" id="overlap-slider" min="0" max="0.12" step="0.01" value="0" class="range-slider">
+
+            <div class="setting-row" style="margin-top:14px;">
+                <label for="rotation-slider">随机旋转</label>
+                <span class="setting-value" id="rotation-value">0°</span>
+            </div>
+            <input type="range" id="rotation-slider" min="0" max="24" step="1" value="0" class="range-slider">
 
             <div class="setting-row" style="margin-top:16px;">
                 <label for="smart-toggle">智能排版</label>
@@ -137,6 +146,14 @@
                         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 7h4v-4M18.4 7.1A8 8 0 1 0 20 14"/></svg>
                     </button>
                 </div>
+                <button class="toolbar-btn" id="open-project-btn" type="button" title="打开项目 (Ctrl/⌘ O)">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 19V6a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2v10M3 19h18"/></svg>
+                    <span>打开项目</span>
+                </button>
+                <button class="toolbar-btn" id="save-project-btn" type="button" title="保存项目 (Ctrl/⌘ S)" disabled>
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3h12l3 3v15H4V3h1M8 3v6h8V3M8 21v-7h8v7"/></svg>
+                    <span>保存项目</span>
+                </button>
                 <button class="toolbar-btn" id="add-photos-btn" type="button">
                     <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
                     <span>添加照片</span>
@@ -150,6 +167,7 @@
                     <span>导出图片</span>
                 </button>
             </div>
+            <input type="file" id="project-file-input" accept=".photowall.json,.json,application/json" hidden>
         </header>
         <div class="canvas-help" id="canvas-help">拖拽照片可交换位置 · 点击照片可查看原图</div>
         <div class="canvas-stage" id="canvas-stage">
@@ -231,8 +249,8 @@
         </div>
         <div class="shape-preview-grid">
             <figure>
-                <canvas id="shape-source-preview"></canvas>
-                <figcaption>原始图片</figcaption>
+                <canvas id="shape-source-preview" class="editable"></canvas>
+                <figcaption class="source-caption"><span>原始图片 · 拖拽选择裁剪范围</span><button type="button" class="text-action" id="shape-crop-reset">重置</button></figcaption>
             </figure>
             <figure>
                 <canvas id="shape-mask-preview"></canvas>
@@ -244,12 +262,13 @@
                 <span>提取方式</span>
                 <select id="shape-extract-mode">
                     <option value="portrait">人像智能抠图（推荐）</option>
+                    <option value="portrait-detail">肖像明暗特征（五官镂空）</option>
                     <option value="auto">纯色背景识别</option>
                     <option value="threshold">明暗阈值</option>
                 </select>
             </label>
             <label class="editor-field editor-range-field">
-                <span>背景去除强度 <strong id="shape-threshold-value">46</strong></span>
+                <span><span id="shape-threshold-label">背景去除强度</span> <strong id="shape-threshold-value">46</strong></span>
                 <input type="range" id="shape-threshold" min="0" max="255" step="1" value="46">
             </label>
             <label class="editor-field editor-range-field">

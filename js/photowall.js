@@ -21,6 +21,7 @@
         this.placementMode = 'grid';
         this.photoShape = 'square';
         this.smartPlacement = true;
+        this.rotationRange = 0;
         this.hoveredIndex = -1;
         this.draggingIndex = -1;
         this.dragOverIndex = -1;
@@ -32,6 +33,7 @@
         this._animStart = 0;
         this._animRAF = null;
         this._pointerDown = null;
+        this._slotSequence = 0;
         this._layerCanvas = document.createElement('canvas');
         this._layerContext = this._layerCanvas.getContext('2d');
         this._bindEvents();
@@ -63,6 +65,7 @@
     };
 
     PhotoWall.prototype.resize = function () {
+        var previousLayout = this.layout.length ? this.getLayoutSnapshot() : null;
         var rect = this.canvas.parentElement.getBoundingClientRect();
         this.cssWidth = Math.max(100, rect.width);
         this.cssHeight = Math.max(100, rect.height);
@@ -74,7 +77,11 @@
         this._layerCanvas.width = this.canvas.width;
         this._layerCanvas.height = this.canvas.height;
         this.ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
-        if (this.shape) this.generateLayout(false, true);
+        if (this.shape) {
+            this.generateMask();
+            if (previousLayout && this.photos.length) this.setLayoutSnapshot(previousLayout);
+            else this.generateLayout(false, true);
+        }
     };
 
     PhotoWall.prototype.setShape = function (key) {
@@ -104,6 +111,10 @@
     };
     PhotoWall.prototype.setSmartPlacement = function (enabled) {
         this.smartPlacement = enabled;
+        if (this.shape) this.generateLayout();
+    };
+    PhotoWall.prototype.setRotationRange = function (value) {
+        this.rotationRange = Math.max(0, Math.min(30, Number(value) || 0));
         if (this.shape) this.generateLayout();
     };
     PhotoWall.prototype.shuffle = function () {
@@ -258,8 +269,14 @@
         }
         return cells.map(function (cell, index) {
             var photoIndex = order[index % n];
+            var seed = (((cell.row + 1) * 2654435761) ^ ((cell.col + 1) * 1597334677) ^ (index * 3812015801)) >>> 0;
+            var unitRotation = (seed % 2001) / 1000 - 1;
+            cell.slotId = 'slot-' + (++this._slotSequence) + '-' + seed.toString(36);
             cell.photoIndex = photoIndex;
             cell.photo = this.photos[photoIndex];
+            cell.photoId = cell.photo.id;
+            cell.rotation = this.rotationRange ? unitRotation * this.rotationRange : 0;
+            cell.zIndex = index;
             return cell;
         }, this);
     };
@@ -304,7 +321,11 @@
         lx.globalAlpha = 1;
         var t = progress === undefined ? 1 : Math.max(0, Math.min(1, progress));
         var eased = 1 - Math.pow(1 - t, 3);
-        for (var i = 0; i < this.layout.length; i++) {
+        var renderOrder = this.layout.map(function (_, index) { return index; }).sort(function (a, b) {
+            return (Number(this.layout[a].zIndex) || 0) - (Number(this.layout[b].zIndex) || 0);
+        }.bind(this));
+        for (var orderIndex = 0; orderIndex < renderOrder.length; orderIndex++) {
+            var i = renderOrder[orderIndex];
             if (!exportMode && i === this.draggingIndex) continue;
             this._drawPhoto(lx, this.layout[i], !exportMode && i === this.hoveredIndex, eased, !exportMode && i === this.dragOverIndex);
         }
@@ -328,21 +349,23 @@
         if (this.photoShape !== 'square') { width *= 1.16; height *= 1.16; }
         var x = item.x, y = item.y, img = item.photo.img;
         ctx.save();
+        ctx.translate(x, y);
+        ctx.rotate((Number(item.rotation) || 0) * Math.PI / 180);
         if (hovered || dropTarget) {
             ctx.shadowColor = dropTarget ? 'rgba(96,225,190,.9)' : 'rgba(124,108,240,.75)';
             ctx.shadowBlur = 16;
         }
-        this._photoPath(ctx, x, y, width, height);
+        this._photoPath(ctx, 0, 0, width, height);
         ctx.clip();
         var imageAspect = img.naturalWidth / img.naturalHeight, boxAspect = width / height;
         var dw, dh;
         if (imageAspect > boxAspect) { dh = height; dw = height * imageAspect; }
         else { dw = width; dh = width / imageAspect; }
-        ctx.drawImage(img, x - dw / 2, y - dh / 2, dw, dh);
+        ctx.drawImage(img, -dw / 2, -dh / 2, dw, dh);
         if (hovered || dropTarget) {
             ctx.shadowColor = 'transparent'; ctx.lineWidth = 2;
             ctx.strokeStyle = dropTarget ? '#60e1be' : '#a99cff';
-            this._photoPath(ctx, x, y, width, height); ctx.stroke();
+            this._photoPath(ctx, 0, 0, width, height); ctx.stroke();
         }
         ctx.restore();
     };
@@ -351,6 +374,13 @@
         var rx = width / 2, ry = height / 2;
         ctx.beginPath();
         if (this.photoShape === 'circle') ctx.ellipse(x, y, rx, ry, 0, 0, Math.PI * 2);
+        else if (this.photoShape === 'diamond') {
+            ctx.moveTo(x, y - ry);
+            ctx.lineTo(x + rx, y);
+            ctx.lineTo(x, y + ry);
+            ctx.lineTo(x - rx, y);
+            ctx.closePath();
+        }
         else if (this.photoShape === 'hexagon') {
             for (var i = 0; i < 6; i++) {
                 var angle = Math.PI / 3 * i - Math.PI / 6;
@@ -391,8 +421,11 @@
         // Render from the original photos at the requested scale. Scaling the
         // visible editor canvas made 2×/3× exports larger, but not truly sharper.
         ox.setTransform(scale, 0, 0, scale, 0, 0);
-        for (var i = 0; i < this.layout.length; i++) {
-            this._drawPhoto(ox, this.layout[i], false, 1, false);
+        var renderOrder = this.layout.slice().sort(function (a, b) {
+            return (Number(a.zIndex) || 0) - (Number(b.zIndex) || 0);
+        });
+        for (var i = 0; i < renderOrder.length; i++) {
+            this._drawPhoto(ox, renderOrder[i], false, 1, false);
         }
         ox.setTransform(1, 0, 0, 1, 0, 0);
         ox.globalCompositeOperation = 'destination-in';
@@ -412,18 +445,87 @@
     };
 
     PhotoWall.prototype.getArrangement = function () {
-        return this.layout.map(function (item) { return item.photoIndex; });
+        return this.layout.map(function (item) { return item.photoId || (item.photo && item.photo.id) || item.photoIndex; });
     };
 
     PhotoWall.prototype.setArrangement = function (arrangement) {
         if (!arrangement || !arrangement.length || !this.photos.length) return;
+        var photoIndexById = new Map();
+        this.photos.forEach(function (photo, index) { photoIndexById.set(photo.id, index); });
         for (var i = 0; i < this.layout.length; i++) {
-            var photoIndex = arrangement[i % arrangement.length];
-            if (photoIndex < 0 || photoIndex >= this.photos.length) continue;
+            var reference = arrangement[i % arrangement.length];
+            var photoIndex = typeof reference === 'string' ? photoIndexById.get(reference) : reference;
+            if (!Number.isInteger(photoIndex) || photoIndex < 0 || photoIndex >= this.photos.length) continue;
             this.layout[i].photoIndex = photoIndex;
             this.layout[i].photo = this.photos[photoIndex];
+            this.layout[i].photoId = this.photos[photoIndex].id;
         }
         this.render();
+    };
+
+    PhotoWall.prototype.getLayoutSnapshot = function () {
+        var width = Math.max(1, this.cssWidth || 1), height = Math.max(1, this.cssHeight || 1);
+        return {
+            canvasWidth: width,
+            canvasHeight: height,
+            items: this.layout.map(function (item) {
+                return {
+                    slotId: item.slotId,
+                    photoId: item.photoId || (item.photo && item.photo.id),
+                    x: item.x / width,
+                    y: item.y / height,
+                    width: item.width / width,
+                    height: item.height / height,
+                    rotation: Number(item.rotation) || 0,
+                    zIndex: Number(item.zIndex) || 0,
+                    row: item.row,
+                    col: item.col
+                };
+            })
+        };
+    };
+
+    PhotoWall.prototype.setLayoutSnapshot = function (snapshot) {
+        if (!snapshot || !Array.isArray(snapshot.items) || !this.photos.length) return false;
+        var width = Math.max(1, this.cssWidth || snapshot.canvasWidth || 1);
+        var height = Math.max(1, this.cssHeight || snapshot.canvasHeight || 1);
+        var photoIndexById = new Map();
+        this.photos.forEach(function (photo, index) { photoIndexById.set(photo.id, index); });
+        var restored = [];
+        snapshot.items.forEach(function (saved, index) {
+            var photoIndex = photoIndexById.get(saved.photoId);
+            if (photoIndex === undefined) return;
+            var normalizedX = Number(saved.x), normalizedY = Number(saved.y);
+            var normalizedWidth = Number(saved.width), normalizedHeight = Number(saved.height);
+            if (!Number.isFinite(normalizedX) || !Number.isFinite(normalizedY) ||
+                !Number.isFinite(normalizedWidth) || !Number.isFinite(normalizedHeight) ||
+                normalizedX < -1 || normalizedX > 2 || normalizedY < -1 || normalizedY > 2 ||
+                normalizedWidth <= 0 || normalizedWidth > 2 || normalizedHeight <= 0 || normalizedHeight > 2) return;
+            var item = {
+                slotId: saved.slotId || 'slot-restored-' + index,
+                photoId: saved.photoId,
+                photoIndex: photoIndex,
+                photo: this.photos[photoIndex],
+                x: normalizedX * width,
+                y: normalizedY * height,
+                width: Math.max(1, normalizedWidth * width),
+                height: Math.max(1, normalizedHeight * height),
+                rotation: Math.max(-360, Math.min(360, Number(saved.rotation) || 0)),
+                zIndex: Math.max(-10000, Math.min(10000, Number(saved.zIndex) || 0)),
+                row: Number(saved.row) || 0,
+                col: Number(saved.col) || 0
+            };
+            item.size = Math.max(item.width, item.height);
+            restored.push(item);
+        }, this);
+        if (!restored.length) return false;
+        this.layout = restored;
+        this.hoveredIndex = -1;
+        this.draggingIndex = -1;
+        this.dragOverIndex = -1;
+        if (this.onLayout) this.onLayout(this.layout.length);
+        this.render();
+        return true;
     };
 
     PhotoWall.prototype._eventPoint = function (e) {
@@ -435,9 +537,20 @@
         var mx = Math.round(x), my = Math.round(y);
         if (mx < 0 || my < 0 || mx >= this.maskData.width || my >= this.maskData.height ||
             !this.maskData.mask[my * this.maskData.width + mx]) return -1;
-        for (var i = this.layout.length - 1; i >= 0; i--) {
+        var hitOrder = this.layout.map(function (_, index) { return index; }).sort(function (a, b) {
+            return (Number(this.layout[b].zIndex) || 0) - (Number(this.layout[a].zIndex) || 0);
+        }.bind(this));
+        for (var orderIndex = 0; orderIndex < hitOrder.length; orderIndex++) {
+            var i = hitOrder[orderIndex];
             var item = this.layout[i];
-            if (Math.abs(x - item.x) <= item.width / 2 && Math.abs(y - item.y) <= item.height / 2) return i;
+            var angle = -(Number(item.rotation) || 0) * Math.PI / 180;
+            var dx = x - item.x, dy = y - item.y;
+            var localX = dx * Math.cos(angle) - dy * Math.sin(angle);
+            var localY = dx * Math.sin(angle) + dy * Math.cos(angle);
+            var gapScale = Math.max(0.4, 1 - this.gap);
+            var hitWidth = item.width * gapScale, hitHeight = item.height * gapScale;
+            if (this.photoShape !== 'square') { hitWidth *= 1.16; hitHeight *= 1.16; }
+            if (Math.abs(localX) <= hitWidth / 2 && Math.abs(localY) <= hitHeight / 2) return i;
         }
         return -1;
     };
@@ -446,6 +559,8 @@
         var photo = this.layout[a].photo, photoIndex = this.layout[a].photoIndex;
         this.layout[a].photo = this.layout[b].photo; this.layout[a].photoIndex = this.layout[b].photoIndex;
         this.layout[b].photo = photo; this.layout[b].photoIndex = photoIndex;
+        this.layout[a].photoId = this.layout[a].photo.id;
+        this.layout[b].photoId = this.layout[b].photo.id;
     };
 
     PhotoWall.prototype._bindEvents = function () {

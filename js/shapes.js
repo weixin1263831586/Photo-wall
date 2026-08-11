@@ -184,13 +184,26 @@
         var mode = options.mode || 'auto';
         var smooth = Math.max(0, Math.min(3, Number(options.smooth) || 0));
         var denoise = Math.max(0, Math.min(4, Number(options.denoise) || 0));
-        var scale = Math.min(maxDim / img.naturalWidth, maxDim / img.naturalHeight, 1);
-        var w = Math.max(1, Math.ceil(img.naturalWidth * scale));
-        var h = Math.max(1, Math.ceil(img.naturalHeight * scale));
+        var crop = options.crop || { x: 0, y: 0, width: 1, height: 1 };
+        var cropX = Math.max(0, Math.min(0.97, Number(crop.x) || 0));
+        var cropY = Math.max(0, Math.min(0.97, Number(crop.y) || 0));
+        var cropW = Math.max(0.03, Math.min(1 - cropX, Number(crop.width) || 1));
+        var cropH = Math.max(0.03, Math.min(1 - cropY, Number(crop.height) || 1));
+        var sx = Math.round(cropX * img.naturalWidth), sy = Math.round(cropY * img.naturalHeight);
+        var sw = Math.max(1, Math.round(cropW * img.naturalWidth));
+        var sh = Math.max(1, Math.round(cropH * img.naturalHeight));
+        var scale = Math.min(maxDim / sw, maxDim / sh, 1);
+        var w = Math.max(1, Math.ceil(sw * scale));
+        var h = Math.max(1, Math.ceil(sh * scale));
         var source = document.createElement('canvas');
         source.width = w; source.height = h;
         var sourceCtx = source.getContext('2d', { willReadFrequently: true });
-        sourceCtx.drawImage(img, 0, 0, w, h);
+        sourceCtx.drawImage(img, sx, sy, sw, sh, 0, 0, w, h);
+        var originalScale = Math.min(maxDim / img.naturalWidth, maxDim / img.naturalHeight, 1);
+        var originalCanvas = document.createElement('canvas');
+        originalCanvas.width = Math.max(1, Math.ceil(img.naturalWidth * originalScale));
+        originalCanvas.height = Math.max(1, Math.ceil(img.naturalHeight * originalScale));
+        originalCanvas.getContext('2d').drawImage(img, 0, 0, originalCanvas.width, originalCanvas.height);
         var imageData = sourceCtx.getImageData(0, 0, w, h);
         var data = imageData.data, total = w * h;
         var transparentCount = 0;
@@ -204,7 +217,9 @@
         var useAlpha = mode !== 'threshold' && transparentCount > total * 0.01;
         var mask = new Uint8Array(total), detectedCount = 0;
 
-        if (!useAlpha && mode === 'portrait') {
+        if (mode === 'portrait-detail') {
+            mask = ShapeFactory._extractPortraitDetailMask(data, w, h, threshold, denoise);
+        } else if (!useAlpha && mode === 'portrait') {
             mask = ShapeFactory._extractPortraitMask(data, w, h, threshold, denoise);
         } else {
             var palette = ShapeFactory._sampleBackgroundPalette(data, w, h);
@@ -225,7 +240,7 @@
             if (mask[mi]) detectedCount++;
         }
 
-        if (detectedCount < total * 0.001) {
+        if (detectedCount < total * 0.001 && mode !== 'portrait-detail') {
             for (var fallback = 0; fallback < total; fallback++) mask[fallback] = data[fallback * 4 + 3] > 40 ? 1 : 0;
         }
         for (var noisePass = 0; noisePass < Math.ceil(denoise / 2); noisePass++) {
@@ -266,6 +281,7 @@
         return {
             canvas: canvas,
             sourceCanvas: source,
+            originalCanvas: originalCanvas,
             width: w,
             height: h,
             mask: mask,
@@ -472,6 +488,52 @@
 
         var mask = new Uint8Array(total);
         for (var m = 0; m < total; m++) mask[m] = !outside[m] && data[m * 4 + 3] > 15 ? 1 : 0;
+        return mask;
+    };
+
+    /**
+     * Build a multi-component portrait mask from dark tones and local facial
+     * contrast, constrained by the foreground silhouette. Unlike the normal
+     * portrait mode this intentionally keeps holes and disconnected features
+     * such as hair, eyebrows, eyes, nose shadows and lips.
+     */
+    ShapeFactory._extractPortraitDetailMask = function (data, w, h, threshold, denoise) {
+        var total = w * h;
+        var channels = ShapeFactory._buildPortraitChannels(data, w, h, denoise);
+        var silhouette = ShapeFactory._extractPortraitMask(data, w, h, 46, denoise);
+        var bridgeRadius = Math.max(1, Math.round(Math.min(w, h) * 0.0025));
+        silhouette = ShapeFactory._closeMask(silhouette, w, h, bridgeRadius);
+        silhouette = ShapeFactory._fillMaskHoles(silhouette, w, h);
+
+        var stride = w + 1;
+        var integral = new Float64Array((w + 1) * (h + 1));
+        for (var y = 0; y < h; y++) {
+            var rowSum = 0;
+            for (var x = 0; x < w; x++) {
+                rowSum += channels.y[y * w + x];
+                integral[(y + 1) * stride + x + 1] = integral[y * stride + x + 1] + rowSum;
+            }
+        }
+
+        var radius = Math.max(4, Math.round(Math.min(w, h) * 0.035));
+        var darkLimit = Math.max(36, Math.min(220, Number(threshold) || 132));
+        var contrastLimit = Math.max(7, 15 - (darkLimit - 110) * 0.045);
+        var mask = new Uint8Array(total);
+        for (var py = 0; py < h; py++) {
+            var y1 = Math.max(0, py - radius), y2 = Math.min(h, py + radius + 1);
+            for (var px = 0; px < w; px++) {
+                var index = py * w + px;
+                if (!silhouette[index] || data[index * 4 + 3] <= 15) continue;
+                var x1 = Math.max(0, px - radius), x2 = Math.min(w, px + radius + 1);
+                var sum = integral[y2 * stride + x2] - integral[y1 * stride + x2] -
+                    integral[y2 * stride + x1] + integral[y1 * stride + x1];
+                var localMean = sum / Math.max(1, (x2 - x1) * (y2 - y1));
+                var luminance = channels.y[index];
+                if (luminance <= darkLimit || localMean - luminance >= contrastLimit) mask[index] = 1;
+            }
+        }
+
+        if (denoise > 1) mask = ShapeFactory._closeMask(mask, w, h, 1);
         return mask;
     };
 

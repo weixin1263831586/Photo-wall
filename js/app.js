@@ -11,6 +11,7 @@
         resizeTimer: null,
         densityTimer: null,
         overlapTimer: null,
+        rotationTimer: null,
         currentShapeKey: 'china',
         pendingShapeImage: null,
         shapePreviewRAF: null,
@@ -18,12 +19,19 @@
         maskBrushMode: 'keep',
         maskBrushPointerId: null,
         maskPreviewMeta: null,
+        sourcePreviewMeta: null,
+        shapeCrop: { x: 0, y: 0, width: 1, height: 1 },
+        shapeCropStart: null,
+        shapeCropPointerId: null,
         undoStack: [],
         redoStack: [],
         historyLimit: 30,
         isRestoring: false,
         maxPhotos: 200,
         maxFileSize: 40 * 1024 * 1024,
+        maxPhotoDimension: 1600,
+        photoLoadConcurrency: 3,
+        photoLoadTimeout: 30000,
         supportedImageTypes: ['image/jpeg', 'image/png', 'image/webp']
     };
 
@@ -62,6 +70,7 @@
         app.renderShapeButtons();
         app.updateModeHint();
         app.bindPhotoLibrary();
+        app.bindShapeCrop();
         app.updateActionState();
 
         window.addEventListener('resize', function () {
@@ -144,8 +153,15 @@
         });
         document.getElementById('shape-extract-mode').addEventListener('change', function (e) {
             var threshold = document.getElementById('shape-threshold');
-            var defaults = { portrait: 46, auto: 42, threshold: 128 };
+            var defaults = { portrait: 46, 'portrait-detail': 132, auto: 42, threshold: 128 };
             threshold.value = defaults[e.target.value] || 46;
+            if (e.target.value === 'portrait-detail') {
+                document.getElementById('shape-largest').checked = false;
+                document.getElementById('shape-smooth').value = '0';
+            } else {
+                document.getElementById('shape-largest').checked = true;
+                document.getElementById('shape-smooth').value = '1';
+            }
             app.updateShapeModeUI(e.target.value);
             app.scheduleShapePreview();
         });
@@ -236,6 +252,27 @@
             overlapSnapshot = null;
         });
 
+        // ---- Rotation slider ----
+        var rotationSlider = document.getElementById('rotation-slider');
+        var rotationValue = document.getElementById('rotation-value');
+        var rotationSnapshot = null;
+        rotationSlider.addEventListener('pointerdown', function () { rotationSnapshot = app.captureState(); });
+        rotationSlider.addEventListener('keydown', function (e) {
+            if (/^(Arrow|Home|End|Page)/.test(e.key) && !rotationSnapshot) rotationSnapshot = app.captureState();
+        });
+        rotationSlider.addEventListener('input', function (e) {
+            var val = parseInt(e.target.value, 10);
+            rotationValue.textContent = val + '°';
+            clearTimeout(app.rotationTimer);
+            app.rotationTimer = setTimeout(function () { app.wall.setRotationRange(val); }, 120);
+        });
+        rotationSlider.addEventListener('change', function (e) {
+            clearTimeout(app.rotationTimer);
+            app.wall.setRotationRange(parseInt(e.target.value, 10));
+            if (rotationSnapshot && rotationSnapshot.rotationRange !== app.wall.rotationRange) app.recordHistory(rotationSnapshot);
+            rotationSnapshot = null;
+        });
+
         // ---- Smart placement toggle ----
         document.getElementById('smart-toggle').addEventListener('change', function (e) {
             app.recordHistory();
@@ -288,6 +325,15 @@
         });
         document.getElementById('undo-btn').addEventListener('click', app.undo);
         document.getElementById('redo-btn').addEventListener('click', app.redo);
+        document.getElementById('save-project-btn').addEventListener('click', app.saveProject);
+        document.getElementById('open-project-btn').addEventListener('click', function () {
+            document.getElementById('project-file-input').click();
+        });
+        document.getElementById('project-file-input').addEventListener('change', function (e) {
+            var file = e.target.files[0];
+            if (file) app.openProject(file);
+            e.target.value = '';
+        });
 
         // ---- Export dialog ----
         document.getElementById('export-close').addEventListener('click', app.closeExportDialog);
@@ -322,6 +368,16 @@
         document.addEventListener('keydown', function (e) {
             var targetTag = e.target && e.target.tagName;
             var isTyping = targetTag === 'INPUT' || targetTag === 'TEXTAREA' || targetTag === 'SELECT';
+            if ((e.ctrlKey || e.metaKey) && !isTyping && e.key.toLowerCase() === 's') {
+                e.preventDefault();
+                app.saveProject();
+                return;
+            }
+            if ((e.ctrlKey || e.metaKey) && !isTyping && e.key.toLowerCase() === 'o') {
+                e.preventDefault();
+                document.getElementById('project-file-input').click();
+                return;
+            }
             if ((e.ctrlKey || e.metaKey) && !isTyping && e.key.toLowerCase() === 'z') {
                 e.preventDefault();
                 if (e.shiftKey) app.redo(); else app.undo();
@@ -416,6 +472,91 @@
         preview.addEventListener('pointercancel', finishStroke);
     };
 
+    app.bindShapeCrop = function () {
+        var preview = document.getElementById('shape-source-preview');
+        document.getElementById('shape-crop-reset').addEventListener('click', function () {
+            app.shapeCrop = { x: 0, y: 0, width: 1, height: 1 };
+            app.maskStrokes = [];
+            app.updateMaskBrushActions();
+            app.scheduleShapePreview();
+        });
+        preview.addEventListener('pointerdown', function (e) {
+            if (!app.pendingShapeImage || !app.sourcePreviewMeta) return;
+            var point = app.getShapeCropPoint(e);
+            if (!point) return;
+            e.preventDefault();
+            app.shapeCropStart = { x: point.x, y: point.y, previous: app.shapeCrop };
+            app.shapeCropPointerId = e.pointerId;
+            try { preview.setPointerCapture(e.pointerId); } catch (ignore) {}
+        });
+        preview.addEventListener('pointermove', function (e) {
+            if (app.shapeCropPointerId !== e.pointerId || !app.shapeCropStart) return;
+            var point = app.getShapeCropPoint(e);
+            if (!point) return;
+            e.preventDefault();
+            var x = Math.min(app.shapeCropStart.x, point.x);
+            var y = Math.min(app.shapeCropStart.y, point.y);
+            app.shapeCrop = {
+                x: x,
+                y: y,
+                width: Math.max(0.01, Math.max(app.shapeCropStart.x, point.x) - x),
+                height: Math.max(0.01, Math.max(app.shapeCropStart.y, point.y) - y)
+            };
+            app.maskStrokes = [];
+            app.updateMaskBrushActions();
+            app.scheduleShapePreview();
+        });
+        function finishCrop(e) {
+            if (app.shapeCropPointerId !== e.pointerId || !app.shapeCropStart) return;
+            if (app.shapeCrop.width < 0.035 || app.shapeCrop.height < 0.035) {
+                app.shapeCrop = app.shapeCropStart.previous;
+            }
+            app.shapeCropPointerId = null;
+            app.shapeCropStart = null;
+            try { preview.releasePointerCapture(e.pointerId); } catch (ignore) {}
+            app.scheduleShapePreview();
+        }
+        preview.addEventListener('pointerup', finishCrop);
+        preview.addEventListener('pointercancel', finishCrop);
+    };
+
+    app.getShapeCropPoint = function (event) {
+        var preview = document.getElementById('shape-source-preview');
+        var meta = app.sourcePreviewMeta;
+        if (!meta) return null;
+        var rect = preview.getBoundingClientRect();
+        var px = (event.clientX - rect.left) * preview.width / Math.max(1, rect.width);
+        var py = (event.clientY - rect.top) * preview.height / Math.max(1, rect.height);
+        if (px < meta.x || px > meta.x + meta.width || py < meta.y || py > meta.y + meta.height) return null;
+        return {
+            x: Math.max(0, Math.min(1, (px - meta.x) / meta.width)),
+            y: Math.max(0, Math.min(1, (py - meta.y) / meta.height))
+        };
+    };
+
+    app.drawShapeCropOverlay = function () {
+        var canvas = document.getElementById('shape-source-preview');
+        var meta = app.sourcePreviewMeta;
+        if (!meta) return;
+        var crop = app.shapeCrop;
+        var x = meta.x + crop.x * meta.width;
+        var y = meta.y + crop.y * meta.height;
+        var width = crop.width * meta.width;
+        var height = crop.height * meta.height;
+        var ctx = canvas.getContext('2d');
+        ctx.save();
+        ctx.fillStyle = 'rgba(8,8,14,.56)';
+        ctx.beginPath();
+        ctx.rect(meta.x, meta.y, meta.width, meta.height);
+        ctx.rect(x, y, width, height);
+        ctx.fill('evenodd');
+        ctx.strokeStyle = '#9d8fff';
+        ctx.lineWidth = 2;
+        ctx.setLineDash([8, 5]);
+        ctx.strokeRect(x, y, width, height);
+        ctx.restore();
+    };
+
     app.setMaskBrushMode = function (mode) {
         app.maskBrushMode = mode === 'erase' ? 'erase' : 'keep';
         document.querySelectorAll('.brush-mode-btn').forEach(function (button) {
@@ -451,6 +592,7 @@
             denoise: parseInt(document.getElementById('shape-denoise').value, 10),
             keepLargest: document.getElementById('shape-largest').checked,
             invert: document.getElementById('shape-invert').checked,
+            crop: Object.assign({}, app.shapeCrop),
             strokes: app.maskStrokes
         };
     };
@@ -463,6 +605,9 @@
         document.getElementById('shape-denoise').value = '2';
         document.getElementById('shape-largest').checked = true;
         document.getElementById('shape-invert').checked = false;
+        app.shapeCrop = { x: 0, y: 0, width: 1, height: 1 };
+        app.shapeCropStart = null;
+        app.shapeCropPointerId = null;
         app.maskStrokes = [];
         app.maskBrushPointerId = null;
         app.maskPreviewMeta = null;
@@ -477,9 +622,12 @@
     app.updateShapeModeUI = function (mode) {
         var tips = {
             portrait: '适合人物照片：从图片边缘识别背景，并保护相近肤色',
+            'portrait-detail': '适合肖像拼贴：保留头发、眉眼、鼻唇和阴影等多个深色区域；建议先在左图裁剪到头像',
             auto: '适合 Logo、商品等纯色背景图片',
             threshold: '适合黑白图案：低于阈值的深色区域会成为主体'
         };
+        var thresholdLabel = document.getElementById('shape-threshold-label');
+        if (thresholdLabel) thresholdLabel.textContent = mode === 'portrait-detail' ? '特征明暗阈值' : '背景去除强度';
         document.getElementById('shape-extract-tip').textContent = tips[mode] || tips.portrait;
     };
 
@@ -488,6 +636,8 @@
         app.pendingShapeImage = null;
         app.maskBrushPointerId = null;
         app.maskPreviewMeta = null;
+        app.sourcePreviewMeta = null;
+        app.shapeCropPointerId = null;
         if (app.shapePreviewRAF) cancelAnimationFrame(app.shapePreviewRAF);
         app.shapePreviewRAF = null;
     };
@@ -523,7 +673,8 @@
         document.getElementById('shape-denoise-value').textContent = options.denoise;
         try {
             var result = ShapeFactory.createImageMask(app.pendingShapeImage, options, 320);
-            app.drawPreviewCanvas(document.getElementById('shape-source-preview'), result.sourceCanvas);
+            app.sourcePreviewMeta = app.drawPreviewCanvas(document.getElementById('shape-source-preview'), result.originalCanvas || result.sourceCanvas);
+            app.drawShapeCropOverlay();
             app.maskPreviewMeta = app.drawPreviewCanvas(document.getElementById('shape-mask-preview'), result.canvas);
             var coverage = Math.round(result.coverage * 100);
             var qualityHint = coverage > 86 ? ' · 背景残留较多，建议增强去除' :
@@ -617,6 +768,11 @@
      *  Photo handling
      * ------------------------------------------------------------------ */
 
+    app.createId = function (prefix) {
+        if (window.crypto && typeof window.crypto.randomUUID === 'function') return prefix + '-' + window.crypto.randomUUID();
+        return prefix + '-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
+    };
+
     app.handleFiles = function (files) {
         var incoming = Array.prototype.slice.call(files);
         var existingSignatures = new Set(app.photos.map(function (photo) { return photo.signature; }).filter(Boolean));
@@ -642,15 +798,11 @@
             return;
         }
 
-        app.showLoading(true, '正在读取 ' + imageFiles.length + ' 张照片…');
-
         var total = imageFiles.length;
-        Promise.all(imageFiles.map(function (file) {
-            return app.loadPhoto(file).catch(function (err) {
-                console.error('图片加载失败:', err);
-                return null;
-            });
-        })).then(function (loadedPhotos) {
+        app.showLoading(true, '正在读取 0/' + total + ' 张照片…');
+        app.loadPhotoBatch(imageFiles, function (completed) {
+            app.showLoading(true, '正在读取 ' + completed + '/' + total + ' 张照片…');
+        }).then(function (loadedPhotos) {
             var valid = loadedPhotos.filter(Boolean);
             if (valid.length) app.recordHistory();
             Array.prototype.push.apply(app.photos, valid);
@@ -661,19 +813,78 @@
             app.showLoading(false);
             var skipped = skippedLarge + skippedDuplicate + skippedLimit + (total - valid.length);
             app.toast('已添加 ' + valid.length + ' 张照片' + (skipped ? ' · 跳过 ' + skipped + ' 张' : ''));
+        }).catch(function (err) {
+            console.error('批量读取照片失败:', err);
+            app.showLoading(false);
+            app.toast('照片读取失败，请重试');
         });
+    };
+
+    app.loadPhotoBatch = function (files, onProgress) {
+        var results = new Array(files.length);
+        var nextIndex = 0;
+        var completed = 0;
+        var workerCount = Math.min(app.photoLoadConcurrency, files.length);
+
+        function runWorker() {
+            var index = nextIndex++;
+            if (index >= files.length) return Promise.resolve();
+            return app.loadPhoto(files[index]).then(function (photo) {
+                results[index] = photo;
+            }).catch(function (err) {
+                console.error('图片加载失败:', files[index].name, err);
+                results[index] = null;
+            }).then(function () {
+                completed++;
+                if (onProgress) onProgress(completed, files.length);
+                return runWorker();
+            });
+        }
+
+        var workers = [];
+        for (var i = 0; i < workerCount; i++) workers.push(runWorker());
+        return Promise.all(workers).then(function () { return results; });
     };
 
     app.loadPhoto = function (file) {
         return new Promise(function (resolve, reject) {
             var reader = new FileReader();
-            reader.onload = function (e) {
-                var img = new Image();
-                img.onload = function () {
-                    var analysis = PhotoWall.analyzePhoto(img);
-                    resolve({
-                        img: img,
-                        src: e.target.result,
+            var img = null;
+            var settled = false;
+            var timeout = setTimeout(function () {
+                if (settled) return;
+                settled = true;
+                if (reader.readyState === FileReader.LOADING) reader.abort();
+                if (img) {
+                    img.onload = null;
+                    img.onerror = null;
+                    img.src = '';
+                }
+                reject(new Error('load timed out'));
+            }, app.photoLoadTimeout);
+
+            function finish(callback, value) {
+                if (settled) return;
+                settled = true;
+                clearTimeout(timeout);
+                reader.onload = null;
+                reader.onerror = null;
+                reader.onabort = null;
+                if (img) {
+                    img.onload = null;
+                    img.onerror = null;
+                }
+                callback(value);
+            }
+
+            function createPhoto(loadedImage, source) {
+                if (settled) return;
+                try {
+                    var analysis = PhotoWall.analyzePhoto(loadedImage);
+                    finish(resolve, {
+                        id: app.createId('photo'),
+                        img: loadedImage,
+                        src: source,
                         name: file.name,
                         signature: [file.name, file.size, file.lastModified].join(':'),
                         r: analysis.r,
@@ -682,13 +893,65 @@
                         brightness: analysis.brightness,
                         hue: analysis.hue
                     });
+                } catch (err) {
+                    finish(reject, err);
+                }
+            }
+
+            reader.onload = function (e) {
+                img = new Image();
+                img.onload = function () {
+                    try {
+                        var preparedSource = app.preparePhotoSource(img, e.target.result, file);
+                        if (preparedSource === e.target.result) {
+                            createPhoto(img, preparedSource);
+                            return;
+                        }
+
+                        img.onload = null;
+                        img.onerror = null;
+                        var resizedImage = new Image();
+                        img = resizedImage;
+                        resizedImage.onload = function () { createPhoto(resizedImage, preparedSource); };
+                        resizedImage.onerror = function () { finish(reject, new Error('resized image decode failed')); };
+                        resizedImage.src = preparedSource;
+                    } catch (err) {
+                        finish(reject, err);
+                    }
                 };
-                img.onerror = function () { reject(new Error('decode failed')); };
+                img.onerror = function () { finish(reject, new Error('decode failed')); };
                 img.src = e.target.result;
             };
-            reader.onerror = function () { reject(new Error('read failed')); };
-            reader.readAsDataURL(file);
+            reader.onerror = function () { finish(reject, new Error('read failed')); };
+            reader.onabort = function () { finish(reject, new Error('read aborted')); };
+            try {
+                reader.readAsDataURL(file);
+            } catch (err) {
+                finish(reject, err);
+            }
         });
+    };
+
+    app.preparePhotoSource = function (img, originalSource, file) {
+        var maxSide = Math.max(img.naturalWidth, img.naturalHeight);
+        if (!maxSide || maxSide <= app.maxPhotoDimension) return originalSource;
+
+        var scale = app.maxPhotoDimension / maxSide;
+        var canvas = document.createElement('canvas');
+        canvas.width = Math.max(1, Math.round(img.naturalWidth * scale));
+        canvas.height = Math.max(1, Math.round(img.naturalHeight * scale));
+        canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+
+        var mime = app.supportedImageTypes.indexOf(file.type) >= 0 ? file.type : '';
+        if (!mime) {
+            if (/\.png$/i.test(file.name)) mime = 'image/png';
+            else if (/\.webp$/i.test(file.name)) mime = 'image/webp';
+            else mime = 'image/jpeg';
+        }
+        var resizedSource = canvas.toDataURL(mime, mime === 'image/png' ? undefined : 0.9);
+        canvas.width = 1;
+        canvas.height = 1;
+        return resizedSource;
     };
 
     app.clearPhotos = function () {
@@ -785,6 +1048,211 @@
     };
 
     /* ------------------------------------------------------------------ *
+     *  Portable project files
+     * ------------------------------------------------------------------ */
+
+    app.serializeProject = function () {
+        var shape = Shapes[app.currentShapeKey];
+        var shapeData = { key: app.currentShapeKey, name: shape && shape.name };
+        if (shape && shape.maskCanvas) {
+            shapeData.dynamic = true;
+            shapeData.maskDataURL = shape.maskCanvas.toDataURL('image/png');
+            shapeData.maskWidth = shape.maskCanvasW || shape.maskCanvas.width;
+            shapeData.maskHeight = shape.maskCanvasH || shape.maskCanvas.height;
+        }
+        return {
+            format: 'photo-wall-project',
+            version: 1,
+            savedAt: new Date().toISOString(),
+            shape: shapeData,
+            settings: {
+                density: app.wall.density,
+                gap: app.wall.gap,
+                placementMode: app.wall.placementMode,
+                photoShape: app.wall.photoShape,
+                smartPlacement: app.wall.smartPlacement,
+                rotationRange: app.wall.rotationRange
+            },
+            photos: app.photos.map(function (photo) {
+                return {
+                    id: photo.id,
+                    src: photo.src,
+                    name: photo.name,
+                    signature: photo.signature,
+                    r: photo.r,
+                    g: photo.g,
+                    b: photo.b,
+                    brightness: photo.brightness,
+                    hue: photo.hue
+                };
+            }),
+            layout: app.wall.getLayoutSnapshot()
+        };
+    };
+
+    app.saveProject = function () {
+        if (!app.photos.length) {
+            app.toast('请先添加照片');
+            return;
+        }
+        try {
+            var project = app.serializeProject();
+            var blob = new Blob([JSON.stringify(project)], { type: 'application/json' });
+            var url = URL.createObjectURL(blob);
+            var a = document.createElement('a');
+            var rawName = document.getElementById('export-name').value.trim() || '我的照片墙';
+            var name = rawName.replace(/[<>:"/\\|?*\u0000-\u001F]/g, '-').replace(/[. ]+$/, '') || '我的照片墙';
+            a.href = url;
+            a.download = name + '.photowall.json';
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+            app.toast('项目已保存，可继续编辑');
+        } catch (error) {
+            console.error(error);
+            app.toast('项目保存失败');
+        }
+    };
+
+    app.openProject = function (file) {
+        if (!file || file.size > 300 * 1024 * 1024) {
+            app.toast('项目文件无效或超过 300 MB');
+            return;
+        }
+        app.showLoading(true, '正在打开项目…');
+        var reader = new FileReader();
+        reader.onload = function (event) {
+            try {
+                var project = JSON.parse(event.target.result);
+                if (!project || project.format !== 'photo-wall-project' || project.version !== 1 || !Array.isArray(project.photos)) {
+                    throw new Error('unsupported project');
+                }
+                if (project.photos.length > app.maxPhotos) throw new Error('too many photos');
+                app.restoreProject(project).catch(function (error) {
+                    console.error(error);
+                    app.showLoading(false);
+                    app.toast('项目内容损坏或图片无法读取');
+                });
+            } catch (error) {
+                console.error(error);
+                app.showLoading(false);
+                app.toast('不是有效的照片墙项目文件');
+            }
+        };
+        reader.onerror = function () {
+            app.showLoading(false);
+            app.toast('项目文件读取失败');
+        };
+        reader.readAsText(file);
+    };
+
+    app.loadProjectPhoto = function (saved) {
+        return new Promise(function (resolve, reject) {
+            if (!saved || typeof saved.src !== 'string' || !/^data:image\/(jpeg|jpg|png|webp);base64,/i.test(saved.src)) {
+                reject(new Error('invalid photo source'));
+                return;
+            }
+            var img = new Image();
+            img.onload = function () {
+                var analysis = PhotoWall.analyzePhoto(img);
+                resolve({
+                    id: saved.id || app.createId('photo'),
+                    img: img,
+                    src: saved.src,
+                    name: saved.name || '未命名照片',
+                    signature: saved.signature || '',
+                    r: Number.isFinite(saved.r) ? saved.r : analysis.r,
+                    g: Number.isFinite(saved.g) ? saved.g : analysis.g,
+                    b: Number.isFinite(saved.b) ? saved.b : analysis.b,
+                    brightness: Number.isFinite(saved.brightness) ? saved.brightness : analysis.brightness,
+                    hue: Number.isFinite(saved.hue) ? saved.hue : analysis.hue
+                });
+            };
+            img.onerror = function () { reject(new Error('photo decode failed')); };
+            img.src = saved.src;
+        });
+    };
+
+    app.restoreProjectShape = function (saved) {
+        if (!saved || !saved.dynamic) {
+            var builtInKey = saved && saved.key && Shapes[saved.key] ? saved.key : 'china';
+            return Promise.resolve(builtInKey);
+        }
+        return new Promise(function (resolve, reject) {
+            if (typeof saved.maskDataURL !== 'string' || !saved.maskDataURL.startsWith('data:image/png;base64,') ||
+                saved.maskDataURL.length > 12 * 1024 * 1024) {
+                reject(new Error('invalid shape mask'));
+                return;
+            }
+            var img = new Image();
+            img.onload = function () {
+                var canvas = document.createElement('canvas');
+                var shapeScale = Math.min(2048 / img.naturalWidth, 2048 / img.naturalHeight, 1);
+                canvas.width = Math.max(1, Math.round(img.naturalWidth * shapeScale));
+                canvas.height = Math.max(1, Math.round(img.naturalHeight * shapeScale));
+                canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+                var thumbWidth = 80;
+                var thumbHeight = Math.max(1, Math.round(thumbWidth * canvas.height / canvas.width));
+                var thumb = document.createElement('canvas');
+                thumb.width = thumbWidth;
+                thumb.height = thumbHeight;
+                var thumbContext = thumb.getContext('2d');
+                thumbContext.drawImage(canvas, 0, 0, thumbWidth, thumbHeight);
+                var path = ShapeFactory._traceMask(thumbContext.getImageData(0, 0, thumbWidth, thumbHeight));
+                var key = saved.key || app.createId('custom');
+                Shapes.register(key, {
+                    name: saved.name || '自定义形状',
+                    viewBox: { width: 1000, height: Math.round(1000 * canvas.height / canvas.width) },
+                    paths: [path || 'M0,0 L1,0 L1,1 L0,1 Z'],
+                    thumbnailViewBox: { width: thumbWidth, height: thumbHeight },
+                    maskCanvas: canvas,
+                    maskCanvasW: canvas.width,
+                    maskCanvasH: canvas.height,
+                    dynamic: true
+                });
+                resolve(key);
+            };
+            img.onerror = function () { reject(new Error('shape decode failed')); };
+            img.src = saved.maskDataURL;
+        });
+    };
+
+    app.restoreProject = function (project) {
+        return Promise.all([
+            Promise.all(project.photos.map(app.loadProjectPhoto)),
+            app.restoreProjectShape(project.shape)
+        ]).then(function (results) {
+            var photos = results[0];
+            var shapeKey = results[1];
+            var settings = project.settings || {};
+            var usedIds = new Set();
+            photos.forEach(function (photo) {
+                if (!photo.id || usedIds.has(photo.id)) photo.id = app.createId('photo');
+                usedIds.add(photo.id);
+            });
+            app.undoStack = [];
+            app.redoStack = [];
+            app.renderShapeButtons();
+            if (Shapes[shapeKey] && Shapes[shapeKey].dynamic) app.addShapeButton(shapeKey, Shapes[shapeKey]);
+            app.restoreState({
+                photos: photos,
+                shapeKey: shapeKey,
+                density: Math.max(0.5, Math.min(1.5, Number(settings.density) || 1)),
+                gap: Math.max(0, Math.min(0.12, Number(settings.gap) || 0)),
+                placementMode: ['grid', 'brick', 'organic'].indexOf(settings.placementMode) >= 0 ? settings.placementMode : 'grid',
+                photoShape: ['circle', 'square', 'diamond', 'hexagon', 'heart'].indexOf(settings.photoShape) >= 0 ? settings.photoShape : 'square',
+                smartPlacement: settings.smartPlacement !== false,
+                rotationRange: Math.max(0, Math.min(24, Number(settings.rotationRange) || 0)),
+                arrangement: [],
+                layout: project.layout
+            });
+            app.showLoading(false);
+            app.toast('项目已恢复 · ' + photos.length + ' 张照片');
+        });
+    };
+
+    /* ------------------------------------------------------------------ *
      *  History / product state
      * ------------------------------------------------------------------ */
 
@@ -797,7 +1265,9 @@
             placementMode: app.wall.placementMode,
             photoShape: app.wall.photoShape,
             smartPlacement: app.wall.smartPlacement,
-            arrangement: app.wall.getArrangement()
+            rotationRange: app.wall.rotationRange,
+            arrangement: app.wall.getArrangement(),
+            layout: app.wall.getLayoutSnapshot()
         };
     };
 
@@ -813,6 +1283,7 @@
         if (!state) return;
         clearTimeout(app.densityTimer);
         clearTimeout(app.overlapTimer);
+        clearTimeout(app.rotationTimer);
         app.isRestoring = true;
         app.photos = state.photos.slice();
         app.currentShapeKey = state.shapeKey;
@@ -822,11 +1293,12 @@
         app.wall.placementMode = state.placementMode;
         app.wall.photoShape = state.photoShape;
         app.wall.smartPlacement = state.smartPlacement;
+        app.wall.rotationRange = Number(state.rotationRange) || 0;
         app.wall.shapeKey = state.shapeKey;
         app.wall.shape = Shapes[state.shapeKey];
         app.wall.photos = app.photos;
         app.wall.generateLayout(false, true);
-        app.wall.setArrangement(state.arrangement);
+        if (!app.wall.setLayoutSnapshot(state.layout)) app.wall.setArrangement(state.arrangement);
 
         document.querySelectorAll('.shape-btn').forEach(function (button) {
             button.classList.toggle('active', button.getAttribute('data-shape') === state.shapeKey);
@@ -842,6 +1314,8 @@
         document.getElementById('overlap-slider').value = state.gap;
         document.getElementById('overlap-value').textContent = Math.round(state.gap * 100) + '%';
         document.getElementById('smart-toggle').checked = state.smartPlacement;
+        document.getElementById('rotation-slider').value = app.wall.rotationRange;
+        document.getElementById('rotation-value').textContent = app.wall.rotationRange + '°';
         app.updateModeHint();
         app.updatePhotoCount();
         app.renderPhotoLibrary();
@@ -876,6 +1350,8 @@
         if (shuffleButton) shuffleButton.disabled = !hasPhotos;
         if (undoButton) undoButton.disabled = app.undoStack.length === 0;
         if (redoButton) redoButton.disabled = app.redoStack.length === 0;
+        var saveProjectButton = document.getElementById('save-project-btn');
+        if (saveProjectButton) saveProjectButton.disabled = !hasPhotos;
     };
 
     /* ------------------------------------------------------------------ *

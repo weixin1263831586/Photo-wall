@@ -1023,7 +1023,22 @@ body {
     touch-action: none;
 }
 
+#shape-source-preview.editable {
+    cursor: crosshair;
+    touch-action: none;
+}
+
 .shape-preview-grid figcaption { margin-top: 7px; color: var(--text-dim); font-size: 11px; }
+
+.shape-preview-grid .source-caption {
+    min-height: 22px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+}
+
+.source-caption .text-action { flex: 0 0 auto; color: var(--accent-hi); }
 
 .shape-editor-controls {
     display: grid;

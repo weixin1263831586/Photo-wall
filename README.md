@@ -31,6 +31,13 @@ python3 -m http.server 4173
 
 打开 <http://localhost:4173>。
 
+也可以使用重启脚本在后台启动；它会安全停止占用该端口的旧 Python HTTP 服务：
+
+```bash
+./restart-server.sh        # 默认端口 4173
+./restart-server.sh 8080   # 指定其他端口
+```
+
 ## 使用方法
 
 1. 选择预设轮廓，或输入文字、上传自定义轮廓图片。
