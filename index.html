@@ -40,7 +40,7 @@
             <div class="drop-zone" id="drop-zone">
                 <div class="drop-zone-icon">📁</div>
                 <p class="drop-zone-text">点击或拖放照片到这里</p>
-                <p class="drop-zone-hint">JPG / PNG / WebP · 最多 200 张 · 单张 40 MB</p>
+                <p class="drop-zone-hint">JPG / PNG / WebP · 最多 1000 张 · 单张 40 MB</p>
             </div>
             <input type="file" id="file-input" multiple accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp" hidden>
             <div class="photo-count-bar">
@@ -102,6 +102,15 @@
                 <span class="setting-value" id="rotation-value">0°</span>
             </div>
             <input type="range" id="rotation-slider" min="0" max="24" step="1" value="0" class="range-slider">
+
+            <div class="setting-row" style="margin-top:16px;">
+                <label for="mixed-size-toggle">大小图混排</label>
+                <label class="switch">
+                    <input type="checkbox" id="mixed-size-toggle" checked>
+                    <span class="switch-track"></span>
+                </label>
+            </div>
+            <p class="setting-hint">自动穿插大图；点击照片左上角的星标可优先放大</p>
 
             <div class="setting-row" style="margin-top:16px;">
                 <label for="smart-toggle">智能排版</label>
@@ -171,7 +180,7 @@
         </header>
         <div class="canvas-help" id="canvas-help">拖拽照片可交换位置 · 点击照片可查看原图</div>
         <div class="canvas-stage" id="canvas-stage">
-            <canvas id="wall-canvas"></canvas>
+            <canvas id="wall-canvas" tabindex="0" aria-label="照片墙编辑画布，点击照片可查看原图"></canvas>
             <div class="empty-state" id="empty-state">
                 <div class="empty-visual" aria-hidden="true">
                     <svg viewBox="0 0 72 72"><rect x="9" y="14" width="54" height="44" rx="8"/><circle cx="27" cy="30" r="5"/><path d="M14 52l15-14 10 9 7-6 12 11"/></svg>
@@ -195,7 +204,19 @@
             </div>
             <button class="editor-close" id="export-close" type="button" aria-label="关闭">×</button>
         </div>
-        <div class="export-form">
+        <div class="export-layout">
+            <section class="export-preview-panel" aria-labelledby="export-preview-title">
+                <div class="export-preview-heading">
+                    <span id="export-preview-title">导出预览</span>
+                    <small id="export-preview-ratio">紧贴轮廓</small>
+                </div>
+                <div class="export-preview-stage">
+                    <canvas id="export-preview-canvas" role="img" aria-label="照片墙导出效果预览"></canvas>
+                </div>
+                <p>预览会随比例和背景实时更新</p>
+            </section>
+            <div class="export-settings">
+                <div class="export-form">
             <label class="export-field">
                 <span>文件名</span>
                 <input type="text" id="export-name" value="我的照片墙" maxlength="60">
@@ -217,6 +238,14 @@
                 </div>
             </fieldset>
             <fieldset class="export-field">
+                <legend>画布比例</legend>
+                <div class="option-segments" id="export-aspect-options">
+                    <label><input type="radio" name="export-aspect" value="auto" checked><span>紧贴轮廓<small>最少空白</small></span></label>
+                    <label><input type="radio" name="export-aspect" value="3:4"><span>3:4<small>常用照片</small></span></label>
+                    <label><input type="radio" name="export-aspect" value="9:16"><span>9:16<small>手机竖屏</small></span></label>
+                </div>
+            </fieldset>
+            <fieldset class="export-field">
                 <legend>画布背景</legend>
                 <div class="background-options" id="export-background-options">
                     <label><input type="radio" name="export-background" value="#ffffff" checked><span class="background-swatch white"></span><span>白色</span></label>
@@ -225,10 +254,12 @@
                     <label class="custom-colour-option"><input type="radio" name="export-background" value="custom"><input type="color" id="export-background-color" value="#e9e6ff" aria-label="自定义背景色"><span>自定义</span></label>
                 </div>
             </fieldset>
-        </div>
-        <div class="export-summary">
-            <span>输出尺寸</span>
-            <strong id="export-dimensions">—</strong>
+                </div>
+                <div class="export-summary">
+                    <span>输出尺寸</span>
+                    <strong id="export-dimensions" aria-live="polite">—</strong>
+                </div>
+            </div>
         </div>
         <div class="modal-actions">
             <button class="btn btn-ghost" id="export-cancel" type="button">取消</button>
@@ -238,14 +269,14 @@
 </div>
 
 <!-- ======================== Shape extractor ======================== -->
-<div class="shape-editor" id="shape-editor" role="dialog" aria-modal="true" aria-labelledby="shape-editor-title">
+<div class="shape-editor" id="shape-editor" role="dialog" aria-modal="true" aria-labelledby="shape-editor-title" aria-hidden="true">
     <div class="shape-editor-card">
         <div class="shape-editor-header">
             <div>
                 <h2 id="shape-editor-title">提取图片轮廓</h2>
                 <p>调整黑白蒙版，白色区域将用于填充照片</p>
             </div>
-            <button class="editor-close" id="shape-editor-close" aria-label="关闭">×</button>
+            <button class="editor-close" id="shape-editor-close" type="button" aria-label="关闭轮廓编辑器">×</button>
         </div>
         <div class="shape-preview-grid">
             <figure>
@@ -315,10 +346,10 @@
 </div>
 
 <!-- ======================== Lightbox ======================== -->
-<div class="lightbox" id="lightbox">
-    <button class="lb-close" id="lightbox-close" title="关闭 (Esc)">×</button>
-    <button class="lb-nav lb-prev" id="lightbox-prev" title="上一张 (←)">‹</button>
-    <button class="lb-nav lb-next" id="lightbox-next" title="下一张 (→)">›</button>
+<div class="lightbox" id="lightbox" role="dialog" aria-modal="true" aria-label="照片原图预览" aria-hidden="true">
+    <button class="lb-close" id="lightbox-close" type="button" title="关闭 (Esc)" aria-label="关闭照片预览">×</button>
+    <button class="lb-nav lb-prev" id="lightbox-prev" type="button" title="上一张 (←)" aria-label="上一张照片">‹</button>
+    <button class="lb-nav lb-next" id="lightbox-next" type="button" title="下一张 (→)" aria-label="下一张照片">›</button>
     <div class="lb-content">
         <img id="lightbox-img" src="" alt="放大查看">
         <p class="lb-info" id="lightbox-info"></p>
@@ -334,8 +365,6 @@
 <!-- ======================== Toast ======================== -->
 <div class="toast" id="toast"></div>
 
-<script src="js/shapes.js"></script>
-<script src="js/photowall.js"></script>
-<script src="js/app.js"></script>
+<script type="module" src="js/app.js"></script>
 </body>
 </html>

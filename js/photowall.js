@@ -4,8 +4,9 @@
  * clipped by one shared mask. This guarantees that no photo pixel can escape
  * the selected outline while boundary cells still cover it completely.
  */
-(function (global) {
-    'use strict';
+import { Shapes } from './shapes.js';
+
+'use strict';
 
     function PhotoWall(canvas) {
         this.canvas = canvas;
@@ -16,11 +17,16 @@
         this.photos = [];
         this.layout = [];
         this.maskData = null;
+        this._maskCacheKey = '';
+        this._maskShape = null;
+        this._renderOrder = [];
+        this._hitOrder = [];
         this.density = 1;
         this.gap = 0;
         this.placementMode = 'grid';
         this.photoShape = 'square';
         this.smartPlacement = true;
+        this.mixedSizes = true;
         this.rotationRange = 0;
         this.hoveredIndex = -1;
         this.draggingIndex = -1;
@@ -48,10 +54,14 @@
         cx.drawImage(img, 0, 0, size, size);
         var data = cx.getImageData(0, 0, size, size).data;
         var r = 0, g = 0, b = 0, n = size * size;
+        var luminance = new Float32Array(n), luminanceSum = 0;
         for (var i = 0; i < n; i++) {
             r += data[i * 4];
             g += data[i * 4 + 1];
             b += data[i * 4 + 2];
+            var light = 0.299 * data[i * 4] + 0.587 * data[i * 4 + 1] + 0.114 * data[i * 4 + 2];
+            luminance[i] = light;
+            luminanceSum += light;
         }
         r = Math.round(r / n); g = Math.round(g / n); b = Math.round(b / n);
         var max = Math.max(r, g, b), min = Math.min(r, g, b), delta = max - min, hue = 0;
@@ -61,7 +71,36 @@
             else hue = 60 * ((r - g) / delta + 4);
         }
         if (hue < 0) hue += 360;
-        return { r: r, g: g, b: b, brightness: (0.299 * r + 0.587 * g + 0.114 * b) / 255, hue: hue };
+        var meanLight = luminanceSum / n;
+        var variance = 0, edgeTotal = 0, focusWeight = 0, focusX = 0, focusY = 0;
+        for (var y = 0; y < size; y++) {
+            for (var x = 0; x < size; x++) {
+                var index = y * size + x;
+                var difference = luminance[index] - meanLight;
+                variance += difference * difference;
+                var edge = 0;
+                if (x) edge += Math.abs(luminance[index] - luminance[index - 1]);
+                if (y) edge += Math.abs(luminance[index] - luminance[index - size]);
+                edgeTotal += edge;
+                var weight = 1 + edge + Math.abs(difference) * 0.3;
+                focusWeight += weight;
+                focusX += (x / (size - 1)) * weight;
+                focusY += (y / (size - 1)) * weight;
+            }
+        }
+        return {
+            r: r,
+            g: g,
+            b: b,
+            brightness: meanLight / 255,
+            hue: hue,
+            saturation: max ? delta / max : 0,
+            contrast: Math.sqrt(variance / n) / 128,
+            sharpness: edgeTotal / Math.max(1, n * 255 * 2),
+            focusX: focusWeight ? focusX / focusWeight : 0.5,
+            focusY: focusWeight ? focusY / focusWeight : 0.5,
+            aspectRatio: img.naturalWidth / Math.max(1, img.naturalHeight)
+        };
     };
 
     PhotoWall.prototype.resize = function () {
@@ -86,7 +125,7 @@
 
     PhotoWall.prototype.setShape = function (key) {
         this.shapeKey = key;
-        this.shape = global.Shapes[key];
+        this.shape = Shapes[key];
         if (this.shape) this.generateLayout();
     };
     PhotoWall.prototype.setPhotos = function (photos) {
@@ -113,8 +152,12 @@
         this.smartPlacement = enabled;
         if (this.shape) this.generateLayout();
     };
+    PhotoWall.prototype.setMixedSizes = function (enabled) {
+        this.mixedSizes = enabled;
+        if (this.shape) this.generateLayout();
+    };
     PhotoWall.prototype.setRotationRange = function (value) {
-        this.rotationRange = Math.max(0, Math.min(30, Number(value) || 0));
+        this.rotationRange = Math.max(0, Math.min(24, Number(value) || 0));
         if (this.shape) this.generateLayout();
     };
     PhotoWall.prototype.shuffle = function () {
@@ -129,6 +172,8 @@
     PhotoWall.prototype.generateMask = function () {
         if (!this.cssWidth || !this.cssHeight || !this.shape) return;
         var w = Math.round(this.cssWidth), h = Math.round(this.cssHeight);
+        var cacheKey = this.shapeKey + ':' + w + 'x' + h;
+        if (this.maskData && this._maskCacheKey === cacheKey && this._maskShape === this.shape) return;
         var maskCanvas = document.createElement('canvas');
         maskCanvas.width = w; maskCanvas.height = h;
         var ctx = maskCanvas.getContext('2d', { willReadFrequently: true });
@@ -189,6 +234,8 @@
             bounds: { x: minX, y: minY, width: Math.max(1, maxX - minX + 1), height: Math.max(1, maxY - minY + 1) },
             offX: offX, offY: offY, drawW: drawW, drawH: drawH, scale: scale, insideCount: count
         };
+        this._maskCacheKey = cacheKey;
+        this._maskShape = this.shape;
     };
 
     PhotoWall.prototype._rectMaskArea = function (x, y, width, height) {
@@ -217,10 +264,113 @@
                     jitterX = ((seed % 101) / 100 - 0.5) * cellW * 0.22;
                     jitterY = (((seed >> 8) % 101) / 100 - 0.5) * cellH * 0.22;
                 }
-                cells.push({ x: x + cellW / 2 + jitterX, y: y + cellH / 2 + jitterY, width: cellW, height: cellH, size: Math.max(cellW, cellH), row: row, col: col });
+                cells.push({
+                    x: x + cellW / 2 + jitterX,
+                    y: y + cellH / 2 + jitterY,
+                    baseX: x,
+                    baseY: y,
+                    width: cellW,
+                    height: cellH,
+                    size: Math.max(cellW, cellH),
+                    row: row,
+                    col: col,
+                    isLarge: false
+                });
             }
         }
         return cells;
+    };
+
+    PhotoWall.prototype._mergeLargeCells = function (cells, desiredLarge) {
+        if (!this.mixedSizes || desiredLarge < 1 || cells.length < 4) return cells;
+        var spanRows = this.placementMode === 'brick' ? 1 : 2;
+        var spanCols = 2;
+        var byPosition = new Map();
+        cells.forEach(function (cell) { byPosition.set(cell.row + ':' + cell.col, cell); });
+        var bounds = this.maskData.bounds;
+        var centerX = bounds.x + bounds.width / 2;
+        var centerY = bounds.y + bounds.height / 2;
+        var candidates = [];
+
+        cells.forEach(function (cell) {
+            var group = [];
+            for (var rowOffset = 0; rowOffset < spanRows; rowOffset++) {
+                for (var colOffset = 0; colOffset < spanCols; colOffset++) {
+                    var member = byPosition.get((cell.row + rowOffset) + ':' + (cell.col + colOffset));
+                    if (!member) return;
+                    group.push(member);
+                }
+            }
+            var left = Math.min.apply(null, group.map(function (item) { return item.baseX; }));
+            var top = Math.min.apply(null, group.map(function (item) { return item.baseY; }));
+            var right = Math.max.apply(null, group.map(function (item) { return item.baseX + item.width; }));
+            var bottom = Math.max.apply(null, group.map(function (item) { return item.baseY + item.height; }));
+            var width = right - left, height = bottom - top;
+            var coverage = this._rectMaskArea(left, top, width, height) / Math.max(1, width * height);
+            if (coverage < 0.9) return;
+            var normalizedDistance = Math.hypot(
+                (left + width / 2 - centerX) / Math.max(1, bounds.width),
+                (top + height / 2 - centerY) / Math.max(1, bounds.height)
+            );
+            candidates.push({
+                group: group,
+                x: left + width / 2,
+                y: top + height / 2,
+                width: width,
+                height: height,
+                row: cell.row,
+                col: cell.col,
+                score: coverage * 2 - normalizedDistance
+            });
+        }, this);
+
+        candidates.sort(function (a, b) { return b.score - a.score; });
+        var used = new Set(), largeCells = [];
+        for (var i = 0; i < candidates.length && largeCells.length < desiredLarge; i++) {
+            var candidate = candidates[i];
+            if (candidate.group.some(function (cell) { return used.has(cell); })) continue;
+            candidate.group.forEach(function (cell) { used.add(cell); });
+            largeCells.push({
+                x: candidate.x,
+                y: candidate.y,
+                baseX: candidate.x - candidate.width / 2,
+                baseY: candidate.y - candidate.height / 2,
+                width: candidate.width,
+                height: candidate.height,
+                size: Math.max(candidate.width, candidate.height),
+                row: candidate.row,
+                col: candidate.col,
+                isLarge: true,
+                spanRows: spanRows,
+                spanCols: spanCols
+            });
+        }
+        return cells.filter(function (cell) { return !used.has(cell); }).concat(largeCells);
+    };
+
+    PhotoWall.prototype._countCells = function (cellSize) {
+        var b = this.maskData.bounds, count = 0;
+        var cols = Math.max(1, Math.ceil(b.width / cellSize));
+        var rows = Math.max(1, Math.ceil(b.height / cellSize));
+        var cellW = b.width / cols, cellH = b.height / rows;
+        var offset = this.placementMode === 'brick';
+        for (var row = 0; row < rows; row++) {
+            var shift = offset && row % 2 ? -cellW / 2 : 0;
+            var extra = offset ? 1 : 0;
+            for (var col = 0; col < cols + extra; col++) {
+                var x = b.x + col * cellW + shift;
+                var y = b.y + row * cellH;
+                if (this._rectMaskArea(x, y, cellW, cellH) > 0) count++;
+            }
+        }
+        return count;
+    };
+
+    PhotoWall.prototype._refreshOrderCache = function () {
+        this._renderOrder = this.layout.map(function (_, index) { return index; }).sort(function (a, b) {
+            return (Number(this.layout[a].zIndex) || 0) - (Number(this.layout[b].zIndex) || 0);
+        }.bind(this));
+        this._hitOrder = this._renderOrder.slice().reverse();
     };
 
     PhotoWall.prototype.generateLayout = function (forceRandom, skipAnimation) {
@@ -228,26 +378,39 @@
         this.generateMask();
         if (!this.photos.length || !this.maskData.insideCount) {
             this.layout = [];
+            this._refreshOrderCache();
             this.render();
-            if (this.onLayout) this.onLayout(0);
+            if (this.onLayout) this.onLayout(0, 0);
             return;
         }
         var b = this.maskData.bounds;
         var target = Math.max(1, Math.round(this.photos.length * this.density));
+        var desiredLarge = this.mixedSizes && target >= 8 ? Math.max(1, Math.min(80, Math.round(target * 0.1))) : 0;
+        var reductionPerLarge = this.placementMode === 'brick' ? 1 : 3;
+        var baseTarget = target + desiredLarge * reductionPerLarge;
         var fillRatio = this.maskData.insideCount / Math.max(1, b.width * b.height);
-        var estimated = Math.sqrt((b.width * b.height * fillRatio) / target);
-        var best = [], bestDelta = Infinity;
-        for (var factor = 0.55; factor <= 1.75; factor += 0.05) {
-            var candidate = this._buildCells(Math.max(8, estimated * factor));
-            var delta = Math.abs(candidate.length - target);
-            if (delta < bestDelta || (delta === bestDelta && candidate.length >= target)) {
-                best = candidate; bestDelta = delta;
+        var estimated = Math.sqrt((b.width * b.height * fillRatio) / baseTarget);
+        var low = Math.max(8, estimated * 0.5);
+        var high = Math.max(low + 1, estimated * 2);
+        var bestSize = estimated, bestCount = this._countCells(estimated), bestDelta = Math.abs(bestCount - baseTarget);
+        for (var search = 0; search < 9; search++) {
+            var candidateSize = (low + high) / 2;
+            var candidateCount = this._countCells(candidateSize);
+            var delta = Math.abs(candidateCount - baseTarget);
+            if (delta < bestDelta || (delta === bestDelta && candidateCount >= baseTarget && bestCount < baseTarget)) {
+                bestSize = candidateSize;
+                bestCount = candidateCount;
+                bestDelta = delta;
             }
+            if (candidateCount > baseTarget) low = candidateSize;
+            else high = candidateSize;
         }
-        if (!best.length) best = this._buildCells(Math.max(8, estimated));
+        var best = this._buildCells(Math.max(8, bestSize));
+        best = this._mergeLargeCells(best, desiredLarge);
         this.layout = this._assignPhotos(best, forceRandom);
+        this._refreshOrderCache();
         this.hoveredIndex = -1; this.draggingIndex = -1; this.dragOverIndex = -1;
-        if (this.onLayout) this.onLayout(this.layout.length);
+        if (this.onLayout) this.onLayout(this.layout.length, this.layout.filter(function (item) { return item.isLarge; }).length);
         if (skipAnimation) this.render(); else this._animate();
     };
 
@@ -267,8 +430,31 @@
                 var tmp = order[s]; order[s] = order[r]; order[r] = tmp;
             }
         }
+        var featuredOrder = order.filter(function (photoIndex) { return this.photos[photoIndex].featured; }, this);
+        var regularOrder = order.filter(function (photoIndex) { return !this.photos[photoIndex].featured; }, this);
+        if (!regularOrder.length) regularOrder = order.slice();
+        var largeFallback = order.filter(function (photoIndex) {
+            return !this.photos[photoIndex].featured;
+        }, this).sort(function (a, b) {
+            var photoA = this.photos[a], photoB = this.photos[b];
+            return ((photoB.sharpness || 0) + (photoB.contrast || 0) * 0.2) -
+                ((photoA.sharpness || 0) + (photoA.contrast || 0) * 0.2);
+        }.bind(this));
+        var largeOrder = featuredOrder.concat(largeFallback);
+        if (!largeOrder.length) largeOrder = order.slice();
+        var largeAssignments = new Map(), assignedToLarge = new Set(), largeIndex = 0;
+        cells.forEach(function (cell) {
+            if (!cell.isLarge) return;
+            var assignedIndex = largeOrder[largeIndex++ % largeOrder.length];
+            largeAssignments.set(cell, assignedIndex);
+            assignedToLarge.add(assignedIndex);
+        });
+        var smallOrder = order.filter(function (photoIndex) { return !assignedToLarge.has(photoIndex); })
+            .concat(order.filter(function (photoIndex) { return assignedToLarge.has(photoIndex); }));
+        if (!smallOrder.length) smallOrder = order.slice();
+        var regularIndex = 0;
         return cells.map(function (cell, index) {
-            var photoIndex = order[index % n];
+            var photoIndex = cell.isLarge ? largeAssignments.get(cell) : smallOrder[regularIndex++ % smallOrder.length];
             var seed = (((cell.row + 1) * 2654435761) ^ ((cell.col + 1) * 1597334677) ^ (index * 3812015801)) >>> 0;
             var unitRotation = (seed % 2001) / 1000 - 1;
             cell.slotId = 'slot-' + (++this._slotSequence) + '-' + seed.toString(36);
@@ -321,9 +507,8 @@
         lx.globalAlpha = 1;
         var t = progress === undefined ? 1 : Math.max(0, Math.min(1, progress));
         var eased = 1 - Math.pow(1 - t, 3);
-        var renderOrder = this.layout.map(function (_, index) { return index; }).sort(function (a, b) {
-            return (Number(this.layout[a].zIndex) || 0) - (Number(this.layout[b].zIndex) || 0);
-        }.bind(this));
+        if (this._renderOrder.length !== this.layout.length) this._refreshOrderCache();
+        var renderOrder = this._renderOrder;
         for (var orderIndex = 0; orderIndex < renderOrder.length; orderIndex++) {
             var i = renderOrder[orderIndex];
             if (!exportMode && i === this.draggingIndex) continue;
@@ -361,7 +546,11 @@
         var dw, dh;
         if (imageAspect > boxAspect) { dh = height; dw = height * imageAspect; }
         else { dw = width; dh = width / imageAspect; }
-        ctx.drawImage(img, -dw / 2, -dh / 2, dw, dh);
+        var focusX = Number.isFinite(item.photo.focusX) ? item.photo.focusX : 0.5;
+        var focusY = Number.isFinite(item.photo.focusY) ? item.photo.focusY : 0.5;
+        var drawX = Math.max(width / 2 - dw, Math.min(-width / 2, -dw * focusX));
+        var drawY = Math.max(height / 2 - dh, Math.min(-height / 2, -dh * focusY));
+        ctx.drawImage(img, drawX, drawY, dw, dh);
         if (hovered || dropTarget) {
             ctx.shadowColor = 'transparent'; ctx.lineWidth = 2;
             ctx.strokeStyle = dropTarget ? '#60e1be' : '#a99cff';
@@ -408,28 +597,100 @@
         ctx.restore();
     };
 
+    PhotoWall.prototype.getExportBounds = function () {
+        if (!this.maskData || !this.maskData.bounds) {
+            return { x: 0, y: 0, width: Math.round(this.cssWidth), height: Math.round(this.cssHeight) };
+        }
+        var bounds = this.maskData.bounds;
+        var padding = Math.max(2, Math.min(8, Math.min(bounds.width, bounds.height) * 0.01));
+        var left = Math.max(0, Math.floor(bounds.x - padding));
+        var top = Math.max(0, Math.floor(bounds.y - padding));
+        var right = Math.min(Math.round(this.cssWidth), Math.ceil(bounds.x + bounds.width + padding));
+        var bottom = Math.min(Math.round(this.cssHeight), Math.ceil(bounds.y + bounds.height + padding));
+        return {
+            x: left,
+            y: top,
+            width: Math.max(1, right - left),
+            height: Math.max(1, bottom - top)
+        };
+    };
+
+    PhotoWall.prototype.getExportFrame = function (aspectRatio) {
+        var bounds = this.getExportBounds();
+        var ratios = { '3:4': 3 / 4, '9:16': 9 / 16 };
+        var targetRatio = ratios[aspectRatio];
+        if (!targetRatio) return bounds;
+
+        var width = bounds.width;
+        var height = bounds.height;
+        if (width / height > targetRatio) height = width / targetRatio;
+        else width = height * targetRatio;
+        return {
+            x: bounds.x - (width - bounds.width) / 2,
+            y: bounds.y - (height - bounds.height) / 2,
+            width: width,
+            height: height
+        };
+    };
+
+    PhotoWall.prototype.getExportDimensions = function (scale, aspectRatio) {
+        scale = Math.max(0.1, Math.min(3, Number(scale) || 2));
+        var bounds = this.getExportFrame(aspectRatio);
+        var ratioUnits = { '3:4': [3, 4], '9:16': [9, 16] }[aspectRatio];
+        if (ratioUnits) {
+            var unit = Math.ceil(Math.max(
+                bounds.width * scale / ratioUnits[0],
+                bounds.height * scale / ratioUnits[1]
+            ));
+            return { width: unit * ratioUnits[0], height: unit * ratioUnits[1] };
+        }
+        return {
+            width: Math.max(1, Math.round(bounds.width * scale)),
+            height: Math.max(1, Math.round(bounds.height * scale))
+        };
+    };
+
     PhotoWall.prototype.createExportCanvas = function (options) {
         options = options || {};
-        var scale = Math.max(1, Math.min(3, Number(options.scale) || 2));
+        var scale = Math.max(0.1, Math.min(3, Number(options.scale) || 2));
         var background = options.background === undefined ? '#ffffff' : options.background;
+        if (!this.cssWidth || !this.cssHeight || !this.maskData || !this.maskData.maskCanvas || !this.layout.length) {
+            var empty = document.createElement('canvas');
+            empty.width = 1;
+            empty.height = 1;
+            var emptyContext = empty.getContext('2d');
+            if (emptyContext && background && background !== 'transparent') {
+                emptyContext.fillStyle = background;
+                emptyContext.fillRect(0, 0, 1, 1);
+            }
+            return empty;
+        }
+        var bounds = this.getExportFrame(options.aspectRatio);
+        var dimensions = this.getExportDimensions(scale, options.aspectRatio);
+        var frameWidth = dimensions.width / scale;
+        var frameHeight = dimensions.height / scale;
+        bounds.x -= (frameWidth - bounds.width) / 2;
+        bounds.y -= (frameHeight - bounds.height) / 2;
+        bounds.width = frameWidth;
+        bounds.height = frameHeight;
         var out = document.createElement('canvas');
-        out.width = Math.round(this.cssWidth * scale); out.height = Math.round(this.cssHeight * scale);
+        out.width = dimensions.width;
+        out.height = dimensions.height;
         var ox = out.getContext('2d');
+        if (!ox) return out;
         ox.imageSmoothingEnabled = true;
         ox.imageSmoothingQuality = 'high';
 
         // Render from the original photos at the requested scale. Scaling the
         // visible editor canvas made 2×/3× exports larger, but not truly sharper.
-        ox.setTransform(scale, 0, 0, scale, 0, 0);
-        var renderOrder = this.layout.slice().sort(function (a, b) {
-            return (Number(a.zIndex) || 0) - (Number(b.zIndex) || 0);
-        });
-        for (var i = 0; i < renderOrder.length; i++) {
-            this._drawPhoto(ox, renderOrder[i], false, 1, false);
+        ox.setTransform(scale, 0, 0, scale, -bounds.x * scale, -bounds.y * scale);
+        if (this._renderOrder.length !== this.layout.length) this._refreshOrderCache();
+        for (var i = 0; i < this._renderOrder.length; i++) {
+            this._drawPhoto(ox, this.layout[this._renderOrder[i]], false, 1, false);
         }
-        ox.setTransform(1, 0, 0, 1, 0, 0);
         ox.globalCompositeOperation = 'destination-in';
-        ox.drawImage(this.maskData.maskCanvas, 0, 0, out.width, out.height);
+        ox.drawImage(this.maskData.maskCanvas, 0, 0, this.cssWidth, this.cssHeight);
+        ox.setTransform(1, 0, 0, 1, 0, 0);
 
         if (background && background !== 'transparent') {
             ox.globalCompositeOperation = 'destination-over';
@@ -479,7 +740,10 @@
                     rotation: Number(item.rotation) || 0,
                     zIndex: Number(item.zIndex) || 0,
                     row: item.row,
-                    col: item.col
+                    col: item.col,
+                    isLarge: item.isLarge === true,
+                    spanRows: item.spanRows,
+                    spanCols: item.spanCols
                 };
             })
         };
@@ -513,17 +777,21 @@
                 rotation: Math.max(-360, Math.min(360, Number(saved.rotation) || 0)),
                 zIndex: Math.max(-10000, Math.min(10000, Number(saved.zIndex) || 0)),
                 row: Number(saved.row) || 0,
-                col: Number(saved.col) || 0
+                col: Number(saved.col) || 0,
+                isLarge: saved.isLarge === true,
+                spanRows: Number(saved.spanRows) || 1,
+                spanCols: Number(saved.spanCols) || 1
             };
             item.size = Math.max(item.width, item.height);
             restored.push(item);
         }, this);
         if (!restored.length) return false;
         this.layout = restored;
+        this._refreshOrderCache();
         this.hoveredIndex = -1;
         this.draggingIndex = -1;
         this.dragOverIndex = -1;
-        if (this.onLayout) this.onLayout(this.layout.length);
+        if (this.onLayout) this.onLayout(this.layout.length, this.layout.filter(function (item) { return item.isLarge; }).length);
         this.render();
         return true;
     };
@@ -537,9 +805,8 @@
         var mx = Math.round(x), my = Math.round(y);
         if (mx < 0 || my < 0 || mx >= this.maskData.width || my >= this.maskData.height ||
             !this.maskData.mask[my * this.maskData.width + mx]) return -1;
-        var hitOrder = this.layout.map(function (_, index) { return index; }).sort(function (a, b) {
-            return (Number(this.layout[b].zIndex) || 0) - (Number(this.layout[a].zIndex) || 0);
-        }.bind(this));
+        if (this._hitOrder.length !== this.layout.length) this._refreshOrderCache();
+        var hitOrder = this._hitOrder;
         for (var orderIndex = 0; orderIndex < hitOrder.length; orderIndex++) {
             var i = hitOrder[orderIndex];
             var item = this.layout[i];
@@ -609,5 +876,4 @@
         });
     };
 
-    global.PhotoWall = PhotoWall;
-})(window);
+export { PhotoWall };

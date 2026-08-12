@@ -1,8 +1,10 @@
+import { Shapes, ShapeFactory } from './shapes.js';
+import { PhotoWall } from './photowall.js';
+
 /**
  * App controller — wires UI to PhotoWall engine.
  */
-(function () {
-    'use strict';
+'use strict';
 
     var app = {
         wall: null,
@@ -12,6 +14,10 @@
         densityTimer: null,
         overlapTimer: null,
         rotationTimer: null,
+        exportPreviewRAF: null,
+        exportReturnFocus: null,
+        shapeEditorReturnFocus: null,
+        lightboxReturnFocus: null,
         currentShapeKey: 'china',
         pendingShapeImage: null,
         shapePreviewRAF: null,
@@ -27,7 +33,8 @@
         redoStack: [],
         historyLimit: 30,
         isRestoring: false,
-        maxPhotos: 200,
+        photoObjectURLs: new Set(),
+        maxPhotos: 1000,
         maxFileSize: 40 * 1024 * 1024,
         maxPhotoDimension: 1600,
         photoLoadConcurrency: 3,
@@ -52,11 +59,12 @@
             app.toast('已交换两张照片的位置');
             app.updateActionState();
         };
-        app.wall.onLayout = function (slotCount) {
+        app.wall.onLayout = function (slotCount, largeCount) {
             var status = document.getElementById('canvas-status');
             if (!status) return;
             status.textContent = app.photos.length ?
-                app.photos.length + ' 张照片 · ' + slotCount + ' 个填充格位 · 本地处理' :
+                app.photos.length + ' 张照片 · ' + slotCount + ' 个填充格位' +
+                    (largeCount ? ' · ' + largeCount + ' 个大图' : '') + ' · 本地处理' :
                 '所有照片仅在本地处理';
             app.updateExportDimensions();
         };
@@ -78,6 +86,10 @@
             app.resizeTimer = setTimeout(function () {
                 app.wall.resize();
             }, 200);
+        });
+        window.addEventListener('beforeunload', function () {
+            app.photoObjectURLs.forEach(function (url) { URL.revokeObjectURL(url); });
+            app.photoObjectURLs.clear();
         });
     };
 
@@ -279,6 +291,13 @@
             app.wall.setSmartPlacement(e.target.checked);
         });
 
+        // ---- Mixed large/small cells ----
+        document.getElementById('mixed-size-toggle').addEventListener('change', function (e) {
+            app.recordHistory();
+            app.wall.setMixedSizes(e.target.checked);
+            app.toast(e.target.checked ? '已开启大小图混排' : '已恢复统一大小');
+        });
+
         // ---- Placement mode buttons ----
         var modeContainer = document.getElementById('mode-buttons');
         modeContainer.addEventListener('click', function (e) {
@@ -341,11 +360,15 @@
         document.getElementById('export-dialog').addEventListener('click', function (e) {
             if (e.target === this) app.closeExportDialog();
         });
-        document.querySelectorAll('input[name="export-format"], input[name="export-scale"]').forEach(function (input) {
+        document.querySelectorAll('input[name="export-format"], input[name="export-scale"], input[name="export-aspect"]').forEach(function (input) {
             input.addEventListener('change', app.updateExportOptions);
+        });
+        document.querySelectorAll('input[name="export-background"]').forEach(function (input) {
+            input.addEventListener('change', app.scheduleExportPreview);
         });
         document.getElementById('export-background-color').addEventListener('input', function () {
             document.querySelector('input[name="export-background"][value="custom"]').checked = true;
+            app.scheduleExportPreview();
         });
         document.getElementById('export-confirm').addEventListener('click', app.exportImage);
 
@@ -392,13 +415,22 @@
                 app.closeShapeEditor();
                 return;
             }
+            if (e.key === 'Tab' && document.getElementById('shape-editor').classList.contains('active')) {
+                app.trapDialogFocus(e, document.querySelector('#shape-editor .shape-editor-card'));
+                return;
+            }
             if (e.key === 'Escape' && document.getElementById('export-dialog').classList.contains('active')) {
                 app.closeExportDialog();
                 return;
             }
+            if (e.key === 'Tab' && document.getElementById('export-dialog').classList.contains('active')) {
+                app.trapDialogFocus(e, document.querySelector('#export-dialog .export-card'));
+                return;
+            }
             var lb = document.getElementById('lightbox');
             if (!lb.classList.contains('active')) return;
-            if (e.key === 'Escape') app.closeLightbox();
+            if (e.key === 'Tab') app.trapDialogFocus(e, lb);
+            else if (e.key === 'Escape') app.closeLightbox();
             else if (e.key === 'ArrowLeft') app.navigateLightbox(-1);
             else if (e.key === 'ArrowRight') app.navigateLightbox(1);
         });
@@ -598,6 +630,10 @@
     };
 
     app.openShapeEditor = function (img) {
+        var activeElement = document.activeElement;
+        var editor = document.getElementById('shape-editor');
+        app.shapeEditorReturnFocus = activeElement && activeElement !== document.body && activeElement.id !== 'shape-file-input' && !editor.contains(activeElement) ?
+            activeElement : document.getElementById('custom-shape-btn');
         app.pendingShapeImage = img;
         document.getElementById('shape-extract-mode').value = 'portrait';
         document.getElementById('shape-threshold').value = '46';
@@ -615,7 +651,10 @@
         app.updateMaskBrushActions();
         document.getElementById('shape-mask-preview').classList.add('editable');
         app.updateShapeModeUI('portrait');
-        document.getElementById('shape-editor').classList.add('active');
+        document.querySelector('.app').inert = true;
+        editor.classList.add('active');
+        editor.setAttribute('aria-hidden', 'false');
+        setTimeout(function () { document.getElementById('shape-editor-close').focus(); }, 0);
         requestAnimationFrame(app.updateShapePreview);
     };
 
@@ -632,7 +671,7 @@
     };
 
     app.closeShapeEditor = function () {
-        document.getElementById('shape-editor').classList.remove('active');
+        app.hideShapeEditor();
         app.pendingShapeImage = null;
         app.maskBrushPointerId = null;
         app.maskPreviewMeta = null;
@@ -640,6 +679,15 @@
         app.shapeCropPointerId = null;
         if (app.shapePreviewRAF) cancelAnimationFrame(app.shapePreviewRAF);
         app.shapePreviewRAF = null;
+    };
+
+    app.hideShapeEditor = function () {
+        var editor = document.getElementById('shape-editor');
+        editor.classList.remove('active');
+        editor.setAttribute('aria-hidden', 'true');
+        document.querySelector('.app').inert = false;
+        if (app.shapeEditorReturnFocus && typeof app.shapeEditorReturnFocus.focus === 'function') app.shapeEditorReturnFocus.focus();
+        app.shapeEditorReturnFocus = null;
     };
 
     app.scheduleShapePreview = function () {
@@ -693,7 +741,7 @@
         if (!app.pendingShapeImage) return;
         var img = app.pendingShapeImage;
         var options = app.getShapeEditorOptions();
-        document.getElementById('shape-editor').classList.remove('active');
+        app.hideShapeEditor();
         app.showLoading(true, '正在生成轮廓…');
         ShapeFactory.fromImage(img, options).then(function (shape) {
             var key = 'custom_' + Date.now();
@@ -716,7 +764,7 @@
     app.renderShapeButtons = function () {
         var container = document.getElementById('shape-buttons');
         var html = '';
-        var keys = ['china', 'heart', 'portrait'];
+        var keys = Shapes.keys().filter(function (key) { return !Shapes[key].dynamic; });
         keys.forEach(function (key, idx) {
             var shape = Shapes[key];
             html += app.buildShapeButtonHTML(key, shape, idx === 0);
@@ -799,10 +847,11 @@
         }
 
         var total = imageFiles.length;
+        var importDimension = app.getPhotoImportDimension(app.photos.length + total);
         app.showLoading(true, '正在读取 0/' + total + ' 张照片…');
         app.loadPhotoBatch(imageFiles, function (completed) {
             app.showLoading(true, '正在读取 ' + completed + '/' + total + ' 张照片…');
-        }).then(function (loadedPhotos) {
+        }, importDimension).then(function (loadedPhotos) {
             var valid = loadedPhotos.filter(Boolean);
             if (valid.length) app.recordHistory();
             Array.prototype.push.apply(app.photos, valid);
@@ -820,7 +869,7 @@
         });
     };
 
-    app.loadPhotoBatch = function (files, onProgress) {
+    app.loadPhotoBatch = function (files, onProgress, maxDimension) {
         var results = new Array(files.length);
         var nextIndex = 0;
         var completed = 0;
@@ -829,7 +878,7 @@
         function runWorker() {
             var index = nextIndex++;
             if (index >= files.length) return Promise.resolve();
-            return app.loadPhoto(files[index]).then(function (photo) {
+            return app.loadPhoto(files[index], maxDimension).then(function (photo) {
                 results[index] = photo;
             }).catch(function (err) {
                 console.error('图片加载失败:', files[index].name, err);
@@ -846,20 +895,22 @@
         return Promise.all(workers).then(function () { return results; });
     };
 
-    app.loadPhoto = function (file) {
+    app.loadPhoto = function (file, maxDimension) {
         return new Promise(function (resolve, reject) {
-            var reader = new FileReader();
+            var bitmap = null;
             var img = null;
+            var objectURL = '';
             var settled = false;
             var timeout = setTimeout(function () {
                 if (settled) return;
                 settled = true;
-                if (reader.readyState === FileReader.LOADING) reader.abort();
+                if (bitmap && typeof bitmap.close === 'function') bitmap.close();
                 if (img) {
                     img.onload = null;
                     img.onerror = null;
                     img.src = '';
                 }
+                if (objectURL) URL.revokeObjectURL(objectURL);
                 reject(new Error('load timed out'));
             }, app.photoLoadTimeout);
 
@@ -867,9 +918,8 @@
                 if (settled) return;
                 settled = true;
                 clearTimeout(timeout);
-                reader.onload = null;
-                reader.onerror = null;
-                reader.onabort = null;
+                if (bitmap && typeof bitmap.close === 'function') bitmap.close();
+                bitmap = null;
                 if (img) {
                     img.onload = null;
                     img.onerror = null;
@@ -885,73 +935,100 @@
                         id: app.createId('photo'),
                         img: loadedImage,
                         src: source,
+                        blob: fileBlob,
                         name: file.name,
                         signature: [file.name, file.size, file.lastModified].join(':'),
                         r: analysis.r,
                         g: analysis.g,
                         b: analysis.b,
                         brightness: analysis.brightness,
-                        hue: analysis.hue
+                        hue: analysis.hue,
+                        saturation: analysis.saturation,
+                        contrast: analysis.contrast,
+                        sharpness: analysis.sharpness,
+                        focusX: analysis.focusX,
+                        focusY: analysis.focusY,
+                        aspectRatio: analysis.aspectRatio,
+                        featured: false
                     });
                 } catch (err) {
                     finish(reject, err);
                 }
             }
 
-            reader.onload = function (e) {
+            var fileBlob = null;
+            app.createPhotoBlob(file, maxDimension).then(function (result) {
+                if (settled) {
+                    if (result.bitmap && typeof result.bitmap.close === 'function') result.bitmap.close();
+                    return;
+                }
+                bitmap = result.bitmap;
+                fileBlob = result.blob;
+                objectURL = URL.createObjectURL(fileBlob);
                 img = new Image();
                 img.onload = function () {
-                    try {
-                        var preparedSource = app.preparePhotoSource(img, e.target.result, file);
-                        if (preparedSource === e.target.result) {
-                            createPhoto(img, preparedSource);
-                            return;
-                        }
-
-                        img.onload = null;
-                        img.onerror = null;
-                        var resizedImage = new Image();
-                        img = resizedImage;
-                        resizedImage.onload = function () { createPhoto(resizedImage, preparedSource); };
-                        resizedImage.onerror = function () { finish(reject, new Error('resized image decode failed')); };
-                        resizedImage.src = preparedSource;
-                    } catch (err) {
-                        finish(reject, err);
-                    }
+                    app.photoObjectURLs.add(objectURL);
+                    createPhoto(img, objectURL);
                 };
                 img.onerror = function () { finish(reject, new Error('decode failed')); };
-                img.src = e.target.result;
-            };
-            reader.onerror = function () { finish(reject, new Error('read failed')); };
-            reader.onabort = function () { finish(reject, new Error('read aborted')); };
-            try {
-                reader.readAsDataURL(file);
-            } catch (err) {
-                finish(reject, err);
-            }
+                img.src = objectURL;
+            }).catch(function (error) {
+                finish(reject, error);
+            });
         });
     };
 
-    app.preparePhotoSource = function (img, originalSource, file) {
-        var maxSide = Math.max(img.naturalWidth, img.naturalHeight);
-        if (!maxSide || maxSide <= app.maxPhotoDimension) return originalSource;
+    app.getPhotoImportDimension = function (projectedCount) {
+        if (projectedCount > 600) return 480;
+        if (projectedCount > 300) return 640;
+        if (projectedCount > 150) return 800;
+        if (projectedCount > 60) return 1200;
+        return app.maxPhotoDimension;
+    };
 
-        var scale = app.maxPhotoDimension / maxSide;
-        var canvas = document.createElement('canvas');
-        canvas.width = Math.max(1, Math.round(img.naturalWidth * scale));
-        canvas.height = Math.max(1, Math.round(img.naturalHeight * scale));
-        canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
-
+    app.createPhotoBlob = function (file, maxDimension) {
+        maxDimension = Math.max(320, Math.min(app.maxPhotoDimension, Number(maxDimension) || app.maxPhotoDimension));
         var mime = app.supportedImageTypes.indexOf(file.type) >= 0 ? file.type : '';
         if (!mime) {
             if (/\.png$/i.test(file.name)) mime = 'image/png';
             else if (/\.webp$/i.test(file.name)) mime = 'image/webp';
             else mime = 'image/jpeg';
         }
-        var resizedSource = canvas.toDataURL(mime, mime === 'image/png' ? undefined : 0.9);
-        canvas.width = 1;
-        canvas.height = 1;
-        return resizedSource;
+        var bitmapPromise = typeof window.createImageBitmap === 'function' ?
+            window.createImageBitmap(file) : app.createImageBitmapFallback(file);
+        return bitmapPromise.then(function (bitmap) {
+            var maxSide = Math.max(bitmap.width, bitmap.height);
+            if (!maxSide || maxSide <= maxDimension) return { blob: file, bitmap: bitmap };
+            var scale = maxDimension / maxSide;
+            var canvas = document.createElement('canvas');
+            canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+            canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+            canvas.getContext('2d').drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+            return new Promise(function (resolve, reject) {
+                canvas.toBlob(function (blob) {
+                    canvas.width = 1;
+                    canvas.height = 1;
+                    if (blob) resolve({ blob: blob, bitmap: bitmap });
+                    else reject(new Error('resize encode failed'));
+                }, mime, mime === 'image/png' ? undefined : 0.9);
+            });
+        });
+    };
+
+    app.createImageBitmapFallback = function (blob) {
+        return new Promise(function (resolve, reject) {
+            var url = URL.createObjectURL(blob);
+            var image = new Image();
+            image.onload = function () {
+                URL.revokeObjectURL(url);
+                resolve(image);
+            };
+            image.onerror = function () {
+                URL.revokeObjectURL(url);
+                reject(new Error('image decode failed'));
+            };
+            image.src = url;
+        });
     };
 
     app.clearPhotos = function () {
@@ -979,13 +1056,58 @@
         var panel = document.getElementById('photo-library-panel');
         var library = document.getElementById('photo-library');
         panel.hidden = app.photos.length === 0;
-        library.innerHTML = app.photos.map(function (photo, index) {
-            return '<div class="photo-card" draggable="true" data-index="' + index + '" title="拖拽排序">' +
-                '<span class="photo-order">' + (index + 1) + '</span>' +
-                '<img src="' + photo.src + '" alt="">' +
-                '<button class="photo-remove" type="button" aria-label="移除 ' + app.escapeHTML(photo.name) + '">×</button>' +
-                '</div>';
-        }).join('');
+        var existing = new Map();
+        library.querySelectorAll('.photo-card[data-photo-id]').forEach(function (card) {
+            existing.set(card.getAttribute('data-photo-id'), card);
+        });
+        var fragment = document.createDocumentFragment();
+        app.photos.forEach(function (photo, index) {
+            var card = existing.get(photo.id);
+            if (!card) card = app.createPhotoCard(photo);
+            existing.delete(photo.id);
+            card.setAttribute('data-index', index);
+            card.classList.remove('dragging', 'drag-over');
+            card.querySelector('.photo-order').textContent = index + 1;
+            var image = card.querySelector('img');
+            if (image.src !== photo.src) image.src = photo.src;
+            image.alt = photo.name || '';
+            card.querySelector('.photo-remove').setAttribute('aria-label', '移除 ' + (photo.name || '照片'));
+            var feature = card.querySelector('.photo-feature');
+            feature.classList.toggle('active', photo.featured === true);
+            feature.setAttribute('aria-pressed', photo.featured === true ? 'true' : 'false');
+            feature.setAttribute('aria-label', (photo.featured ? '取消重点照片 ' : '设为重点照片 ') + (photo.name || ''));
+            fragment.appendChild(card);
+        });
+        existing.forEach(function (card) { card.remove(); });
+        library.appendChild(fragment);
+    };
+
+    app.createPhotoCard = function (photo) {
+        var card = document.createElement('div');
+        card.className = 'photo-card';
+        card.draggable = true;
+        card.title = '拖拽排序';
+        card.setAttribute('data-photo-id', photo.id);
+        var order = document.createElement('span');
+        order.className = 'photo-order';
+        var image = document.createElement('img');
+        image.alt = photo.name || '';
+        image.decoding = 'async';
+        image.loading = 'lazy';
+        var remove = document.createElement('button');
+        remove.className = 'photo-remove';
+        remove.type = 'button';
+        remove.textContent = '×';
+        var feature = document.createElement('button');
+        feature.className = 'photo-feature';
+        feature.type = 'button';
+        feature.textContent = '★';
+        feature.title = '重点照片优先进入大图格位';
+        card.appendChild(order);
+        card.appendChild(image);
+        card.appendChild(feature);
+        card.appendChild(remove);
+        return card;
     };
 
     app.escapeHTML = function (value) {
@@ -1033,6 +1155,18 @@
             });
         });
         library.addEventListener('click', function (e) {
+            var feature = e.target.closest('.photo-feature');
+            if (feature) {
+                var featureCard = feature.closest('.photo-card');
+                var featureIndex = parseInt(featureCard.getAttribute('data-index'), 10);
+                if (!app.photos[featureIndex]) return;
+                app.recordHistory();
+                app.photos[featureIndex].featured = !app.photos[featureIndex].featured;
+                app.renderPhotoLibrary();
+                app.wall.setPhotos(app.photos);
+                app.toast(app.photos[featureIndex].featured ? '已设为重点照片，将优先显示为大图' : '已取消重点照片');
+                return;
+            }
             var remove = e.target.closest('.photo-remove');
             if (!remove) return;
             var card = remove.closest('.photo-card');
@@ -1051,7 +1185,7 @@
      *  Portable project files
      * ------------------------------------------------------------------ */
 
-    app.serializeProject = function () {
+    app.serializeProject = function (photoSources) {
         var shape = Shapes[app.currentShapeKey];
         var shapeData = { key: app.currentShapeKey, name: shape && shape.name };
         if (shape && shape.maskCanvas) {
@@ -1071,19 +1205,27 @@
                 placementMode: app.wall.placementMode,
                 photoShape: app.wall.photoShape,
                 smartPlacement: app.wall.smartPlacement,
+                mixedSizes: app.wall.mixedSizes,
                 rotationRange: app.wall.rotationRange
             },
-            photos: app.photos.map(function (photo) {
+            photos: app.photos.map(function (photo, index) {
                 return {
                     id: photo.id,
-                    src: photo.src,
+                    src: photoSources ? photoSources[index] : photo.src,
                     name: photo.name,
                     signature: photo.signature,
                     r: photo.r,
                     g: photo.g,
                     b: photo.b,
                     brightness: photo.brightness,
-                    hue: photo.hue
+                    hue: photo.hue,
+                    saturation: photo.saturation,
+                    contrast: photo.contrast,
+                    sharpness: photo.sharpness,
+                    focusX: photo.focusX,
+                    focusY: photo.focusY,
+                    aspectRatio: photo.aspectRatio,
+                    featured: photo.featured === true
                 };
             }),
             layout: app.wall.getLayoutSnapshot()
@@ -1095,8 +1237,16 @@
             app.toast('请先添加照片');
             return;
         }
-        try {
-            var project = app.serializeProject();
+        app.showLoading(true, '正在打包项目…');
+        Promise.all(app.photos.map(function (photo) {
+            if (photo.blob) return app.blobToDataURL(photo.blob);
+            if (/^data:image\//i.test(photo.src)) return Promise.resolve(photo.src);
+            return fetch(photo.src).then(function (response) {
+                if (!response.ok) throw new Error('photo fetch failed');
+                return response.blob();
+            }).then(app.blobToDataURL);
+        })).then(function (photoSources) {
+            var project = app.serializeProject(photoSources);
             var blob = new Blob([JSON.stringify(project)], { type: 'application/json' });
             var url = URL.createObjectURL(blob);
             var a = document.createElement('a');
@@ -1108,11 +1258,22 @@
             a.click();
             a.remove();
             setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+            app.showLoading(false);
             app.toast('项目已保存，可继续编辑');
-        } catch (error) {
+        }).catch(function (error) {
             console.error(error);
+            app.showLoading(false);
             app.toast('项目保存失败');
-        }
+        });
+    };
+
+    app.blobToDataURL = function (blob) {
+        return new Promise(function (resolve, reject) {
+            var reader = new FileReader();
+            reader.onload = function () { resolve(reader.result); };
+            reader.onerror = function () { reject(new Error('blob encode failed')); };
+            reader.readAsDataURL(blob);
+        });
     };
 
     app.openProject = function (file) {
@@ -1154,24 +1315,76 @@
                 return;
             }
             var img = new Image();
+            var settled = false;
+            var timeout = setTimeout(function () {
+                if (settled) return;
+                settled = true;
+                img.onload = null;
+                img.onerror = null;
+                img.src = '';
+                reject(new Error('project photo load timed out'));
+            }, app.photoLoadTimeout);
+
+            function finish(callback, value) {
+                if (settled) return;
+                settled = true;
+                clearTimeout(timeout);
+                img.onload = null;
+                img.onerror = null;
+                callback(value);
+            }
+
             img.onload = function () {
-                var analysis = PhotoWall.analyzePhoto(img);
-                resolve({
-                    id: saved.id || app.createId('photo'),
-                    img: img,
-                    src: saved.src,
-                    name: saved.name || '未命名照片',
-                    signature: saved.signature || '',
-                    r: Number.isFinite(saved.r) ? saved.r : analysis.r,
-                    g: Number.isFinite(saved.g) ? saved.g : analysis.g,
-                    b: Number.isFinite(saved.b) ? saved.b : analysis.b,
-                    brightness: Number.isFinite(saved.brightness) ? saved.brightness : analysis.brightness,
-                    hue: Number.isFinite(saved.hue) ? saved.hue : analysis.hue
-                });
+                try {
+                    var analysis = PhotoWall.analyzePhoto(img);
+                    finish(resolve, {
+                        id: saved.id || app.createId('photo'),
+                        img: img,
+                        src: saved.src,
+                        name: saved.name || '未命名照片',
+                        signature: saved.signature || '',
+                        r: Number.isFinite(saved.r) ? saved.r : analysis.r,
+                        g: Number.isFinite(saved.g) ? saved.g : analysis.g,
+                        b: Number.isFinite(saved.b) ? saved.b : analysis.b,
+                        brightness: Number.isFinite(saved.brightness) ? saved.brightness : analysis.brightness,
+                        hue: Number.isFinite(saved.hue) ? saved.hue : analysis.hue,
+                        saturation: Number.isFinite(saved.saturation) ? saved.saturation : analysis.saturation,
+                        contrast: Number.isFinite(saved.contrast) ? saved.contrast : analysis.contrast,
+                        sharpness: Number.isFinite(saved.sharpness) ? saved.sharpness : analysis.sharpness,
+                        focusX: Number.isFinite(saved.focusX) ? saved.focusX : analysis.focusX,
+                        focusY: Number.isFinite(saved.focusY) ? saved.focusY : analysis.focusY,
+                        aspectRatio: Number.isFinite(saved.aspectRatio) ? saved.aspectRatio : analysis.aspectRatio,
+                        featured: saved.featured === true
+                    });
+                } catch (error) {
+                    finish(reject, error);
+                }
             };
-            img.onerror = function () { reject(new Error('photo decode failed')); };
+            img.onerror = function () { finish(reject, new Error('photo decode failed')); };
             img.src = saved.src;
         });
+    };
+
+    app.loadProjectPhotoBatch = function (savedPhotos, onProgress) {
+        var results = new Array(savedPhotos.length);
+        var nextIndex = 0;
+        var completed = 0;
+        var workerCount = Math.min(app.photoLoadConcurrency, savedPhotos.length);
+
+        function runWorker() {
+            var index = nextIndex++;
+            if (index >= savedPhotos.length) return Promise.resolve();
+            return app.loadProjectPhoto(savedPhotos[index]).then(function (photo) {
+                results[index] = photo;
+                completed++;
+                if (onProgress) onProgress(completed, savedPhotos.length);
+                return runWorker();
+            });
+        }
+
+        var workers = [];
+        for (var i = 0; i < workerCount; i++) workers.push(runWorker());
+        return Promise.all(workers).then(function () { return results; });
     };
 
     app.restoreProjectShape = function (saved) {
@@ -1219,8 +1432,12 @@
     };
 
     app.restoreProject = function (project) {
+        var totalPhotos = project.photos.length;
+        app.showLoading(true, '正在恢复 0/' + totalPhotos + ' 张照片…');
         return Promise.all([
-            Promise.all(project.photos.map(app.loadProjectPhoto)),
+            app.loadProjectPhotoBatch(project.photos, function (completed) {
+                app.showLoading(true, '正在恢复 ' + completed + '/' + totalPhotos + ' 张照片…');
+            }),
             app.restoreProjectShape(project.shape)
         ]).then(function (results) {
             var photos = results[0];
@@ -1243,6 +1460,7 @@
                 placementMode: ['grid', 'brick', 'organic'].indexOf(settings.placementMode) >= 0 ? settings.placementMode : 'grid',
                 photoShape: ['circle', 'square', 'diamond', 'hexagon', 'heart'].indexOf(settings.photoShape) >= 0 ? settings.photoShape : 'square',
                 smartPlacement: settings.smartPlacement !== false,
+                mixedSizes: settings.mixedSizes !== false,
                 rotationRange: Math.max(0, Math.min(24, Number(settings.rotationRange) || 0)),
                 arrangement: [],
                 layout: project.layout
@@ -1258,13 +1476,14 @@
 
     app.captureState = function () {
         return {
-            photos: app.photos.slice(),
+            photos: app.photos.map(function (photo) { return Object.assign({}, photo); }),
             shapeKey: app.currentShapeKey,
             density: app.wall.density,
             gap: app.wall.gap,
             placementMode: app.wall.placementMode,
             photoShape: app.wall.photoShape,
             smartPlacement: app.wall.smartPlacement,
+            mixedSizes: app.wall.mixedSizes,
             rotationRange: app.wall.rotationRange,
             arrangement: app.wall.getArrangement(),
             layout: app.wall.getLayoutSnapshot()
@@ -1285,7 +1504,7 @@
         clearTimeout(app.overlapTimer);
         clearTimeout(app.rotationTimer);
         app.isRestoring = true;
-        app.photos = state.photos.slice();
+        app.photos = state.photos.map(function (photo) { return Object.assign({}, photo); });
         app.currentShapeKey = state.shapeKey;
 
         app.wall.density = state.density;
@@ -1293,6 +1512,7 @@
         app.wall.placementMode = state.placementMode;
         app.wall.photoShape = state.photoShape;
         app.wall.smartPlacement = state.smartPlacement;
+        app.wall.mixedSizes = state.mixedSizes !== false;
         app.wall.rotationRange = Number(state.rotationRange) || 0;
         app.wall.shapeKey = state.shapeKey;
         app.wall.shape = Shapes[state.shapeKey];
@@ -1314,6 +1534,7 @@
         document.getElementById('overlap-slider').value = state.gap;
         document.getElementById('overlap-value').textContent = Math.round(state.gap * 100) + '%';
         document.getElementById('smart-toggle').checked = state.smartPlacement;
+        document.getElementById('mixed-size-toggle').checked = app.wall.mixedSizes;
         document.getElementById('rotation-slider').value = app.wall.rotationRange;
         document.getElementById('rotation-value').textContent = app.wall.rotationRange + '°';
         app.updateModeHint();
@@ -1383,12 +1604,21 @@
     app.openLightbox = function (index) {
         app.lightboxIndex = index;
         var lb = document.getElementById('lightbox');
+        app.lightboxReturnFocus = document.activeElement === document.body ? document.getElementById('wall-canvas') : document.activeElement;
         app.updateLightboxImage();
+        document.querySelector('.app').inert = true;
         lb.classList.add('active');
+        lb.setAttribute('aria-hidden', 'false');
+        document.getElementById('lightbox-close').focus();
     };
 
     app.closeLightbox = function () {
-        document.getElementById('lightbox').classList.remove('active');
+        var lightbox = document.getElementById('lightbox');
+        lightbox.classList.remove('active');
+        lightbox.setAttribute('aria-hidden', 'true');
+        document.querySelector('.app').inert = false;
+        if (app.lightboxReturnFocus && typeof app.lightboxReturnFocus.focus === 'function') app.lightboxReturnFocus.focus();
+        app.lightboxReturnFocus = null;
         app.lightboxIndex = -1;
     };
 
@@ -1419,6 +1649,8 @@
             return;
         }
         var dialog = document.getElementById('export-dialog');
+        app.exportReturnFocus = document.activeElement;
+        document.querySelector('.app').inert = true;
         dialog.classList.add('active');
         dialog.setAttribute('aria-hidden', 'false');
         app.updateExportOptions();
@@ -1433,6 +1665,27 @@
         var dialog = document.getElementById('export-dialog');
         dialog.classList.remove('active');
         dialog.setAttribute('aria-hidden', 'true');
+        document.querySelector('.app').inert = false;
+        if (app.exportPreviewRAF) cancelAnimationFrame(app.exportPreviewRAF);
+        app.exportPreviewRAF = null;
+        if (app.exportReturnFocus && typeof app.exportReturnFocus.focus === 'function') app.exportReturnFocus.focus();
+        app.exportReturnFocus = null;
+    };
+
+    app.trapDialogFocus = function (event, dialog) {
+        if (!dialog) return;
+        var focusable = Array.prototype.slice.call(dialog.querySelectorAll(
+            'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+        )).filter(function (element) { return element.offsetParent !== null; });
+        if (!focusable.length) return;
+        var first = focusable[0], last = focusable[focusable.length - 1];
+        if (event.shiftKey && document.activeElement === first) {
+            event.preventDefault();
+            last.focus();
+        } else if (!event.shiftKey && document.activeElement === last) {
+            event.preventDefault();
+            first.focus();
+        }
     };
 
     app.getCheckedValue = function (name, fallback) {
@@ -1452,16 +1705,59 @@
             app.toast('JPG 不支持透明背景，已切换为白色');
         }
         app.updateExportDimensions();
+        app.scheduleExportPreview();
     };
 
     app.updateExportDimensions = function () {
         var target = document.getElementById('export-dimensions');
         if (!target || !app.wall || !app.wall.cssWidth) return;
         var scale = parseInt(app.getCheckedValue('export-scale', '2'), 10);
-        var width = Math.round(app.wall.cssWidth * scale);
-        var height = Math.round(app.wall.cssHeight * scale);
+        var aspectRatio = app.getCheckedValue('export-aspect', 'auto');
+        var dimensions = app.wall.getExportDimensions(scale, aspectRatio);
+        var width = dimensions.width;
+        var height = dimensions.height;
         var megapixels = (width * height / 1000000).toFixed(1);
         target.textContent = width + ' × ' + height + ' px · ' + megapixels + ' MP';
+    };
+
+    app.getExportBackground = function () {
+        var background = app.getCheckedValue('export-background', '#ffffff');
+        if (background === 'custom') background = document.getElementById('export-background-color').value;
+        if (app.getCheckedValue('export-format', 'png') === 'jpeg' && background === 'transparent') background = '#ffffff';
+        return background;
+    };
+
+    app.scheduleExportPreview = function () {
+        if (!document.getElementById('export-dialog').classList.contains('active')) return;
+        if (app.exportPreviewRAF) cancelAnimationFrame(app.exportPreviewRAF);
+        app.exportPreviewRAF = requestAnimationFrame(function () {
+            app.exportPreviewRAF = null;
+            app.renderExportPreview();
+        });
+    };
+
+    app.renderExportPreview = function () {
+        if (!app.wall || !app.wall.layout.length) return;
+        var aspectRatio = app.getCheckedValue('export-aspect', 'auto');
+        var background = app.getExportBackground();
+        var dimensions = app.wall.getExportDimensions(1, aspectRatio);
+        var previewScale = Math.min(1, 720 / Math.max(dimensions.width, dimensions.height));
+        var source = app.wall.createExportCanvas({
+            scale: previewScale,
+            background: background,
+            aspectRatio: aspectRatio
+        });
+        var preview = document.getElementById('export-preview-canvas');
+        preview.width = source.width;
+        preview.height = source.height;
+        var context = preview.getContext('2d');
+        context.clearRect(0, 0, preview.width, preview.height);
+        context.drawImage(source, 0, 0);
+        document.getElementById('export-preview-ratio').textContent = {
+            auto: '紧贴轮廓',
+            '3:4': '3:4 常用照片',
+            '9:16': '9:16 手机竖屏'
+        }[aspectRatio] || aspectRatio;
     };
 
     app.exportImage = function () {
@@ -1472,9 +1768,8 @@
         try {
             var format = app.getCheckedValue('export-format', 'png');
             var scale = parseInt(app.getCheckedValue('export-scale', '2'), 10);
-            var background = app.getCheckedValue('export-background', '#ffffff');
-            if (background === 'custom') background = document.getElementById('export-background-color').value;
-            if (format === 'jpeg' && background === 'transparent') background = '#ffffff';
+            var aspectRatio = app.getCheckedValue('export-aspect', 'auto');
+            var background = app.getExportBackground();
 
             var rawName = document.getElementById('export-name').value.trim() || '我的照片墙';
             var fileName = rawName.replace(/[<>:"/\\|?*\u0000-\u001F]/g, '-').replace(/[. ]+$/, '') || '我的照片墙';
@@ -1483,7 +1778,7 @@
 
             app.closeExportDialog();
             app.showLoading(true, '正在生成高清图片…');
-            var output = app.wall.createExportCanvas({ scale: scale, background: background });
+            var output = app.wall.createExportCanvas({ scale: scale, background: background, aspectRatio: aspectRatio });
             output.toBlob(function (blob) {
                 app.showLoading(false);
                 if (!blob) {
@@ -1528,4 +1823,3 @@
     } else {
         app.init();
     }
-})();
