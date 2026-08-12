@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="background" x1="8" y1="5" x2="57" y2="61" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#29273d"/>
+      <stop offset="0.55" stop-color="#1b1a2a"/>
+      <stop offset="1" stop-color="#11121b"/>
+    </linearGradient>
+    <linearGradient id="letter" x1="16" y1="10" x2="51" y2="58" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#b9b0ff"/>
+      <stop offset="0.48" stop-color="#8b7cf7"/>
+      <stop offset="1" stop-color="#6352e5"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="64" height="64" rx="15" fill="url(#background)"/>
+  <rect x="0.5" y="0.5" width="63" height="63" rx="14.5"
+        fill="none" stroke="#ffffff" stroke-opacity=".1"/>
+
+  <!-- A balanced P: a generous photo-shaped bowl and a longer lower stem. -->
+  <path fill="url(#letter)" fill-rule="evenodd" d="
+    M20.5 10h12.5c13.8 0 22 6 22 15.5S46.8 41 33 41h-7v10
+    a5.5 5.5 0 0 1-11 0V15.5a5.5 5.5 0 0 1 5.5-5.5ZM26 19.5v12h7
+    c7.3 0 11.5-2.1 11.5-6S40.3 19.5 33 19.5h-7Z"/>
+
+  <!-- The counter doubles as a tiny photograph and remains legible at 32 px. -->
+  <circle cx="34.5" cy="23.2" r="1.65" fill="#ffd36a"/>
+  <path d="m28.5 30.2 3.5-3.5 2.4 2.3 2-1.8 3.15 3H28.5Z"
+        fill="#ffffff" fill-opacity=".94"/>
+</svg>

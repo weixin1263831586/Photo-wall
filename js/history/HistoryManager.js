@@ -38,11 +38,16 @@ export function createHistoryManager(options) {
         redoStack = [];
         notify();
     }
+    function visitStates(visitor) {
+        undoStack.forEach(visitor);
+        redoStack.forEach(visitor);
+    }
     return {
         record: record,
         undo: undo,
         redo: redo,
         clear: clear,
+        visitStates: visitStates,
         isRestoring: function () { return restoring; },
         canUndo: function () { return undoStack.length > 0; },
         canRedo: function () { return redoStack.length > 0; }

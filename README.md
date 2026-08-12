@@ -23,9 +23,13 @@
 - 导出支持紧贴轮廓、3:4 常用照片和 9:16 手机竖屏比例
 - 导出设置提供实时效果预览，比例、透明度和背景颜色与下载结果一致
 - 蒙版、密度搜索与渲染顺序缓存优化，改善数百至 1000 张照片时的排版响应
+- 智能匹配预计算照片/格位特征，并在照片未用完前跳过已分配项；本机基准中 1000 张照片由约 220 ms 降至约 30 ms
+- 编辑画布缓存静态合成层，鼠标悬停和拖拽只绘制高亮与拖动预览，不再逐帧重画全部照片
 - 照片导入分析显著区域、对比度和清晰度，裁切时优先保留视觉主体
 - 导出自动移除编辑态描边、悬停和轮廓辅助层
 - 最多 1000 张照片，批量导入时自动优化分辨率和内存占用
+- 根据屏幕宽度、设备内存和 CPU 自动调整导入尺寸、解码并发、分析 Worker、画布 DPR、撤销深度和导出像素上限
+- 历史记录淘汰后自动释放不再引用的图片 Blob URL，多轮导入/删除不会持续占用旧图片内存
 - 重复照片、超大文件和最大照片数量保护
 - 桌面端和移动端响应式支持
 - 图片仅在本地浏览器处理，不会上传到服务器
@@ -39,6 +43,13 @@ python3 -m http.server 4173
 ```
 
 打开 <http://localhost:4173>。
+
+也可以使用 Vite 开发服务器：
+
+```bash
+npm install
+npm run dev
+```
 
 也可以使用重启脚本在后台启动；它会安全停止占用该端口的旧 Python HTTP 服务：
 
@@ -66,14 +77,13 @@ python3 -m http.server 4173
 
 项目使用原生 HTML、CSS、JavaScript 和 Canvas API。照片先覆盖轮廓包围区域，再通过统一二值蒙版裁切，以保证边缘完整且没有照片越界。
 
-核心算法已按职责拆分：
+核心能力已按职责拆分：
 
-- `js/image/PhotoAnalyzer.js`：照片色彩、清晰度、对比度和视觉焦点分析
-- `js/layout/SmartPlacement.js`：照片与格位的综合评分和去重分配
-- `js/mask/DistanceTransform.js`：轮廓边界距离场
-- `js/ui/PhotoLibrary.js`：照片列表的增量渲染、排序和重点照片交互
-- `js/history/HistoryManager.js`：独立的撤销/重做状态管理
-- `js/workers/photo-analysis.worker.js`：后台照片像素分析，失败时自动回退主线程
+- **智能布局（SmartPlacement + DistanceTransform）**：综合照片比例、视觉特征与重点标记完成格位评分和去重分配，并利用轮廓边界距离场将大图优先放入内部开阔区域。
+- **图片分析（PhotoAnalyzer + Web Worker）**：分析照片的色彩、清晰度、对比度和视觉焦点；批量像素计算在 Worker 中执行，失败时自动回退主线程。
+- **撤销与重做（HistoryManager）**：独立管理编辑状态、撤销/重做栈及历史资源释放。
+- **照片库界面（PhotoLibrary）**：负责照片列表的增量渲染、拖拽排序、重点标记和预览交互。
+- **质量保障**：包含 Node.js 单元测试、Playwright 端到端测试，以及覆盖 100 / 500 / 1000 张照片的布局性能基准。
 
 运行单元测试和 100 / 500 / 1000 张照片的智能匹配基准：
 
@@ -88,3 +98,55 @@ npm run benchmark
 npx playwright install chromium
 npm run test:e2e
 ```
+
+## Windows 桌面版
+
+项目已接入 Tauri 2，桌面版沿用同一套 Canvas、ES Module 和 Web Worker。Windows 中保存项目和导出图片会使用系统“另存为”对话框。
+
+在 Windows 10/11 安装以下环境：
+
+1. Node.js 22
+2. Rust stable（通过 rustup 安装）
+3. Visual Studio 2022 Build Tools，并勾选“使用 C++ 的桌面开发”
+4. Microsoft Edge WebView2 Runtime（Windows 10/11 通常已包含）
+
+开发运行和构建安装包：
+
+```powershell
+npm install
+npm run desktop:dev
+npm test
+npm run desktop:build
+```
+
+NSIS 安装包输出到：
+
+```text
+src-tauri\target\release\bundle\nsis\照片拼贴墙_1.0.0_x64-setup.exe
+```
+
+推送 `v*` 标签或手动触发 GitHub Actions 的 `Build Windows App`，也会在 Windows runner 上构建并上传安装包 artifact。
+
+## Android / iOS
+
+可以做成手机应用。当前 Tauri 2 工程已复用同一套前端与 Rust 入口，原生文件对话框、响应式布局、安全区、触摸画布和长按拖动照片排序均已接入。手机宽度下会将画布置于上方、编辑面板置于下方，并按设备能力降低图片导入尺寸、Worker 并发、编辑画布 DPR 和撤销栈深度。
+
+Android 需要 Android Studio、Android SDK、NDK 和 Rust Android targets：
+
+```bash
+npm run android:init
+npm run android:dev
+npm run android:build
+```
+
+iOS 只能在 macOS + Xcode 上构建：
+
+```bash
+npm run ios:init
+npm run ios:dev
+npm run ios:build
+```
+
+移动端建议照片数量：4 GB 内存设备约 100～300 张，高端设备可尝试 500～1000 张。实际限制取决于照片分辨率和系统 WebView 可用内存。
+
+当前移动端属于“可初始化、可真机调试”的工程状态。正式上架前还需要在目标设备执行 `android:init` / `ios:init`，配置应用签名、商店资料和相册权限，并重点验证数百张照片导入、后台切换恢复及 2×/3× 导出的内存占用。Android 可在 Windows、macOS 或 Linux 上开发；iOS 构建与签名必须使用 macOS + Xcode。

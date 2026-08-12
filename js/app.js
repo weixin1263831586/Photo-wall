@@ -4,6 +4,8 @@ import { analyzePhoto } from './image/PhotoAnalyzer.js';
 import { createPhotoAnalysisWorkerClient } from './image/PhotoAnalysisWorkerClient.js';
 import { createPhotoLibrary } from './ui/PhotoLibrary.js';
 import { createHistoryManager } from './history/HistoryManager.js';
+import { isNativeApp, saveBlob } from './platform/NativeFileService.js';
+import { createDeviceProfile, getImportDimension } from './platform/DeviceProfile.js';
 
 /**
  * App controller — wires UI to PhotoWall engine.
@@ -36,7 +38,9 @@ import { createHistoryManager } from './history/HistoryManager.js';
         history: null,
         photoLibrary: null,
         photoAnalyzerWorker: null,
+        deviceProfile: null,
         photoObjectURLs: new Set(),
+        photoObjectURLCleanupTimer: null,
         maxPhotos: 1000,
         maxFileSize: 40 * 1024 * 1024,
         maxPhotoDimension: 1600,
@@ -51,13 +55,29 @@ import { createHistoryManager } from './history/HistoryManager.js';
 
     app.init = function () {
         var canvas = document.getElementById('wall-canvas');
-        app.wall = new PhotoWall(canvas);
-        app.photoAnalyzerWorker = createPhotoAnalysisWorkerClient({ timeout: app.photoLoadTimeout });
+        app.deviceProfile = createDeviceProfile({
+            viewportWidth: window.innerWidth,
+            coarsePointer: window.matchMedia('(pointer: coarse)').matches,
+            deviceMemory: navigator.deviceMemory,
+            hardwareConcurrency: navigator.hardwareConcurrency
+        });
+        app.photoLoadConcurrency = app.deviceProfile.photoLoadConcurrency;
+        app.maxPhotoDimension = app.deviceProfile.maxPhotoDimension;
+        app.wall = new PhotoWall(canvas, { maxDevicePixelRatio: app.deviceProfile.maxEditorDpr });
+        document.documentElement.classList.toggle('native-app', isNativeApp());
+        document.documentElement.classList.toggle('mobile-device', app.deviceProfile.mobile);
+        app.photoAnalyzerWorker = createPhotoAnalysisWorkerClient({
+            timeout: app.photoLoadTimeout,
+            workers: app.deviceProfile.analysisWorkers
+        });
         app.history = createHistoryManager({
-            limit: 30,
+            limit: app.deviceProfile.historyLimit,
             capture: function () { return app.captureState(); },
             restore: function (state) { app.restoreState(state); },
-            onChange: function () { app.updateActionState(); }
+            onChange: function () {
+                app.updateActionState();
+                app.scheduleObjectURLCleanup();
+            }
         });
         app.photoLibrary = createPhotoLibrary({
             onReorder: app.reorderPhoto,
@@ -104,6 +124,7 @@ import { createHistoryManager } from './history/HistoryManager.js';
         });
         window.addEventListener('beforeunload', function () {
             if (app.photoAnalyzerWorker) app.photoAnalyzerWorker.terminate();
+            clearTimeout(app.photoObjectURLCleanupTimer);
             app.photoObjectURLs.forEach(function (url) { URL.revokeObjectURL(url); });
             app.photoObjectURLs.clear();
         });
@@ -863,6 +884,9 @@ import { createHistoryManager } from './history/HistoryManager.js';
         }
 
         var total = imageFiles.length;
+        if (app.deviceProfile.mobile && app.photos.length + total > app.deviceProfile.recommendedPhotoCount) {
+            app.toast('手机端建议不超过 ' + app.deviceProfile.recommendedPhotoCount + ' 张，仍将继续导入并自动压缩');
+        }
         var importDimension = app.getPhotoImportDimension(app.photos.length + total);
         app.showLoading(true, '正在读取 0/' + total + ' 张照片…');
         app.loadPhotoBatch(imageFiles, function (completed) {
@@ -926,7 +950,10 @@ import { createHistoryManager } from './history/HistoryManager.js';
                     img.onerror = null;
                     img.src = '';
                 }
-                if (objectURL) URL.revokeObjectURL(objectURL);
+                if (objectURL) {
+                    app.photoObjectURLs.delete(objectURL);
+                    URL.revokeObjectURL(objectURL);
+                }
                 reject(new Error('load timed out'));
             }, app.photoLoadTimeout);
 
@@ -967,6 +994,11 @@ import { createHistoryManager } from './history/HistoryManager.js';
                         featured: false
                     });
                 }).catch(function (err) {
+                    if (objectURL) {
+                        app.photoObjectURLs.delete(objectURL);
+                        URL.revokeObjectURL(objectURL);
+                        objectURL = '';
+                    }
                     finish(reject, err);
                 });
             }
@@ -1001,11 +1033,7 @@ import { createHistoryManager } from './history/HistoryManager.js';
     };
 
     app.getPhotoImportDimension = function (projectedCount) {
-        if (projectedCount > 600) return 480;
-        if (projectedCount > 300) return 640;
-        if (projectedCount > 150) return 800;
-        if (projectedCount > 60) return 1200;
-        return app.maxPhotoDimension;
+        return getImportDimension(app.deviceProfile, projectedCount);
     };
 
     app.createPhotoBlob = function (file, maxDimension) {
@@ -1072,6 +1100,27 @@ import { createHistoryManager } from './history/HistoryManager.js';
 
     app.renderPhotoLibrary = function () {
         if (app.photoLibrary) app.photoLibrary.render(app.photos);
+    };
+
+    app.scheduleObjectURLCleanup = function () {
+        clearTimeout(app.photoObjectURLCleanupTimer);
+        app.photoObjectURLCleanupTimer = setTimeout(function () {
+            var retained = new Set();
+            function retainPhotos(state) {
+                if (!state || !Array.isArray(state.photos)) return;
+                state.photos.forEach(function (photo) {
+                    if (photo && typeof photo.src === 'string' && photo.src.startsWith('blob:')) retained.add(photo.src);
+                });
+            }
+            retainPhotos({ photos: app.photos });
+            if (app.history && typeof app.history.visitStates === 'function') app.history.visitStates(retainPhotos);
+            app.photoObjectURLs.forEach(function (url) {
+                if (retained.has(url)) return;
+                URL.revokeObjectURL(url);
+                app.photoObjectURLs.delete(url);
+            });
+            app.photoObjectURLCleanupTimer = null;
+        }, 0);
     };
 
     app.reorderPhoto = function (fromIndex, targetIndex) {
@@ -1161,28 +1210,29 @@ import { createHistoryManager } from './history/HistoryManager.js';
             return;
         }
         app.showLoading(true, '正在打包项目…');
-        Promise.all(app.photos.map(function (photo) {
+        app.mapWithConcurrency(app.photos, app.deviceProfile.mobile ? 1 : 2, function (photo) {
             if (photo.blob) return app.blobToDataURL(photo.blob);
             if (/^data:image\//i.test(photo.src)) return Promise.resolve(photo.src);
             return fetch(photo.src).then(function (response) {
                 if (!response.ok) throw new Error('photo fetch failed');
                 return response.blob();
             }).then(app.blobToDataURL);
-        })).then(function (photoSources) {
+        }, function (completed, total) {
+            app.showLoading(true, '正在打包项目 ' + completed + '/' + total + '…');
+        }).then(function (photoSources) {
             var project = app.serializeProject(photoSources);
             var blob = new Blob([JSON.stringify(project)], { type: 'application/json' });
-            var url = URL.createObjectURL(blob);
-            var a = document.createElement('a');
             var rawName = document.getElementById('export-name').value.trim() || '我的照片墙';
             var name = rawName.replace(/[<>:"/\\|?*\u0000-\u001F]/g, '-').replace(/[. ]+$/, '') || '我的照片墙';
-            a.href = url;
-            a.download = name + '.photowall.json';
-            document.body.appendChild(a);
-            a.click();
-            a.remove();
-            setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
-            app.showLoading(false);
-            app.toast('项目已保存，可继续编辑');
+            return saveBlob(blob, {
+                title: '保存照片墙项目',
+                fileName: name + '.photowall.json',
+                filters: [{ name: '照片墙项目', extensions: ['photowall.json', 'json'] }]
+            }).then(function (result) {
+                app.showLoading(false);
+                if (result.cancelled) app.toast('已取消保存');
+                else app.toast('项目已保存，可继续编辑');
+            });
         }).catch(function (error) {
             console.error(error);
             app.showLoading(false);
@@ -1197,6 +1247,26 @@ import { createHistoryManager } from './history/HistoryManager.js';
             reader.onerror = function () { reject(new Error('blob encode failed')); };
             reader.readAsDataURL(blob);
         });
+    };
+
+    app.mapWithConcurrency = function (items, concurrency, mapper, onProgress) {
+        var results = new Array(items.length);
+        var nextIndex = 0;
+        var completed = 0;
+        var count = Math.min(Math.max(1, concurrency), Math.max(1, items.length));
+        function run() {
+            var index = nextIndex++;
+            if (index >= items.length) return Promise.resolve();
+            return Promise.resolve(mapper(items[index], index)).then(function (result) {
+                results[index] = result;
+                completed++;
+                if (onProgress) onProgress(completed, items.length);
+                return run();
+            });
+        }
+        var workers = [];
+        for (var i = 0; i < count; i++) workers.push(run());
+        return Promise.all(workers).then(function () { return results; });
     };
 
     app.openProject = function (file) {
@@ -1679,6 +1749,16 @@ import { createHistoryManager } from './history/HistoryManager.js';
             var aspectRatio = app.getCheckedValue('export-aspect', 'auto');
             var background = app.getExportBackground();
 
+            var requestedScale = scale;
+            while (scale > 1) {
+                var candidateDimensions = app.wall.getExportDimensions(scale, aspectRatio);
+                if (candidateDimensions.width * candidateDimensions.height <= app.deviceProfile.maxExportPixels) break;
+                scale--;
+            }
+            if (scale !== requestedScale) {
+                app.toast('为避免设备内存不足，已将导出清晰度调整为 ' + scale + '×');
+            }
+
             var rawName = document.getElementById('export-name').value.trim() || '我的照片墙';
             var fileName = rawName.replace(/[<>:"/\\|?*\u0000-\u001F]/g, '-').replace(/[. ]+$/, '') || '我的照片墙';
             var mime = format === 'jpeg' ? 'image/jpeg' : 'image/' + format;
@@ -1693,15 +1773,14 @@ import { createHistoryManager } from './history/HistoryManager.js';
                     app.toast('导出失败，请降低清晰度后重试');
                     return;
                 }
-                var url = URL.createObjectURL(blob);
-                var a = document.createElement('a');
-                a.href = url;
-                a.download = fileName + '.' + extension;
-                document.body.appendChild(a);
-                a.click();
-                a.remove();
-                setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
-                app.toast('图片已导出 · ' + Math.round(blob.size / 1024) + ' KB');
+                saveBlob(blob, {
+                    title: '导出照片墙图片',
+                    fileName: fileName + '.' + extension,
+                    filters: [{ name: extension.toUpperCase() + ' 图片', extensions: [extension] }]
+                }).then(function (result) {
+                    if (result.cancelled) app.toast('已取消导出');
+                    else app.toast('图片已导出 · ' + Math.round(blob.size / 1024) + ' KB');
+                });
             }, mime, 0.94);
         } catch (err) {
             app.showLoading(false);

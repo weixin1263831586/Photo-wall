@@ -4,11 +4,31 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "dev": "vite --host 0.0.0.0",
+    "build": "vite build",
+    "preview": "vite preview --host 0.0.0.0",
+    "tauri": "tauri",
+    "desktop:dev": "tauri dev",
+    "desktop:build": "tauri build",
+    "android:init": "tauri android init",
+    "android:dev": "tauri android dev",
+    "android:build": "tauri android build",
+    "release:build": "bash scripts/build-release.sh",
+    "ios:init": "tauri ios init",
+    "ios:dev": "tauri ios dev",
+    "ios:build": "tauri ios build",
     "test": "node --test tests/*.test.js",
     "benchmark": "node benchmarks/layout-benchmark.js",
     "test:e2e": "playwright test"
   },
   "devDependencies": {
-    "@playwright/test": "^1.54.0"
+    "@playwright/test": "^1.54.0",
+    "@tauri-apps/cli": "^2.8.5",
+    "vite": "^7.1.1"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.8.0",
+    "@tauri-apps/plugin-dialog": "^2.4.0",
+    "@tauri-apps/plugin-fs": "^2.4.0"
   }
 }

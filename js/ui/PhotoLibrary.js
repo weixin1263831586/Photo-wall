@@ -27,6 +27,14 @@ export function createPhotoLibrary(options) {
     var library = document.getElementById(options.libraryId || 'photo-library');
     var panel = document.getElementById(options.panelId || 'photo-library-panel');
     var dragIndex = -1;
+    var pointerGesture = null;
+    var longPressTimer = null;
+
+    function clearDragStyles() {
+        library.querySelectorAll('.photo-card').forEach(function (item) {
+            item.classList.remove('dragging', 'drag-over');
+        });
+    }
 
     function render(photos) {
         panel.hidden = photos.length === 0;
@@ -80,8 +88,66 @@ export function createPhotoLibrary(options) {
         });
         library.addEventListener('dragend', function () {
             dragIndex = -1;
-            library.querySelectorAll('.photo-card').forEach(function (item) { item.classList.remove('dragging', 'drag-over'); });
+            clearDragStyles();
         });
+
+        // HTML drag-and-drop is inconsistent in Android/iOS WebViews. A short
+        // long-press activates the same reorder flow while ordinary swipes keep
+        // scrolling the thumbnail list.
+        library.addEventListener('pointerdown', function (event) {
+            if (event.pointerType === 'mouse' || event.target.closest('button')) return;
+            var card = event.target.closest('.photo-card');
+            if (!card) return;
+            clearTimeout(longPressTimer);
+            pointerGesture = {
+                pointerId: event.pointerId,
+                sourceIndex: Number(card.getAttribute('data-index')),
+                targetIndex: Number(card.getAttribute('data-index')),
+                startX: event.clientX,
+                startY: event.clientY,
+                card: card,
+                active: false
+            };
+            longPressTimer = setTimeout(function () {
+                if (!pointerGesture || pointerGesture.pointerId !== event.pointerId) return;
+                pointerGesture.active = true;
+                dragIndex = pointerGesture.sourceIndex;
+                pointerGesture.card.classList.add('dragging');
+                try { library.setPointerCapture(event.pointerId); } catch (ignore) {}
+            }, 240);
+        });
+        library.addEventListener('pointermove', function (event) {
+            if (!pointerGesture || pointerGesture.pointerId !== event.pointerId) return;
+            if (!pointerGesture.active) {
+                if (Math.hypot(event.clientX - pointerGesture.startX, event.clientY - pointerGesture.startY) > 9) {
+                    clearTimeout(longPressTimer);
+                    pointerGesture = null;
+                }
+                return;
+            }
+            event.preventDefault();
+            var pointed = document.elementFromPoint(event.clientX, event.clientY);
+            var target = pointed && pointed.closest('.photo-card');
+            if (!target || !library.contains(target)) return;
+            clearDragStyles();
+            pointerGesture.card.classList.add('dragging');
+            target.classList.add('drag-over');
+            pointerGesture.targetIndex = Number(target.getAttribute('data-index'));
+        });
+        function finishPointer(event) {
+            if (!pointerGesture || pointerGesture.pointerId !== event.pointerId) return;
+            clearTimeout(longPressTimer);
+            var sourceIndex = pointerGesture.sourceIndex;
+            var targetIndex = pointerGesture.targetIndex;
+            var active = pointerGesture.active;
+            pointerGesture = null;
+            dragIndex = -1;
+            clearDragStyles();
+            try { library.releasePointerCapture(event.pointerId); } catch (ignore) {}
+            if (active && targetIndex !== sourceIndex) options.onReorder(sourceIndex, targetIndex);
+        }
+        library.addEventListener('pointerup', finishPointer);
+        library.addEventListener('pointercancel', finishPointer);
         library.addEventListener('click', function (event) {
             var feature = event.target.closest('.photo-feature');
             var remove = event.target.closest('.photo-remove');

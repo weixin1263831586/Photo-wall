@@ -27,3 +27,14 @@ test('history manager enforces its configured limit', function () {
     assert.equal(value, 1);
     assert.equal(history.undo(), false);
 });
+
+test('history manager exposes retained states for resource cleanup', function () {
+    var value = 0;
+    var history = createHistoryManager({ capture: function () { return value; }, restore: function (state) { value = state; }, limit: 2 });
+    history.record(); value = 1;
+    history.record(); value = 2;
+    history.undo();
+    var retained = [];
+    history.visitStates(function (state) { retained.push(state); });
+    assert.deepEqual(retained.sort(), [0, 2]);
+});

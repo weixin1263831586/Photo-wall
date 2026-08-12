@@ -10,10 +10,12 @@ import { assignPhotosToCells } from './layout/SmartPlacement.js';
 
 'use strict';
 
-    function PhotoWall(canvas) {
+    function PhotoWall(canvas, options) {
+        options = options || {};
         this.canvas = canvas;
         this.ctx = canvas.getContext('2d');
-        this.dpr = Math.min(window.devicePixelRatio || 1, 2);
+        this.maxDevicePixelRatio = Math.max(1, Math.min(2, Number(options.maxDevicePixelRatio) || 2));
+        this.dpr = Math.min(window.devicePixelRatio || 1, this.maxDevicePixelRatio);
         this.shape = null;
         this.shapeKey = null;
         this.photos = [];
@@ -42,23 +44,31 @@ import { assignPhotosToCells } from './layout/SmartPlacement.js';
         this._animRAF = null;
         this._pointerDown = null;
         this._slotSequence = 0;
+        this._renderRevision = 0;
+        this._cachedLayerRevision = -1;
         this._layerCanvas = document.createElement('canvas');
         this._layerContext = this._layerCanvas.getContext('2d');
         this._bindEvents();
     }
+
+    PhotoWall.prototype._invalidateRenderCache = function () {
+        this._renderRevision++;
+        this._cachedLayerRevision = -1;
+    };
 
     PhotoWall.prototype.resize = function () {
         var previousLayout = this.layout.length ? this.getLayoutSnapshot() : null;
         var rect = this.canvas.parentElement.getBoundingClientRect();
         this.cssWidth = Math.max(100, rect.width);
         this.cssHeight = Math.max(100, rect.height);
-        this.dpr = Math.min(window.devicePixelRatio || 1, 2);
+        this.dpr = Math.min(window.devicePixelRatio || 1, this.maxDevicePixelRatio);
         this.canvas.width = Math.round(this.cssWidth * this.dpr);
         this.canvas.height = Math.round(this.cssHeight * this.dpr);
         this.canvas.style.width = this.cssWidth + 'px';
         this.canvas.style.height = this.cssHeight + 'px';
         this._layerCanvas.width = this.canvas.width;
         this._layerCanvas.height = this.canvas.height;
+        this._invalidateRenderCache();
         this.ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
         if (this.shape) {
             this.generateMask();
@@ -90,6 +100,7 @@ import { assignPhotosToCells } from './layout/SmartPlacement.js';
     };
     PhotoWall.prototype.setPhotoShape = function (shape) {
         this.photoShape = shape;
+        this._invalidateRenderCache();
         this.render();
     };
     PhotoWall.prototype.setSmartPlacement = function (enabled) {
@@ -331,6 +342,7 @@ import { assignPhotosToCells } from './layout/SmartPlacement.js';
         this.generateMask();
         if (!this.photos.length || !this.maskData.insideCount) {
             this.layout = [];
+            this._invalidateRenderCache();
             this._refreshOrderCache();
             this.render();
             if (this.onLayout) this.onLayout(0, 0);
@@ -361,6 +373,7 @@ import { assignPhotosToCells } from './layout/SmartPlacement.js';
         var best = this._buildCells(Math.max(8, bestSize));
         best = this._mergeLargeCells(best, desiredLarge);
         this.layout = this._assignPhotos(best, forceRandom);
+        this._invalidateRenderCache();
         this._refreshOrderCache();
         this.hoveredIndex = -1; this.draggingIndex = -1; this.dragOverIndex = -1;
         if (this.onLayout) this.onLayout(this.layout.length, this.layout.filter(function (item) { return item.isLarge; }).length);
@@ -428,24 +441,38 @@ import { assignPhotosToCells } from './layout/SmartPlacement.js';
         var targetWidth = Math.round(w * this.dpr), targetHeight = Math.round(h * this.dpr);
         if (layer.width !== targetWidth || layer.height !== targetHeight) {
             layer.width = targetWidth; layer.height = targetHeight;
+            this._cachedLayerRevision = -1;
         }
-        lx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
-        lx.clearRect(0, 0, w, h);
-        lx.globalCompositeOperation = 'source-over';
-        lx.globalAlpha = 1;
         var t = progress === undefined ? 1 : Math.max(0, Math.min(1, progress));
         var eased = 1 - Math.pow(1 - t, 3);
-        if (this._renderOrder.length !== this.layout.length) this._refreshOrderCache();
-        var renderOrder = this._renderOrder;
-        for (var orderIndex = 0; orderIndex < renderOrder.length; orderIndex++) {
-            var i = renderOrder[orderIndex];
-            if (!exportMode && i === this.draggingIndex) continue;
-            this._drawPhoto(lx, this.layout[i], !exportMode && i === this.hoveredIndex, eased, !exportMode && i === this.dragOverIndex);
+        var cacheable = !exportMode && t >= 1;
+        if (!cacheable || this._cachedLayerRevision !== this._renderRevision) {
+            lx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+            lx.clearRect(0, 0, w, h);
+            lx.globalCompositeOperation = 'source-over';
+            lx.globalAlpha = 1;
+            if (this._renderOrder.length !== this.layout.length) this._refreshOrderCache();
+            var renderOrder = this._renderOrder;
+            for (var orderIndex = 0; orderIndex < renderOrder.length; orderIndex++) {
+                var i = renderOrder[orderIndex];
+                this._drawPhoto(lx, this.layout[i], false, eased, false);
+            }
+            lx.globalCompositeOperation = 'destination-in';
+            lx.drawImage(this.maskData.maskCanvas, 0, 0, w, h);
+            lx.globalCompositeOperation = 'source-over';
+            if (cacheable) this._cachedLayerRevision = this._renderRevision;
         }
-        lx.globalCompositeOperation = 'destination-in';
-        lx.drawImage(this.maskData.maskCanvas, 0, 0, w, h);
         ctx.drawImage(layer, 0, 0, w, h);
 
+        // Hovering and dragging used to redraw every photo on every pointer
+        // event. The static composition now stays cached; only lightweight
+        // outlines and the drag ghost are painted over it.
+        if (!exportMode && this.hoveredIndex >= 0 && this.draggingIndex < 0) {
+            this._drawPhotoHighlight(ctx, this.layout[this.hoveredIndex], false);
+        }
+        if (!exportMode && this.dragOverIndex >= 0) {
+            this._drawPhotoHighlight(ctx, this.layout[this.dragOverIndex], true);
+        }
         if (!exportMode && this.draggingIndex >= 0 && this.pointer) {
             var dragged = this.layout[this.draggingIndex];
             var ghost = Object.assign({}, dragged, { x: this.pointer.x, y: this.pointer.y });
@@ -454,6 +481,23 @@ import { assignPhotosToCells } from './layout/SmartPlacement.js';
             ctx.restore();
         }
         if (!exportMode) this._drawOutline(ctx);
+    };
+
+    PhotoWall.prototype._drawPhotoHighlight = function (ctx, item, dropTarget) {
+        if (!item) return;
+        var gapScale = Math.max(0.4, 1 - this.gap);
+        var width = item.width * gapScale, height = item.height * gapScale;
+        if (this.photoShape !== 'square') { width *= 1.16; height *= 1.16; }
+        ctx.save();
+        ctx.translate(item.x, item.y);
+        ctx.rotate((Number(item.rotation) || 0) * Math.PI / 180);
+        ctx.shadowColor = dropTarget ? 'rgba(96,225,190,.9)' : 'rgba(124,108,240,.75)';
+        ctx.shadowBlur = 12;
+        ctx.lineWidth = dropTarget ? 3 : 2;
+        ctx.strokeStyle = dropTarget ? '#60e1be' : '#a99cff';
+        this._photoPath(ctx, 0, 0, width, height);
+        ctx.stroke();
+        ctx.restore();
     };
 
     PhotoWall.prototype._drawPhoto = function (ctx, item, hovered, scale, dropTarget) {
@@ -649,6 +693,7 @@ import { assignPhotosToCells } from './layout/SmartPlacement.js';
             this.layout[i].photo = this.photos[photoIndex];
             this.layout[i].photoId = this.photos[photoIndex].id;
         }
+        this._invalidateRenderCache();
         this.render();
     };
 
@@ -717,6 +762,7 @@ import { assignPhotosToCells } from './layout/SmartPlacement.js';
         }, this);
         if (!restored.length) return false;
         this.layout = restored;
+        this._invalidateRenderCache();
         this._refreshOrderCache();
         this.hoveredIndex = -1;
         this.draggingIndex = -1;
@@ -758,6 +804,7 @@ import { assignPhotosToCells } from './layout/SmartPlacement.js';
         this.layout[b].photo = photo; this.layout[b].photoIndex = photoIndex;
         this.layout[a].photoId = this.layout[a].photo.id;
         this.layout[b].photoId = this.layout[b].photo.id;
+        this._invalidateRenderCache();
     };
 
     PhotoWall.prototype._bindEvents = function () {
