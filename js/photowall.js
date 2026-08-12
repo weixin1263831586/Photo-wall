@@ -5,6 +5,8 @@
  * the selected outline while boundary cells still cover it completely.
  */
 import { Shapes } from './shapes.js';
+import { computeDistanceTransform, sampleDistance } from './mask/DistanceTransform.js';
+import { assignPhotosToCells } from './layout/SmartPlacement.js';
 
 'use strict';
 
@@ -44,64 +46,6 @@ import { Shapes } from './shapes.js';
         this._layerContext = this._layerCanvas.getContext('2d');
         this._bindEvents();
     }
-
-    PhotoWall.analyzePhoto = function (img) {
-        var size = 24;
-        var c = document.createElement('canvas');
-        c.width = size;
-        c.height = size;
-        var cx = c.getContext('2d', { willReadFrequently: true });
-        cx.drawImage(img, 0, 0, size, size);
-        var data = cx.getImageData(0, 0, size, size).data;
-        var r = 0, g = 0, b = 0, n = size * size;
-        var luminance = new Float32Array(n), luminanceSum = 0;
-        for (var i = 0; i < n; i++) {
-            r += data[i * 4];
-            g += data[i * 4 + 1];
-            b += data[i * 4 + 2];
-            var light = 0.299 * data[i * 4] + 0.587 * data[i * 4 + 1] + 0.114 * data[i * 4 + 2];
-            luminance[i] = light;
-            luminanceSum += light;
-        }
-        r = Math.round(r / n); g = Math.round(g / n); b = Math.round(b / n);
-        var max = Math.max(r, g, b), min = Math.min(r, g, b), delta = max - min, hue = 0;
-        if (delta) {
-            if (max === r) hue = 60 * (((g - b) / delta) % 6);
-            else if (max === g) hue = 60 * ((b - r) / delta + 2);
-            else hue = 60 * ((r - g) / delta + 4);
-        }
-        if (hue < 0) hue += 360;
-        var meanLight = luminanceSum / n;
-        var variance = 0, edgeTotal = 0, focusWeight = 0, focusX = 0, focusY = 0;
-        for (var y = 0; y < size; y++) {
-            for (var x = 0; x < size; x++) {
-                var index = y * size + x;
-                var difference = luminance[index] - meanLight;
-                variance += difference * difference;
-                var edge = 0;
-                if (x) edge += Math.abs(luminance[index] - luminance[index - 1]);
-                if (y) edge += Math.abs(luminance[index] - luminance[index - size]);
-                edgeTotal += edge;
-                var weight = 1 + edge + Math.abs(difference) * 0.3;
-                focusWeight += weight;
-                focusX += (x / (size - 1)) * weight;
-                focusY += (y / (size - 1)) * weight;
-            }
-        }
-        return {
-            r: r,
-            g: g,
-            b: b,
-            brightness: meanLight / 255,
-            hue: hue,
-            saturation: max ? delta / max : 0,
-            contrast: Math.sqrt(variance / n) / 128,
-            sharpness: edgeTotal / Math.max(1, n * 255 * 2),
-            focusX: focusWeight ? focusX / focusWeight : 0.5,
-            focusY: focusWeight ? focusY / focusWeight : 0.5,
-            aspectRatio: img.naturalWidth / Math.max(1, img.naturalHeight)
-        };
-    };
 
     PhotoWall.prototype.resize = function () {
         var previousLayout = this.layout.length ? this.getLayoutSnapshot() : null;
@@ -230,7 +174,8 @@ import { Shapes } from './shapes.js';
         ctx.clearRect(0, 0, w, h);
         ctx.putImageData(cleanMask, 0, 0);
         this.maskData = {
-            mask: mask, maskCanvas: maskCanvas, integral: integral, width: w, height: h,
+            mask: mask, maskCanvas: maskCanvas, integral: integral,
+            distance: computeDistanceTransform(mask, w, h), width: w, height: h,
             bounds: { x: minX, y: minY, width: Math.max(1, maxX - minX + 1), height: Math.max(1, maxY - minY + 1) },
             offX: offX, offY: offY, drawW: drawW, drawH: drawH, scale: scale, insideCount: count
         };
@@ -274,7 +219,9 @@ import { Shapes } from './shapes.js';
                     size: Math.max(cellW, cellH),
                     row: row,
                     col: col,
-                    isLarge: false
+                    isLarge: false,
+                    boundaryDistance: sampleDistance(this.maskData.distance, this.maskData.width, this.maskData.height,
+                        x + cellW / 2, y + cellH / 2)
                 });
             }
         }
@@ -320,7 +267,12 @@ import { Shapes } from './shapes.js';
                 height: height,
                 row: cell.row,
                 col: cell.col,
-                score: coverage * 2 - normalizedDistance
+                boundaryDistance: sampleDistance(this.maskData.distance, this.maskData.width, this.maskData.height,
+                    left + width / 2, top + height / 2),
+                score: coverage * 1.2 +
+                    sampleDistance(this.maskData.distance, this.maskData.width, this.maskData.height,
+                        left + width / 2, top + height / 2) / Math.max(1, Math.min(width, height)) -
+                    normalizedDistance * 0.15
             });
         }, this);
 
@@ -342,7 +294,8 @@ import { Shapes } from './shapes.js';
                 col: candidate.col,
                 isLarge: true,
                 spanRows: spanRows,
-                spanCols: spanCols
+                spanCols: spanCols,
+                boundaryDistance: candidate.boundaryDistance
             });
         }
         return cells.filter(function (cell) { return !used.has(cell); }).concat(largeCells);
@@ -418,11 +371,9 @@ import { Shapes } from './shapes.js';
         var order = [], n = this.photos.length;
         for (var i = 0; i < n; i++) order.push(i);
         if (this.smartPlacement && !forceRandom) {
-            order.sort(function (a, b) { return this.photos[a].hue - this.photos[b].hue; }.bind(this));
-            cells.sort(function (a, b) {
-                var bandA = Math.floor(a.y / Math.max(1, a.height));
-                var bandB = Math.floor(b.y / Math.max(1, b.height));
-                return bandA === bandB ? a.x - b.x : a.y - b.y;
+            order = assignPhotosToCells(this.photos, cells, {
+                width: this.cssWidth,
+                height: this.cssHeight
             });
         } else {
             for (var s = order.length - 1; s > 0; s--) {
@@ -430,31 +381,8 @@ import { Shapes } from './shapes.js';
                 var tmp = order[s]; order[s] = order[r]; order[r] = tmp;
             }
         }
-        var featuredOrder = order.filter(function (photoIndex) { return this.photos[photoIndex].featured; }, this);
-        var regularOrder = order.filter(function (photoIndex) { return !this.photos[photoIndex].featured; }, this);
-        if (!regularOrder.length) regularOrder = order.slice();
-        var largeFallback = order.filter(function (photoIndex) {
-            return !this.photos[photoIndex].featured;
-        }, this).sort(function (a, b) {
-            var photoA = this.photos[a], photoB = this.photos[b];
-            return ((photoB.sharpness || 0) + (photoB.contrast || 0) * 0.2) -
-                ((photoA.sharpness || 0) + (photoA.contrast || 0) * 0.2);
-        }.bind(this));
-        var largeOrder = featuredOrder.concat(largeFallback);
-        if (!largeOrder.length) largeOrder = order.slice();
-        var largeAssignments = new Map(), assignedToLarge = new Set(), largeIndex = 0;
-        cells.forEach(function (cell) {
-            if (!cell.isLarge) return;
-            var assignedIndex = largeOrder[largeIndex++ % largeOrder.length];
-            largeAssignments.set(cell, assignedIndex);
-            assignedToLarge.add(assignedIndex);
-        });
-        var smallOrder = order.filter(function (photoIndex) { return !assignedToLarge.has(photoIndex); })
-            .concat(order.filter(function (photoIndex) { return assignedToLarge.has(photoIndex); }));
-        if (!smallOrder.length) smallOrder = order.slice();
-        var regularIndex = 0;
         return cells.map(function (cell, index) {
-            var photoIndex = cell.isLarge ? largeAssignments.get(cell) : smallOrder[regularIndex++ % smallOrder.length];
+            var photoIndex = order[index % order.length];
             var seed = (((cell.row + 1) * 2654435761) ^ ((cell.col + 1) * 1597334677) ^ (index * 3812015801)) >>> 0;
             var unitRotation = (seed % 2001) / 1000 - 1;
             cell.slotId = 'slot-' + (++this._slotSequence) + '-' + seed.toString(36);
@@ -743,7 +671,8 @@ import { Shapes } from './shapes.js';
                     col: item.col,
                     isLarge: item.isLarge === true,
                     spanRows: item.spanRows,
-                    spanCols: item.spanCols
+                    spanCols: item.spanCols,
+                    boundaryDistance: item.boundaryDistance
                 };
             })
         };
@@ -780,7 +709,8 @@ import { Shapes } from './shapes.js';
                 col: Number(saved.col) || 0,
                 isLarge: saved.isLarge === true,
                 spanRows: Number(saved.spanRows) || 1,
-                spanCols: Number(saved.spanCols) || 1
+                spanCols: Number(saved.spanCols) || 1,
+                boundaryDistance: Math.max(0, Number(saved.boundaryDistance) || 0)
             };
             item.size = Math.max(item.width, item.height);
             restored.push(item);

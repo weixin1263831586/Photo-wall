@@ -15,6 +15,8 @@
 - 人像智能抠图：角落背景采样、边缘扩散、肤色保护、噪点清理与剪影填实
 - Logo/黑白图轮廓提取、阈值调整、反选与边缘平滑
 - 智能色彩排序和随机重排
+- 智能格位匹配综合照片比例、清晰度、对比度、视觉焦点和重点标记，并减少相邻重复
+- 轮廓距离场辅助选择大图区域，细窄边缘自动保留小图
 - 画布顶部常驻主操作，随时添加、重排和导出
 - 30 步撤销/重做，并支持常用键盘快捷键
 - PNG / JPG / WebP 导出，可选 1×～3× 清晰度、透明/纯色/自定义背景与文件名
@@ -63,3 +65,26 @@ python3 -m http.server 4173
 ## 技术实现
 
 项目使用原生 HTML、CSS、JavaScript 和 Canvas API。照片先覆盖轮廓包围区域，再通过统一二值蒙版裁切，以保证边缘完整且没有照片越界。
+
+核心算法已按职责拆分：
+
+- `js/image/PhotoAnalyzer.js`：照片色彩、清晰度、对比度和视觉焦点分析
+- `js/layout/SmartPlacement.js`：照片与格位的综合评分和去重分配
+- `js/mask/DistanceTransform.js`：轮廓边界距离场
+- `js/ui/PhotoLibrary.js`：照片列表的增量渲染、排序和重点照片交互
+- `js/history/HistoryManager.js`：独立的撤销/重做状态管理
+- `js/workers/photo-analysis.worker.js`：后台照片像素分析，失败时自动回退主线程
+
+运行单元测试和 100 / 500 / 1000 张照片的智能匹配基准：
+
+```bash
+npm test
+npm run benchmark
+```
+
+首次运行端到端测试需安装 Playwright 浏览器，之后可直接执行：
+
+```bash
+npx playwright install chromium
+npm run test:e2e
+```

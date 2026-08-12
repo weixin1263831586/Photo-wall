@@ -1,5 +1,9 @@
 import { Shapes, ShapeFactory } from './shapes.js';
 import { PhotoWall } from './photowall.js';
+import { analyzePhoto } from './image/PhotoAnalyzer.js';
+import { createPhotoAnalysisWorkerClient } from './image/PhotoAnalysisWorkerClient.js';
+import { createPhotoLibrary } from './ui/PhotoLibrary.js';
+import { createHistoryManager } from './history/HistoryManager.js';
 
 /**
  * App controller — wires UI to PhotoWall engine.
@@ -29,10 +33,9 @@ import { PhotoWall } from './photowall.js';
         shapeCrop: { x: 0, y: 0, width: 1, height: 1 },
         shapeCropStart: null,
         shapeCropPointerId: null,
-        undoStack: [],
-        redoStack: [],
-        historyLimit: 30,
-        isRestoring: false,
+        history: null,
+        photoLibrary: null,
+        photoAnalyzerWorker: null,
         photoObjectURLs: new Set(),
         maxPhotos: 1000,
         maxFileSize: 40 * 1024 * 1024,
@@ -49,6 +52,18 @@ import { PhotoWall } from './photowall.js';
     app.init = function () {
         var canvas = document.getElementById('wall-canvas');
         app.wall = new PhotoWall(canvas);
+        app.photoAnalyzerWorker = createPhotoAnalysisWorkerClient({ timeout: app.photoLoadTimeout });
+        app.history = createHistoryManager({
+            limit: 30,
+            capture: function () { return app.captureState(); },
+            restore: function (state) { app.restoreState(state); },
+            onChange: function () { app.updateActionState(); }
+        });
+        app.photoLibrary = createPhotoLibrary({
+            onReorder: app.reorderPhoto,
+            onFeature: app.toggleFeaturedPhoto,
+            onRemove: app.removePhoto
+        });
         app.wall.onPhotoClick = function (item, index) {
             app.openLightbox(index);
         };
@@ -77,7 +92,7 @@ import { PhotoWall } from './photowall.js';
         app.bindUI();
         app.renderShapeButtons();
         app.updateModeHint();
-        app.bindPhotoLibrary();
+        app.photoLibrary.bind();
         app.bindShapeCrop();
         app.updateActionState();
 
@@ -88,6 +103,7 @@ import { PhotoWall } from './photowall.js';
             }, 200);
         });
         window.addEventListener('beforeunload', function () {
+            if (app.photoAnalyzerWorker) app.photoAnalyzerWorker.terminate();
             app.photoObjectURLs.forEach(function (url) { URL.revokeObjectURL(url); });
             app.photoObjectURLs.clear();
         });
@@ -929,8 +945,7 @@ import { PhotoWall } from './photowall.js';
 
             function createPhoto(loadedImage, source) {
                 if (settled) return;
-                try {
-                    var analysis = PhotoWall.analyzePhoto(loadedImage);
+                app.analyzeLoadedPhoto(loadedImage, fileBlob).then(function (analysis) {
                     finish(resolve, {
                         id: app.createId('photo'),
                         img: loadedImage,
@@ -951,9 +966,9 @@ import { PhotoWall } from './photowall.js';
                         aspectRatio: analysis.aspectRatio,
                         featured: false
                     });
-                } catch (err) {
+                }).catch(function (err) {
                     finish(reject, err);
-                }
+                });
             }
 
             var fileBlob = null;
@@ -975,6 +990,13 @@ import { PhotoWall } from './photowall.js';
             }).catch(function (error) {
                 finish(reject, error);
             });
+        });
+    };
+
+    app.analyzeLoadedPhoto = function (image, blob) {
+        if (!app.photoAnalyzerWorker) return Promise.resolve(analyzePhoto(image));
+        return app.photoAnalyzerWorker.analyze(blob).catch(function () {
+            return analyzePhoto(image);
         });
     };
 
@@ -1048,137 +1070,38 @@ import { PhotoWall } from './photowall.js';
         app.updateActionState();
     };
 
-    /* ------------------------------------------------------------------ *
-     *  Sortable local photo library
-     * ------------------------------------------------------------------ */
-
     app.renderPhotoLibrary = function () {
-        var panel = document.getElementById('photo-library-panel');
-        var library = document.getElementById('photo-library');
-        panel.hidden = app.photos.length === 0;
-        var existing = new Map();
-        library.querySelectorAll('.photo-card[data-photo-id]').forEach(function (card) {
-            existing.set(card.getAttribute('data-photo-id'), card);
-        });
-        var fragment = document.createDocumentFragment();
-        app.photos.forEach(function (photo, index) {
-            var card = existing.get(photo.id);
-            if (!card) card = app.createPhotoCard(photo);
-            existing.delete(photo.id);
-            card.setAttribute('data-index', index);
-            card.classList.remove('dragging', 'drag-over');
-            card.querySelector('.photo-order').textContent = index + 1;
-            var image = card.querySelector('img');
-            if (image.src !== photo.src) image.src = photo.src;
-            image.alt = photo.name || '';
-            card.querySelector('.photo-remove').setAttribute('aria-label', '移除 ' + (photo.name || '照片'));
-            var feature = card.querySelector('.photo-feature');
-            feature.classList.toggle('active', photo.featured === true);
-            feature.setAttribute('aria-pressed', photo.featured === true ? 'true' : 'false');
-            feature.setAttribute('aria-label', (photo.featured ? '取消重点照片 ' : '设为重点照片 ') + (photo.name || ''));
-            fragment.appendChild(card);
-        });
-        existing.forEach(function (card) { card.remove(); });
-        library.appendChild(fragment);
+        if (app.photoLibrary) app.photoLibrary.render(app.photos);
     };
 
-    app.createPhotoCard = function (photo) {
-        var card = document.createElement('div');
-        card.className = 'photo-card';
-        card.draggable = true;
-        card.title = '拖拽排序';
-        card.setAttribute('data-photo-id', photo.id);
-        var order = document.createElement('span');
-        order.className = 'photo-order';
-        var image = document.createElement('img');
-        image.alt = photo.name || '';
-        image.decoding = 'async';
-        image.loading = 'lazy';
-        var remove = document.createElement('button');
-        remove.className = 'photo-remove';
-        remove.type = 'button';
-        remove.textContent = '×';
-        var feature = document.createElement('button');
-        feature.className = 'photo-feature';
-        feature.type = 'button';
-        feature.textContent = '★';
-        feature.title = '重点照片优先进入大图格位';
-        card.appendChild(order);
-        card.appendChild(image);
-        card.appendChild(feature);
-        card.appendChild(remove);
-        return card;
+    app.reorderPhoto = function (fromIndex, targetIndex) {
+        if (!app.photos[fromIndex] || !app.photos[targetIndex]) return;
+        app.recordHistory();
+        var moved = app.photos.splice(fromIndex, 1)[0];
+        app.photos.splice(targetIndex, 0, moved);
+        app.renderPhotoLibrary();
+        app.wall.setPhotos(app.photos);
+        app.toast('照片顺序已更新');
     };
 
-    app.escapeHTML = function (value) {
-        return String(value).replace(/[&<>'"]/g, function (char) {
-            return { '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[char];
-        });
+    app.toggleFeaturedPhoto = function (index) {
+        if (!app.photos[index]) return;
+        app.recordHistory();
+        app.photos[index].featured = !app.photos[index].featured;
+        app.renderPhotoLibrary();
+        app.wall.setPhotos(app.photos);
+        app.toast(app.photos[index].featured ? '已设为重点照片，将优先显示为大图' : '已取消重点照片');
     };
 
-    app.bindPhotoLibrary = function () {
-        var library = document.getElementById('photo-library');
-        var dragIndex = -1;
-        library.addEventListener('dragstart', function (e) {
-            var card = e.target.closest('.photo-card');
-            if (!card) return;
-            dragIndex = parseInt(card.getAttribute('data-index'), 10);
-            card.classList.add('dragging');
-            e.dataTransfer.effectAllowed = 'move';
-        });
-        library.addEventListener('dragover', function (e) {
-            var card = e.target.closest('.photo-card');
-            if (!card) return;
-            e.preventDefault();
-            library.querySelectorAll('.photo-card').forEach(function (item) { item.classList.remove('drag-over'); });
-            card.classList.add('drag-over');
-        });
-        library.addEventListener('drop', function (e) {
-            var card = e.target.closest('.photo-card');
-            if (!card || dragIndex < 0) return;
-            e.preventDefault();
-            var target = parseInt(card.getAttribute('data-index'), 10);
-            if (target !== dragIndex) {
-                app.recordHistory();
-                var moved = app.photos.splice(dragIndex, 1)[0];
-                app.photos.splice(target, 0, moved);
-                app.renderPhotoLibrary();
-                app.wall.setPhotos(app.photos);
-                app.toast('照片顺序已更新');
-            }
-            dragIndex = -1;
-        });
-        library.addEventListener('dragend', function () {
-            dragIndex = -1;
-            library.querySelectorAll('.photo-card').forEach(function (item) {
-                item.classList.remove('dragging', 'drag-over');
-            });
-        });
-        library.addEventListener('click', function (e) {
-            var feature = e.target.closest('.photo-feature');
-            if (feature) {
-                var featureCard = feature.closest('.photo-card');
-                var featureIndex = parseInt(featureCard.getAttribute('data-index'), 10);
-                if (!app.photos[featureIndex]) return;
-                app.recordHistory();
-                app.photos[featureIndex].featured = !app.photos[featureIndex].featured;
-                app.renderPhotoLibrary();
-                app.wall.setPhotos(app.photos);
-                app.toast(app.photos[featureIndex].featured ? '已设为重点照片，将优先显示为大图' : '已取消重点照片');
-                return;
-            }
-            var remove = e.target.closest('.photo-remove');
-            if (!remove) return;
-            var card = remove.closest('.photo-card');
-            var index = parseInt(card.getAttribute('data-index'), 10);
-            app.recordHistory();
-            app.photos.splice(index, 1);
-            app.updatePhotoCount();
-            app.renderPhotoLibrary();
-            app.wall.setPhotos(app.photos);
-            if (!app.photos.length) app.showEmptyState();
-            app.toast('已移除照片');
-        });
+    app.removePhoto = function (index) {
+        if (!app.photos[index]) return;
+        app.recordHistory();
+        app.photos.splice(index, 1);
+        app.updatePhotoCount();
+        app.renderPhotoLibrary();
+        app.wall.setPhotos(app.photos);
+        if (!app.photos.length) app.showEmptyState();
+        app.toast('已移除照片');
     };
 
     /* ------------------------------------------------------------------ *
@@ -1336,7 +1259,7 @@ import { PhotoWall } from './photowall.js';
 
             img.onload = function () {
                 try {
-                    var analysis = PhotoWall.analyzePhoto(img);
+                    var analysis = analyzePhoto(img);
                     finish(resolve, {
                         id: saved.id || app.createId('photo'),
                         img: img,
@@ -1448,8 +1371,7 @@ import { PhotoWall } from './photowall.js';
                 if (!photo.id || usedIds.has(photo.id)) photo.id = app.createId('photo');
                 usedIds.add(photo.id);
             });
-            app.undoStack = [];
-            app.redoStack = [];
+            app.history.clear();
             app.renderShapeButtons();
             if (Shapes[shapeKey] && Shapes[shapeKey].dynamic) app.addShapeButton(shapeKey, Shapes[shapeKey]);
             app.restoreState({
@@ -1491,11 +1413,7 @@ import { PhotoWall } from './photowall.js';
     };
 
     app.recordHistory = function (snapshot) {
-        if (app.isRestoring || !app.wall) return;
-        app.undoStack.push(snapshot || app.captureState());
-        if (app.undoStack.length > app.historyLimit) app.undoStack.shift();
-        app.redoStack = [];
-        app.updateActionState();
+        if (app.history && app.wall) app.history.record(snapshot);
     };
 
     app.restoreState = function (state) {
@@ -1503,7 +1421,6 @@ import { PhotoWall } from './photowall.js';
         clearTimeout(app.densityTimer);
         clearTimeout(app.overlapTimer);
         clearTimeout(app.rotationTimer);
-        app.isRestoring = true;
         app.photos = state.photos.map(function (photo) { return Object.assign({}, photo); });
         app.currentShapeKey = state.shapeKey;
 
@@ -1541,24 +1458,15 @@ import { PhotoWall } from './photowall.js';
         app.updatePhotoCount();
         app.renderPhotoLibrary();
         if (app.photos.length) app.hideEmptyState(); else app.showEmptyState();
-        app.isRestoring = false;
         app.updateActionState();
     };
 
     app.undo = function () {
-        if (!app.undoStack.length) return;
-        var state = app.undoStack.pop();
-        app.redoStack.push(app.captureState());
-        app.restoreState(state);
-        app.toast('已撤销');
+        if (app.history.undo()) app.toast('已撤销');
     };
 
     app.redo = function () {
-        if (!app.redoStack.length) return;
-        var state = app.redoStack.pop();
-        app.undoStack.push(app.captureState());
-        app.restoreState(state);
-        app.toast('已重做');
+        if (app.history.redo()) app.toast('已重做');
     };
 
     app.updateActionState = function () {
@@ -1569,8 +1477,8 @@ import { PhotoWall } from './photowall.js';
         var redoButton = document.getElementById('redo-btn');
         if (exportButton) exportButton.disabled = !hasPhotos;
         if (shuffleButton) shuffleButton.disabled = !hasPhotos;
-        if (undoButton) undoButton.disabled = app.undoStack.length === 0;
-        if (redoButton) redoButton.disabled = app.redoStack.length === 0;
+        if (undoButton) undoButton.disabled = !app.history || !app.history.canUndo();
+        if (redoButton) redoButton.disabled = !app.history || !app.history.canRedo();
         var saveProjectButton = document.getElementById('save-project-btn');
         if (saveProjectButton) saveProjectButton.disabled = !hasPhotos;
     };
