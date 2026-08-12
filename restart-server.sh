@@ -32,7 +32,8 @@ if (( ${#OLD_PIDS[@]} > 0 )); then
         [[ -n "$pid" ]] || continue
         command_line="$(ps -p "$pid" -o args= 2>/dev/null || true)"
         if [[ "$command_line" != *"python3 -m http.server $PORT"* &&
-              "$command_line" != *"python -m http.server $PORT"* ]]; then
+              "$command_line" != *"python -m http.server $PORT"* &&
+              "$command_line" != *"vite"*"--port $PORT"* ]]; then
             echo "错误：端口 $PORT 被其他程序占用，未自动终止：" >&2
             echo "  PID $pid  $command_line" >&2
             exit 1
@@ -56,7 +57,11 @@ if (( ${#OLD_PIDS[@]} > 0 )); then
 fi
 
 echo "正在启动 Photo Wall 服务…"
-nohup python3 -m http.server "$PORT" --bind "$HOST" --directory "$PROJECT_DIR" \
+command -v npm >/dev/null 2>&1 || {
+    echo "错误：未找到 npm，请先安装 Node.js 22 并执行 npm install。" >&2
+    exit 1
+}
+nohup npm run dev -- --host "$HOST" --port "$PORT" \
     >"$LOG_FILE" 2>&1 &
 NEW_PID=$!
 echo "$NEW_PID" >"$PID_FILE"

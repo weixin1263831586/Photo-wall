@@ -17,6 +17,29 @@
             <p class="subtitle">上传照片，拼出你想要的形状</p>
         </div>
 
+        <!-- Product presets -->
+        <section class="panel preset-panel">
+            <div class="panel-title-row">
+                <h3 class="panel-title">场景模板</h3>
+                <button class="text-action" id="save-template-btn" type="button">保存当前</button>
+            </div>
+            <div class="template-filters">
+                <input class="template-search" id="template-search" type="search" placeholder="搜索模板" aria-label="搜索模板">
+                <select class="template-category" id="template-category" aria-label="模板分类">
+                    <option value="all">全部</option>
+                    <option value="婚礼">婚礼</option>
+                    <option value="毕业">毕业</option>
+                    <option value="生日">生日</option>
+                    <option value="旅行">旅行</option>
+                    <option value="生活">生活</option>
+                    <option value="通用">通用</option>
+                    <option value="自定义">自定义</option>
+                </select>
+            </div>
+            <div class="preset-buttons" id="preset-buttons" role="group" aria-label="场景布局模板"></div>
+            <p class="template-empty" id="template-empty" hidden>没有匹配的模板</p>
+        </section>
+
         <!-- Shape selection -->
         <section class="panel">
             <h3 class="panel-title">选择形状</h3>
@@ -123,6 +146,40 @@
             <p class="setting-hint">开启后按照片色彩形成柔和渐变</p>
         </section>
 
+        <section class="panel overlay-panel">
+            <div class="panel-title-row">
+                <h3 class="panel-title">文字与图层</h3>
+                <span class="layer-count" id="layer-count">0 层</span>
+            </div>
+            <div class="overlay-add-row">
+                <button class="btn btn-mini" id="add-title-btn" type="button">＋ 标题</button>
+                <button class="btn btn-mini" id="add-date-btn" type="button">＋ 日期</button>
+            </div>
+            <div class="sticker-buttons" id="sticker-buttons" aria-label="添加贴纸">
+                <button type="button" data-sticker="🎉" title="庆祝">🎉</button>
+                <button type="button" data-sticker="❤️" title="爱心">❤️</button>
+                <button type="button" data-sticker="🎓" title="毕业">🎓</button>
+                <button type="button" data-sticker="🌸" title="花朵">🌸</button>
+                <button type="button" data-sticker="⭐" title="星星">⭐</button>
+            </div>
+            <div class="border-row">
+                <label for="border-style">边框</label>
+                <select id="border-style">
+                    <option value="none">无</option>
+                    <option value="classic">经典</option>
+                    <option value="double">双线</option>
+                    <option value="film">胶片</option>
+                </select>
+                <input type="color" id="border-color" value="#ffffff" aria-label="边框颜色">
+            </div>
+            <div class="overlay-inspector" id="overlay-inspector" hidden>
+                <input type="text" id="overlay-content" maxlength="120" aria-label="图层文字">
+                <label>大小 <input type="range" id="overlay-size" min="0.018" max="0.22" step="0.002" value="0.055"></label>
+                <label>颜色 <input type="color" id="overlay-color" value="#ffffff"></label>
+            </div>
+            <div class="layer-list" id="layer-list" aria-label="图层列表"></div>
+        </section>
+
         <section class="panel photo-library-panel" id="photo-library-panel" hidden>
             <div class="panel-title-row">
                 <h3 class="panel-title">照片顺序</h3>
@@ -160,6 +217,10 @@
                     <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 19V6a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2v10M3 19h18"/></svg>
                     <span>打开项目</span>
                 </button>
+                <button class="toolbar-btn" id="restore-backup-btn" type="button" title="恢复最近的本地备份">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12a8 8 0 1 0 2.3-5.7L4 8.6M4 4v4.6h4.6M12 7v5l3 2"/></svg>
+                    <span>恢复备份</span>
+                </button>
                 <button class="toolbar-btn" id="save-project-btn" type="button" title="保存项目 (Ctrl/⌘ S)" disabled>
                     <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3h12l3 3v15H4V3h1M8 3v6h8V3M8 21v-7h8v7"/></svg>
                     <span>保存项目</span>
@@ -170,14 +231,14 @@
                 </button>
                 <button class="toolbar-btn" id="shuffle-btn" type="button" disabled>
                     <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16 3h5v5M4 20l5.5-5.5M21 16v5h-5M15 5l-11 11M14.5 14.5 21 21"/></svg>
-                    <span>重新排列</span>
+                    <span>换一个方案</span>
                 </button>
                 <button class="toolbar-btn toolbar-primary" id="export-btn" type="button" disabled>
                     <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg>
                     <span>导出图片</span>
                 </button>
             </div>
-            <input type="file" id="project-file-input" accept=".photowall.json,.json,application/json" hidden>
+            <input type="file" id="project-file-input" accept=".photowall,.photowall.json,.json,application/x-photowall,application/json" hidden>
         </header>
         <div class="canvas-help" id="canvas-help">拖拽照片可交换位置 · 点击照片可查看原图</div>
         <div class="canvas-stage" id="canvas-stage">
@@ -228,7 +289,26 @@
                     <label><input type="radio" name="export-format" value="png" checked><span>PNG<small>画质最佳</small></span></label>
                     <label><input type="radio" name="export-format" value="jpeg"><span>JPG<small>文件较小</small></span></label>
                     <label><input type="radio" name="export-format" value="webp"><span>WebP<small>体积更小</small></span></label>
+                    <label><input type="radio" name="export-format" value="pdf"><span>PDF<small>专业打印</small></span></label>
                 </div>
+            </fieldset>
+            <fieldset class="export-field print-export-field" id="print-export-field" hidden>
+                <legend>打印规格</legend>
+                <div class="print-options-row">
+                    <label><span>纸张</span><select id="export-print-size">
+                        <option value="a4-portrait">A4 竖版</option>
+                        <option value="a4-landscape">A4 横版</option>
+                        <option value="a3-portrait">A3 竖版</option>
+                        <option value="a3-landscape">A3 横版</option>
+                        <option value="poster-12x18">海报 12×18 英寸</option>
+                    </select></label>
+                    <label><span>精度</span><select id="export-print-dpi">
+                        <option value="150">150 DPI</option>
+                        <option value="300" selected>300 DPI</option>
+                    </select></label>
+                </div>
+                <label class="print-bleed-option"><input type="checkbox" id="export-print-bleed" checked><span>包含 3 mm 出血与裁切标记</span></label>
+                <p class="print-quality" id="export-print-quality">300 DPI · 专业印刷</p>
             </fieldset>
             <fieldset class="export-field">
                 <legend>清晰度</legend>
@@ -354,6 +434,57 @@
     <div class="lb-content">
         <img id="lightbox-img" src="" alt="放大查看">
         <p class="lb-info" id="lightbox-info"></p>
+        <button class="btn btn-primary" id="lightbox-edit" type="button">裁切与精修</button>
+    </div>
+</div>
+
+<!-- ======================== Photo editor ======================== -->
+<div class="modal" id="photo-editor" role="dialog" aria-modal="true" aria-labelledby="photo-editor-title" aria-hidden="true">
+    <div class="modal-card photo-editor-card">
+        <div class="modal-header">
+            <div>
+                <span class="modal-eyebrow">单张照片</span>
+                <h2 id="photo-editor-title">裁切与精修</h2>
+                <p id="photo-editor-name">调整主体位置、缩放、旋转或翻转</p>
+            </div>
+            <button class="editor-close" id="photo-editor-close" type="button" aria-label="关闭">×</button>
+        </div>
+        <div class="photo-editor-layout">
+            <div class="photo-editor-preview">
+                <canvas id="photo-editor-canvas" width="720" height="520" aria-label="照片裁切预览"></canvas>
+            </div>
+            <div class="photo-editor-controls">
+                <label class="editor-field editor-range-field">
+                    <span>缩放 <strong id="photo-edit-zoom-value">100%</strong></span>
+                    <input type="range" id="photo-edit-zoom" min="1" max="4" step="0.05" value="1">
+                </label>
+                <label class="editor-field editor-range-field">
+                    <span>水平主体 <strong id="photo-edit-focus-x-value">50%</strong></span>
+                    <input type="range" id="photo-edit-focus-x" min="0" max="1" step="0.01" value="0.5">
+                </label>
+                <label class="editor-field editor-range-field">
+                    <span>垂直主体 <strong id="photo-edit-focus-y-value">50%</strong></span>
+                    <input type="range" id="photo-edit-focus-y" min="0" max="1" step="0.01" value="0.5">
+                </label>
+                <label class="editor-field editor-range-field">
+                    <span>照片旋转 <strong id="photo-edit-rotation-value">0°</strong></span>
+                    <input type="range" id="photo-edit-rotation" min="-180" max="180" step="1" value="0">
+                </label>
+                <div class="photo-edit-actions-row">
+                    <button class="btn btn-ghost" id="photo-edit-flip-x" type="button" aria-pressed="false">水平翻转</button>
+                    <button class="btn btn-ghost" id="photo-edit-flip-y" type="button" aria-pressed="false">垂直翻转</button>
+                </div>
+                <div class="photo-edit-actions-row">
+                    <button class="btn btn-ghost" id="photo-edit-replace" type="button">替换照片</button>
+                    <button class="btn btn-ghost" id="photo-edit-reset" type="button">重置调整</button>
+                    <input type="file" id="photo-edit-file" accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp" hidden>
+                </div>
+            </div>
+        </div>
+        <div class="modal-actions">
+            <button class="btn btn-ghost" id="photo-editor-cancel" type="button">取消</button>
+            <button class="btn btn-primary" id="photo-editor-confirm" type="button">应用调整</button>
+        </div>
     </div>
 </div>
 

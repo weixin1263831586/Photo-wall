@@ -28,6 +28,11 @@ export function createDeviceProfile(options) {
         analysisWorkers: mobile || lowMemory ? 1 : Math.min(4, Math.max(2, Math.floor(cpuCount / 4))),
         maxEditorDpr: mobile && lowMemory ? 1.5 : 2,
         maxPhotoDimension: mobile ? (lowMemory ? 1200 : 1440) : 1600,
+        thumbnailDimension: mobile ? 192 : 256,
+        maxWorkingBitmaps: mobile ? (lowMemory ? 32 : 60) : 180,
+        maxWorkingBitmapPixels: (mobile ? (lowMemory ? 28 : 48) : 160) * 1000000,
+        maxOriginalBitmaps: mobile ? 2 : 8,
+        maxOriginalBitmapPixels: (mobile ? 20 : 64) * 1000000,
         historyLimit: mobile ? (lowMemory ? 12 : 20) : 30,
         maxExportPixels: mobile ? (lowMemory ? 12 : 20) * 1000000 : 40 * 1000000,
         recommendedPhotoCount: mobile ? (lowMemory ? 300 : 500) : 1000

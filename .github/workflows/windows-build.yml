@@ -2,9 +2,7 @@ name: Build Windows App
 
 on:
   workflow_dispatch:
-  push:
-    tags:
-      - 'v*'
+  pull_request:
 
 jobs:
   windows:

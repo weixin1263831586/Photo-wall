@@ -8,6 +8,7 @@
     "dialog:allow-open",
     "dialog:allow-save",
     "fs:allow-write-file",
-    "fs:allow-read-file"
+    "fs:allow-read-file",
+    "log:default"
   ]
 }

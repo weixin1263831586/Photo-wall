@@ -1,0 +1,50 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {
+    LAYOUT_PRESETS,
+    applyLayoutPreset,
+    getLayoutPreset,
+    layoutPresetMatches
+} from '../js/layout/LayoutPresets.js';
+
+test('layout presets have unique product-facing identifiers', function () {
+    var ids = LAYOUT_PRESETS.map(function (preset) { return preset.id; });
+    assert.equal(new Set(ids).size, ids.length);
+    assert.ok(LAYOUT_PRESETS.length >= 6);
+    assert.equal(getLayoutPreset('missing'), null);
+});
+
+test('applying a layout preset updates the wall in one layout pass', function () {
+    var wall = {
+        density: 1,
+        gap: 0,
+        placementMode: 'grid',
+        photoShape: 'square',
+        smartPlacement: false,
+        mixedSizes: false,
+        rotationRange: 0,
+        shape: null,
+        generateCount: 0,
+        generateLayout: function () { this.generateCount++; }
+    };
+    var preset = getLayoutPreset('wedding');
+    var shape = { name: '双爱心' };
+    applyLayoutPreset(wall, preset, shape);
+
+    assert.equal(wall.shapeKey, 'doubleHeart');
+    assert.equal(wall.shape, shape);
+    assert.equal(wall.placementMode, 'organic');
+    assert.equal(wall.photoShape, 'circle');
+    assert.equal(wall.generateCount, 1);
+    assert.equal(layoutPresetMatches(wall, 'doubleHeart', preset), true);
+
+    wall.gap = 0;
+    assert.equal(layoutPresetMatches(wall, 'doubleHeart', preset), false);
+});
+
+test('a preset refuses to apply when its required shape is missing', function () {
+    var wall = { generateLayout: function () {} };
+    assert.throws(function () {
+        applyLayoutPreset(wall, getLayoutPreset('travel'), null);
+    }, /Preset shape is unavailable/);
+});

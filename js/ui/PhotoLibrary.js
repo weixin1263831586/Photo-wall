@@ -15,11 +15,16 @@ function createPhotoCard(photo) {
     feature.type = 'button';
     feature.textContent = '★';
     feature.title = '重点照片优先进入大图格位';
+    var edit = document.createElement('button');
+    edit.className = 'photo-edit';
+    edit.type = 'button';
+    edit.textContent = '✎';
+    edit.title = '裁切与精修';
     var remove = document.createElement('button');
     remove.className = 'photo-remove';
     remove.type = 'button';
     remove.textContent = '×';
-    card.append(order, image, feature, remove);
+    card.append(order, image, feature, edit, remove);
     return card;
 }
 
@@ -50,9 +55,11 @@ export function createPhotoLibrary(options) {
             card.classList.remove('dragging', 'drag-over');
             card.querySelector('.photo-order').textContent = index + 1;
             var image = card.querySelector('img');
-            if (image.src !== photo.src) image.src = photo.src;
+            var thumbnailSource = photo.thumbnailSrc || photo.src;
+            if (image.src !== thumbnailSource) image.src = thumbnailSource;
             image.alt = photo.name || '';
             card.querySelector('.photo-remove').setAttribute('aria-label', '移除 ' + (photo.name || '照片'));
+            card.querySelector('.photo-edit').setAttribute('aria-label', '精修 ' + (photo.name || '照片'));
             var feature = card.querySelector('.photo-feature');
             feature.classList.toggle('active', photo.featured === true);
             feature.setAttribute('aria-pressed', photo.featured === true ? 'true' : 'false');
@@ -150,11 +157,13 @@ export function createPhotoLibrary(options) {
         library.addEventListener('pointercancel', finishPointer);
         library.addEventListener('click', function (event) {
             var feature = event.target.closest('.photo-feature');
+            var edit = event.target.closest('.photo-edit');
             var remove = event.target.closest('.photo-remove');
-            if (!feature && !remove) return;
-            var card = (feature || remove).closest('.photo-card');
+            if (!feature && !edit && !remove) return;
+            var card = (feature || edit || remove).closest('.photo-card');
             var index = Number(card.getAttribute('data-index'));
             if (feature) options.onFeature(index);
+            else if (edit) options.onEdit(index);
             else options.onRemove(index);
         });
     }

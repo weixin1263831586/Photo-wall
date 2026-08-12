@@ -8,9 +8,9 @@ function aspectFit(photo, cell) {
     return Math.exp(-Math.abs(Math.log(photoAspect / cellAspect)));
 }
 
-function colourMatch(photo, cell, width, height) {
+function colourMatch(photo, cell, width, height, hueOffset) {
     var spatialProgress = clamp01((cell.x / Math.max(1, width)) * 0.65 + (cell.y / Math.max(1, height)) * 0.35);
-    var desiredHue = spatialProgress * 360;
+    var desiredHue = (spatialProgress * 360 + (Number(hueOffset) || 0)) % 360;
     var difference = Math.abs((Number(photo.hue) || 0) - desiredHue) % 360;
     return 1 - Math.min(difference, 360 - difference) / 180;
 }
@@ -57,7 +57,7 @@ export function placementScore(photo, cell, context) {
     var importance = photo.featured ? 1 : 0;
     var quality = clamp01((Number(photo.sharpness) || 0) * 2.5) * 0.6 + clamp01(photo.contrast) * 0.4;
     var score =
-        0.25 * colourMatch(photo, cell, context.width, context.height) +
+        0.25 * colourMatch(photo, cell, context.width, context.height, context.hueOffset) +
         0.18 * aspectFit(photo, cell) +
         0.12 * quality +
         0.10 * clamp01(photo.contrast) +
@@ -73,6 +73,8 @@ export function assignPhotosToCells(photos, cells, options) {
     options = options || {};
     var width = Math.max(1, Number(options.width) || 1);
     var height = Math.max(1, Number(options.height) || 1);
+    var seed = (Number(options.seed) || 1) >>> 0;
+    var hueOffset = (seed * 137.50776405) % 360;
     var useCount = new Uint32Array(photos.length);
     var lastPosition = new Array(photos.length);
     var assignment = new Array(cells.length);
@@ -84,7 +86,7 @@ export function assignPhotosToCells(photos, cells, options) {
     var normalizedCells = cells.map(function (cell) {
         var cellAspect = Math.max(0.05, cell.width / Math.max(1, cell.height));
         return {
-            desiredHue: clamp01((cell.x / width) * 0.65 + (cell.y / height) * 0.35) * 360,
+            desiredHue: (clamp01((cell.x / width) * 0.65 + (cell.y / height) * 0.35) * 360 + hueOffset) % 360,
             logAspect: Math.log(cellAspect),
             clearance: Math.min(1, (Number(cell.boundaryDistance) || 0) /
                 Math.max(1, Math.min(cell.width, cell.height) * 0.5)),
@@ -111,6 +113,10 @@ export function assignPhotosToCells(photos, cells, options) {
                 var safeDistance = Math.max(cell.width, cell.height) * 2.5;
                 if (distance < safeDistance) score -= (1 - distance / safeDistance) * 0.75;
             }
+            // A stable, tiny tie-breaker makes equal-looking photos vary with
+            // the project seed without overpowering the placement quality.
+            score += ((((seed ^ Math.imul(photoIndex + 1, 2654435761) ^
+                Math.imul(cellIndex + 1, 1597334677)) >>> 0) % 1000) / 1000) * 0.0001;
             if (score > bestScore) {
                 bestScore = score;
                 bestPhoto = photoIndex;

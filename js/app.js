@@ -1,11 +1,34 @@
 import { Shapes, ShapeFactory } from './shapes.js';
 import { PhotoWall } from './photowall.js';
+import {
+    LAYOUT_PRESETS,
+    applyLayoutPreset,
+    layoutPresetMatches
+} from './layout/LayoutPresets.js';
+import { createTemplateLibrary } from './layout/TemplateLibrary.js';
 import { analyzePhoto } from './image/PhotoAnalyzer.js';
+import { createPhotoAssetManager } from './image/PhotoAssetManager.js';
+import { applyPhotoTransform, drawPhotoCover, normalizePhotoTransform } from './image/PhotoTransform.js';
+import { createOverlay, normalizeOverlays } from './overlay/OverlayRenderer.js';
 import { createPhotoAnalysisWorkerClient } from './image/PhotoAnalysisWorkerClient.js';
 import { createPhotoLibrary } from './ui/PhotoLibrary.js';
 import { createHistoryManager } from './history/HistoryManager.js';
+import { createProjectAutosave } from './persistence/ProjectAutosave.js';
+import {
+    createProjectContainer,
+    isPhotowallContainer,
+    migrateProject,
+    openProjectContainer
+} from './persistence/ProjectContainer.js';
 import { isNativeApp, saveBlob } from './platform/NativeFileService.js';
+import { checkAndInstallUpdate, installCrashCapture } from './platform/RuntimeServices.js';
 import { createDeviceProfile, getImportDimension } from './platform/DeviceProfile.js';
+import {
+    assessPrintResolution,
+    createPrintPdf,
+    getPrintPreset,
+    printPixelDimensions
+} from './export/PrintExport.js';
 
 /**
  * App controller — wires UI to PhotoWall engine.
@@ -15,6 +38,9 @@ import { createDeviceProfile, getImportDimension } from './platform/DeviceProfil
     var app = {
         wall: null,
         photos: [],
+        overlays: [],
+        selectedOverlayId: null,
+        overlayEditSnapshot: null,
         lightboxIndex: -1,
         resizeTimer: null,
         densityTimer: null,
@@ -24,6 +50,12 @@ import { createDeviceProfile, getImportDimension } from './platform/DeviceProfil
         exportReturnFocus: null,
         shapeEditorReturnFocus: null,
         lightboxReturnFocus: null,
+        lightboxObjectURL: '',
+        photoEditorIndex: -1,
+        photoEditorDraft: null,
+        photoEditorReplacement: null,
+        photoEditorRenderToken: 0,
+        photoEditorReturnFocus: null,
         currentShapeKey: 'china',
         pendingShapeImage: null,
         shapePreviewRAF: null,
@@ -36,8 +68,12 @@ import { createDeviceProfile, getImportDimension } from './platform/DeviceProfil
         shapeCropStart: null,
         shapeCropPointerId: null,
         history: null,
+        autosave: null,
+        autosaveRestoring: false,
         photoLibrary: null,
         photoAnalyzerWorker: null,
+        assetManager: null,
+        templateLibrary: null,
         deviceProfile: null,
         photoObjectURLs: new Set(),
         photoObjectURLCleanupTimer: null,
@@ -54,6 +90,7 @@ import { createDeviceProfile, getImportDimension } from './platform/DeviceProfil
      * ------------------------------------------------------------------ */
 
     app.init = function () {
+        app.detachCrashCapture = installCrashCapture();
         var canvas = document.getElementById('wall-canvas');
         app.deviceProfile = createDeviceProfile({
             viewportWidth: window.innerWidth,
@@ -63,7 +100,18 @@ import { createDeviceProfile, getImportDimension } from './platform/DeviceProfil
         });
         app.photoLoadConcurrency = app.deviceProfile.photoLoadConcurrency;
         app.maxPhotoDimension = app.deviceProfile.maxPhotoDimension;
-        app.wall = new PhotoWall(canvas, { maxDevicePixelRatio: app.deviceProfile.maxEditorDpr });
+        app.assetManager = createPhotoAssetManager({
+            thumbnailDimension: app.deviceProfile.thumbnailDimension,
+            maxWorkingEntries: app.deviceProfile.maxWorkingBitmaps,
+            maxWorkingPixels: app.deviceProfile.maxWorkingBitmapPixels,
+            maxOriginalEntries: app.deviceProfile.maxOriginalBitmaps,
+            maxOriginalPixels: app.deviceProfile.maxOriginalBitmapPixels
+        });
+        app.templateLibrary = createTemplateLibrary();
+        app.wall = new PhotoWall(canvas, {
+            maxDevicePixelRatio: app.deviceProfile.maxEditorDpr,
+            assetManager: app.assetManager
+        });
         document.documentElement.classList.toggle('native-app', isNativeApp());
         document.documentElement.classList.toggle('mobile-device', app.deviceProfile.mobile);
         app.photoAnalyzerWorker = createPhotoAnalysisWorkerClient({
@@ -79,9 +127,15 @@ import { createDeviceProfile, getImportDimension } from './platform/DeviceProfil
                 app.scheduleObjectURLCleanup();
             }
         });
+        app.autosave = createProjectAutosave({
+            delay: app.deviceProfile.mobile ? 2500 : 1500,
+            capture: function () { return app.captureAutosaveSnapshot(); },
+            onError: function (error) { console.warn('自动保存失败:', error); }
+        });
         app.photoLibrary = createPhotoLibrary({
             onReorder: app.reorderPhoto,
             onFeature: app.toggleFeaturedPhoto,
+            onEdit: app.openPhotoEditor,
             onRemove: app.removePhoto
         });
         app.wall.onPhotoClick = function (item, index) {
@@ -102,7 +156,18 @@ import { createDeviceProfile, getImportDimension } from './platform/DeviceProfil
                     (largeCount ? ' · ' + largeCount + ' 个大图' : '') + ' · 本地处理' :
                 '所有照片仅在本地处理';
             app.updateExportDimensions();
+            app.updateLayoutPresetSelection();
         };
+        app.wall.onOverlaySelect = function (id) {
+            app.selectedOverlayId = id;
+            app.renderLayers();
+        };
+        app.wall.onBeforeOverlayMove = function () { app.recordHistory(); };
+        app.wall.onOverlayMove = function () {
+            app.renderLayers();
+            if (app.autosave) app.autosave.schedule();
+        };
+        app.wall.setOverlays(app.overlays);
 
         app.wall.setShape('china');
         requestAnimationFrame(function () {
@@ -110,11 +175,17 @@ import { createDeviceProfile, getImportDimension } from './platform/DeviceProfil
         });
 
         app.bindUI();
+        app.renderLayoutPresets();
+        app.renderLayers();
         app.renderShapeButtons();
         app.updateModeHint();
         app.photoLibrary.bind();
         app.bindShapeCrop();
         app.updateActionState();
+        app.tryRestoreAutosave();
+        if (isNativeApp() && import.meta.env.VITE_PHOTO_WALL_UPDATES === 'true') {
+            setTimeout(function () { app.checkForUpdates(true); }, 5000);
+        }
 
         window.addEventListener('resize', function () {
             clearTimeout(app.resizeTimer);
@@ -123,10 +194,41 @@ import { createDeviceProfile, getImportDimension } from './platform/DeviceProfil
             }, 200);
         });
         window.addEventListener('beforeunload', function () {
+            if (app.autosave) app.autosave.saveNow();
             if (app.photoAnalyzerWorker) app.photoAnalyzerWorker.terminate();
+            if (app.assetManager) app.assetManager.destroy();
+            if (app.detachCrashCapture) app.detachCrashCapture();
             clearTimeout(app.photoObjectURLCleanupTimer);
             app.photoObjectURLs.forEach(function (url) { URL.revokeObjectURL(url); });
             app.photoObjectURLs.clear();
+        });
+        document.addEventListener('visibilitychange', function () {
+            if (document.visibilityState === 'hidden' && app.autosave) app.autosave.saveNow();
+        });
+    };
+
+    app.checkForUpdates = function (silent) {
+        return checkAndInstallUpdate({
+            confirm: function (update) {
+                return window.confirm('发现新版本 ' + update.version + '，是否立即下载并安装？\n\n' +
+                    String(update.body || '').slice(0, 1000));
+            },
+            onProgress: function (progress) {
+                var percent = progress.total ? Math.round(progress.downloaded / progress.total * 100) : 0;
+                app.showLoading(true, percent ? '正在下载更新 ' + percent + '%…' : '正在下载更新…');
+            },
+            beforeRestart: function () {
+                app.showLoading(true, '更新已安装，正在重启…');
+                return app.autosave ? app.autosave.saveNow() : Promise.resolve();
+            },
+            onError: function (error) {
+                console.warn('检查更新失败:', error);
+                app.showLoading(false);
+                if (!silent) app.toast('暂时无法检查更新');
+            }
+        }).then(function (result) {
+            if (result && !result.available && !result.error && !silent) app.toast('当前已是最新版本');
+            return result;
         });
     };
 
@@ -135,6 +237,49 @@ import { createDeviceProfile, getImportDimension } from './platform/DeviceProfil
      * ------------------------------------------------------------------ */
 
     app.bindUI = function () {
+        // ---- Product presets ----
+        document.getElementById('preset-buttons').addEventListener('click', function (e) {
+            var deleteButton = e.target.closest('.preset-delete');
+            if (deleteButton) {
+                e.stopPropagation();
+                app.deleteCustomTemplate(deleteButton.getAttribute('data-template-delete'));
+                return;
+            }
+            var button = e.target.closest('.preset-btn');
+            if (button) app.applyLayoutPreset(button.getAttribute('data-preset'));
+        });
+        document.getElementById('template-search').addEventListener('input', app.renderLayoutPresets);
+        document.getElementById('template-category').addEventListener('change', app.renderLayoutPresets);
+        document.getElementById('save-template-btn').addEventListener('click', app.saveCurrentTemplate);
+
+        // ---- Text, stickers, borders and layers ----
+        document.getElementById('add-title-btn').addEventListener('click', function () {
+            app.addOverlay('text', '双击修改标题', { role: 'title', fontSize: 0.062, y: 0.16 });
+        });
+        document.getElementById('add-date-btn').addEventListener('click', function () {
+            app.addOverlay('text', new Date().toLocaleDateString('zh-CN'), {
+                role: 'date', fontSize: 0.035, y: 0.84, fontWeight: 'normal'
+            });
+        });
+        document.getElementById('sticker-buttons').addEventListener('click', function (event) {
+            var button = event.target.closest('[data-sticker]');
+            if (button) app.addOverlay('sticker', button.getAttribute('data-sticker'), {
+                role: 'sticker', x: 0.78, y: 0.22, fontSize: 0.085
+            });
+        });
+        document.getElementById('border-style').addEventListener('change', app.updateBorderOverlay);
+        document.getElementById('border-color').addEventListener('change', app.updateBorderOverlay);
+        document.getElementById('layer-list').addEventListener('click', app.handleLayerAction);
+        var inspector = document.getElementById('overlay-inspector');
+        inspector.addEventListener('focusin', function () {
+            if (!app.overlayEditSnapshot) app.overlayEditSnapshot = app.captureState();
+        });
+        inspector.addEventListener('input', app.updateSelectedOverlay);
+        inspector.addEventListener('change', function () {
+            if (app.overlayEditSnapshot) app.recordHistory(app.overlayEditSnapshot);
+            app.overlayEditSnapshot = null;
+        });
+
         // ---- Shape buttons ----
         var shapeContainer = document.getElementById('shape-buttons');
         shapeContainer.addEventListener('click', function (e) {
@@ -364,14 +509,15 @@ import { createDeviceProfile, getImportDimension } from './platform/DeviceProfil
             });
             btn.classList.add('active');
             app.wall.setPhotoShape(photoShape);
+            app.updateLayoutPresetSelection();
         });
 
         // ---- Actions ----
         document.getElementById('shuffle-btn').addEventListener('click', function () {
             if (!app.photos.length) return;
             app.recordHistory();
-            app.wall.shuffle();
-            app.toast('已重新排列');
+            var seed = app.wall.nextLayoutVariant();
+            app.toast('已生成新方案 · #' + seed);
         });
         document.getElementById('clear-btn').addEventListener('click', function () {
             app.clearPhotos();
@@ -385,6 +531,7 @@ import { createDeviceProfile, getImportDimension } from './platform/DeviceProfil
         document.getElementById('open-project-btn').addEventListener('click', function () {
             document.getElementById('project-file-input').click();
         });
+        document.getElementById('restore-backup-btn').addEventListener('click', app.restoreLatestBackup);
         document.getElementById('project-file-input').addEventListener('change', function (e) {
             var file = e.target.files[0];
             if (file) app.openProject(file);
@@ -399,6 +546,9 @@ import { createDeviceProfile, getImportDimension } from './platform/DeviceProfil
         });
         document.querySelectorAll('input[name="export-format"], input[name="export-scale"], input[name="export-aspect"]').forEach(function (input) {
             input.addEventListener('change', app.updateExportOptions);
+        });
+        ['export-print-size', 'export-print-dpi', 'export-print-bleed'].forEach(function (id) {
+            document.getElementById(id).addEventListener('change', app.updateExportOptions);
         });
         document.querySelectorAll('input[name="export-background"]').forEach(function (input) {
             input.addEventListener('change', app.scheduleExportPreview);
@@ -424,6 +574,51 @@ import { createDeviceProfile, getImportDimension } from './platform/DeviceProfil
             e.stopPropagation();
             app.navigateLightbox(1);
         });
+        document.getElementById('lightbox-edit').addEventListener('click', function (e) {
+            e.stopPropagation();
+            var item = app.wall.layout[app.lightboxIndex];
+            if (!item) return;
+            var photoIndex = app.photos.findIndex(function (photo) { return photo.id === item.photo.id; });
+            app.closeLightbox();
+            if (photoIndex >= 0) app.openPhotoEditor(photoIndex);
+        });
+
+        // ---- Single photo editor ----
+        ['photo-editor-close', 'photo-editor-cancel'].forEach(function (id) {
+            document.getElementById(id).addEventListener('click', function () { app.closePhotoEditor(); });
+        });
+        document.getElementById('photo-editor').addEventListener('click', function (e) {
+            if (e.target === this) app.closePhotoEditor();
+        });
+        ['photo-edit-zoom', 'photo-edit-focus-x', 'photo-edit-focus-y', 'photo-edit-rotation'].forEach(function (id) {
+            document.getElementById(id).addEventListener('input', app.updatePhotoEditorDraft);
+        });
+        document.getElementById('photo-edit-flip-x').addEventListener('click', function () {
+            if (!app.photoEditorDraft) return;
+            app.photoEditorDraft.flipX = !app.photoEditorDraft.flipX;
+            app.syncPhotoEditorControls();
+            app.renderPhotoEditorPreview();
+        });
+        document.getElementById('photo-edit-flip-y').addEventListener('click', function () {
+            if (!app.photoEditorDraft) return;
+            app.photoEditorDraft.flipY = !app.photoEditorDraft.flipY;
+            app.syncPhotoEditorControls();
+            app.renderPhotoEditorPreview();
+        });
+        document.getElementById('photo-edit-reset').addEventListener('click', function () {
+            app.photoEditorDraft = normalizePhotoTransform({ focusX: 0.5, focusY: 0.5 });
+            app.syncPhotoEditorControls();
+            app.renderPhotoEditorPreview();
+        });
+        document.getElementById('photo-edit-replace').addEventListener('click', function () {
+            document.getElementById('photo-edit-file').click();
+        });
+        document.getElementById('photo-edit-file').addEventListener('change', function (e) {
+            var file = e.target.files[0];
+            e.target.value = '';
+            if (file) app.replacePhotoEditorSource(file);
+        });
+        document.getElementById('photo-editor-confirm').addEventListener('click', app.confirmPhotoEditor);
 
         document.addEventListener('keydown', function (e) {
             var targetTag = e.target && e.target.tagName;
@@ -450,6 +645,14 @@ import { createDeviceProfile, getImportDimension } from './platform/DeviceProfil
             }
             if (e.key === 'Escape' && document.getElementById('shape-editor').classList.contains('active')) {
                 app.closeShapeEditor();
+                return;
+            }
+            if (e.key === 'Escape' && document.getElementById('photo-editor').classList.contains('active')) {
+                app.closePhotoEditor();
+                return;
+            }
+            if (e.key === 'Tab' && document.getElementById('photo-editor').classList.contains('active')) {
+                app.trapDialogFocus(e, document.querySelector('#photo-editor .photo-editor-card'));
                 return;
             }
             if (e.key === 'Tab' && document.getElementById('shape-editor').classList.contains('active')) {
@@ -849,6 +1052,266 @@ import { createDeviceProfile, getImportDimension } from './platform/DeviceProfil
         document.getElementById('mode-hint').textContent = hints[mode] || hints.grid;
     };
 
+    app.escapeHTML = function (value) {
+        return String(value == null ? '' : value).replace(/[&<>"']/g, function (character) {
+            return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[character];
+        });
+    };
+
+    app.getTemplates = function () {
+        return LAYOUT_PRESETS.concat(app.templateLibrary ? app.templateLibrary.list() : []);
+    };
+
+    app.findTemplate = function (id) {
+        return app.getTemplates().find(function (preset) { return preset.id === id; }) || null;
+    };
+
+    app.renderLayoutPresets = function () {
+        var container = document.getElementById('preset-buttons');
+        var queryElement = document.getElementById('template-search');
+        var categoryElement = document.getElementById('template-category');
+        var query = queryElement ? queryElement.value.trim().toLowerCase() : '';
+        var category = categoryElement ? categoryElement.value : 'all';
+        var templates = app.getTemplates().filter(function (preset) {
+            var matchesCategory = category === 'all' || preset.category === category;
+            var haystack = (preset.name + ' ' + preset.description + ' ' + preset.category).toLowerCase();
+            return matchesCategory && (!query || haystack.indexOf(query) >= 0);
+        });
+        container.innerHTML = templates.map(function (preset) {
+            var palette = preset.palette || ['#403b68', '#9d8cff'];
+            var background = preset.thumbnail ? 'url(&quot;' + app.escapeHTML(preset.thumbnail) + '&quot;)' :
+                'linear-gradient(135deg,' + palette[0] + ',' + palette[1] + ')';
+            return '<div class="preset-card"><button class="preset-btn" type="button" data-preset="' + preset.id +
+                '" aria-pressed="false" title="应用' + app.escapeHTML(preset.name) + '模板">' +
+                '<span class="preset-thumb" aria-hidden="true" style="background-image:' + background + '"></span>' +
+                '<span class="preset-icon" aria-hidden="true">' + app.escapeHTML(preset.icon) + '</span>' +
+                '<span class="preset-copy"><strong>' + app.escapeHTML(preset.name) + '</strong><small>' +
+                app.escapeHTML(preset.description) + '</small></span></button>' +
+                (preset.custom ? '<button class="preset-delete" type="button" data-template-delete="' +
+                    preset.id + '" aria-label="删除' + app.escapeHTML(preset.name) + '">×</button>' : '') + '</div>';
+        }).join('');
+        var empty = document.getElementById('template-empty');
+        if (empty) empty.hidden = templates.length > 0;
+        app.updateLayoutPresetSelection();
+    };
+
+    app.updateLayoutPresetSelection = function () {
+        if (!app.wall) return;
+        document.querySelectorAll('.preset-btn[data-preset]').forEach(function (button) {
+            var preset = app.findTemplate(button.getAttribute('data-preset'));
+            var active = layoutPresetMatches(app.wall, app.currentShapeKey, preset);
+            button.classList.toggle('active', active);
+            button.setAttribute('aria-pressed', active ? 'true' : 'false');
+        });
+    };
+
+    app.syncLayoutControls = function () {
+        document.querySelectorAll('.shape-btn').forEach(function (button) {
+            button.classList.toggle('active', button.getAttribute('data-shape') === app.currentShapeKey);
+        });
+        document.querySelectorAll('.mode-btn').forEach(function (button) {
+            button.classList.toggle('active', button.getAttribute('data-mode') === app.wall.placementMode);
+        });
+        document.querySelectorAll('.ps-btn').forEach(function (button) {
+            button.classList.toggle('active', button.getAttribute('data-pshape') === app.wall.photoShape);
+        });
+        document.getElementById('density-slider').value = app.wall.density;
+        document.getElementById('density-value').textContent = Math.round(app.wall.density * 100) + '%';
+        document.getElementById('overlap-slider').value = app.wall.gap;
+        document.getElementById('overlap-value').textContent = Math.round(app.wall.gap * 100) + '%';
+        document.getElementById('rotation-slider').value = app.wall.rotationRange;
+        document.getElementById('rotation-value').textContent = app.wall.rotationRange + '°';
+        document.getElementById('smart-toggle').checked = app.wall.smartPlacement;
+        document.getElementById('mixed-size-toggle').checked = app.wall.mixedSizes;
+        app.updateModeHint();
+        app.updateLayoutPresetSelection();
+    };
+
+    app.applyLayoutPreset = function (presetId) {
+        var preset = app.findTemplate(presetId);
+        if (!preset || layoutPresetMatches(app.wall, app.currentShapeKey, preset)) return;
+        app.recordHistory();
+        clearTimeout(app.densityTimer);
+        clearTimeout(app.overlapTimer);
+        clearTimeout(app.rotationTimer);
+        app.currentShapeKey = preset.shapeKey || app.currentShapeKey;
+        applyLayoutPreset(app.wall, preset, preset.shapeKey ? Shapes[preset.shapeKey] : null);
+        app.syncLayoutControls();
+        app.toast('已应用“' + preset.name + '”模板');
+    };
+
+    app.createTemplateThumbnail = function () {
+        if (!app.wall || !app.wall.canvas || !app.wall.canvas.width) return '';
+        var canvas = document.createElement('canvas');
+        canvas.width = 240;
+        canvas.height = 120;
+        var context = canvas.getContext('2d');
+        context.fillStyle = '#101018';
+        context.fillRect(0, 0, canvas.width, canvas.height);
+        var scale = Math.min(canvas.width / app.wall.canvas.width, canvas.height / app.wall.canvas.height);
+        var width = app.wall.canvas.width * scale;
+        var height = app.wall.canvas.height * scale;
+        context.drawImage(app.wall.canvas, (canvas.width - width) / 2, (canvas.height - height) / 2, width, height);
+        return canvas.toDataURL('image/jpeg', 0.72);
+    };
+
+    app.saveCurrentTemplate = function () {
+        var name = window.prompt('给这个模板起个名字', '我的模板');
+        if (name === null) return;
+        name = name.trim().slice(0, 30);
+        if (!name) {
+            app.toast('模板名称不能为空');
+            return;
+        }
+        try {
+            app.templateLibrary.save({
+                id: app.createId('custom-template'),
+                name: name,
+                category: '自定义',
+                description: '保存于 ' + new Date().toLocaleDateString(),
+                shapeKey: app.currentShapeKey,
+                thumbnail: app.createTemplateThumbnail(),
+                settings: {
+                    density: app.wall.density,
+                    gap: app.wall.gap,
+                    placementMode: app.wall.placementMode,
+                    photoShape: app.wall.photoShape,
+                    smartPlacement: app.wall.smartPlacement,
+                    mixedSizes: app.wall.mixedSizes,
+                    rotationRange: app.wall.rotationRange
+                }
+            });
+            document.getElementById('template-category').value = '自定义';
+            document.getElementById('template-search').value = '';
+            app.renderLayoutPresets();
+            app.toast('模板已保存到本机');
+        } catch (error) {
+            console.error(error);
+            app.toast('模板保存失败，本地存储空间可能不足');
+        }
+    };
+
+    app.deleteCustomTemplate = function (id) {
+        if (!id || !app.templateLibrary.remove(id)) return;
+        app.renderLayoutPresets();
+        app.toast('自定义模板已删除');
+    };
+
+    app.reindexOverlays = function () {
+        app.overlays.forEach(function (overlay, index) { overlay.zIndex = index; });
+        app.wall.setOverlays(app.overlays);
+    };
+
+    app.addOverlay = function (type, content, overrides) {
+        app.recordHistory();
+        var overlay = createOverlay(type, app.createId('overlay'), content,
+            Object.assign({ x: 0.5, y: 0.18, zIndex: app.overlays.length }, overrides || {}));
+        app.overlays.push(overlay);
+        app.selectedOverlayId = overlay.id;
+        app.reindexOverlays();
+        app.wall.selectOverlay(overlay.id);
+        app.renderLayers();
+        app.toast(type === 'sticker' ? '贴纸已添加，可在画布拖动' : '文字图层已添加，可在画布拖动');
+    };
+
+    app.updateBorderOverlay = function () {
+        var style = document.getElementById('border-style').value;
+        var color = document.getElementById('border-color').value;
+        var existing = app.overlays.find(function (overlay) { return overlay.type === 'border'; });
+        if (style === 'none' && !existing) return;
+        app.recordHistory();
+        if (style === 'none') {
+            app.overlays = app.overlays.filter(function (overlay) { return overlay.type !== 'border'; });
+            if (app.selectedOverlayId === existing.id) app.selectedOverlayId = null;
+        } else if (existing) {
+            existing.borderStyle = style;
+            existing.color = color;
+            existing.visible = true;
+        } else {
+            existing = createOverlay('border', app.createId('overlay'), '', {
+                role: 'border', color: color, borderStyle: style, zIndex: app.overlays.length
+            });
+            app.overlays.push(existing);
+            app.selectedOverlayId = existing.id;
+        }
+        app.reindexOverlays();
+        app.wall.selectOverlay(app.selectedOverlayId);
+        app.renderLayers();
+    };
+
+    app.selectOverlay = function (id) {
+        app.selectedOverlayId = id;
+        app.wall.selectOverlay(id);
+        app.renderLayers();
+    };
+
+    app.handleLayerAction = function (event) {
+        var item = event.target.closest('.layer-item');
+        if (!item) return;
+        var id = item.getAttribute('data-layer-id');
+        var actionButton = event.target.closest('[data-layer-action]');
+        if (!actionButton) {
+            app.selectOverlay(id);
+            return;
+        }
+        event.stopPropagation();
+        var action = actionButton.getAttribute('data-layer-action');
+        var index = app.overlays.findIndex(function (overlay) { return overlay.id === id; });
+        if (index < 0) return;
+        app.recordHistory();
+        if (action === 'delete') {
+            app.overlays.splice(index, 1);
+            if (app.selectedOverlayId === id) app.selectedOverlayId = null;
+        } else if (action === 'visibility') {
+            app.overlays[index].visible = app.overlays[index].visible === false;
+        } else if (action === 'up' && index < app.overlays.length - 1) {
+            var upper = app.overlays[index + 1]; app.overlays[index + 1] = app.overlays[index]; app.overlays[index] = upper;
+        } else if (action === 'down' && index > 0) {
+            var lower = app.overlays[index - 1]; app.overlays[index - 1] = app.overlays[index]; app.overlays[index] = lower;
+        }
+        app.reindexOverlays();
+        app.wall.selectOverlay(app.selectedOverlayId);
+        app.renderLayers();
+    };
+
+    app.updateSelectedOverlay = function () {
+        var overlay = app.overlays.find(function (item) { return item.id === app.selectedOverlayId; });
+        if (!overlay || overlay.type === 'border') return;
+        overlay.content = document.getElementById('overlay-content').value.slice(0, 120);
+        overlay.fontSize = Number(document.getElementById('overlay-size').value) || overlay.fontSize;
+        overlay.color = document.getElementById('overlay-color').value;
+        app.wall.render();
+        app.renderLayers(false);
+    };
+
+    app.renderLayers = function (syncInspector) {
+        if (syncInspector === undefined) syncInspector = true;
+        var list = document.getElementById('layer-list');
+        if (!list) return;
+        document.getElementById('layer-count').textContent = app.overlays.length + ' 层';
+        list.innerHTML = app.overlays.slice().reverse().map(function (overlay) {
+            var name = overlay.type === 'border' ? '边框 · ' + overlay.borderStyle :
+                (overlay.role === 'date' ? '日期 · ' : overlay.type === 'sticker' ? '贴纸 · ' : '文字 · ') + overlay.content;
+            return '<div class="layer-item' + (overlay.id === app.selectedOverlayId ? ' active' : '') +
+                '" data-layer-id="' + app.escapeHTML(overlay.id) + '"><span class="layer-item-name">' +
+                app.escapeHTML(name) + '</span><button type="button" data-layer-action="visibility" title="显示/隐藏">' +
+                (overlay.visible === false ? '○' : '●') + '</button><button type="button" data-layer-action="up" title="上移">↑</button>' +
+                '<button type="button" data-layer-action="down" title="下移">↓</button>' +
+                '<button type="button" data-layer-action="delete" title="删除">×</button></div>';
+        }).join('');
+        var border = app.overlays.find(function (overlay) { return overlay.type === 'border'; });
+        document.getElementById('border-style').value = border ? border.borderStyle : 'none';
+        if (border) document.getElementById('border-color').value = border.color;
+        var selected = app.overlays.find(function (overlay) { return overlay.id === app.selectedOverlayId; });
+        var inspector = document.getElementById('overlay-inspector');
+        inspector.hidden = !selected || selected.type === 'border';
+        if (syncInspector && selected && selected.type !== 'border') {
+            document.getElementById('overlay-content').value = selected.content;
+            document.getElementById('overlay-size').value = selected.fontSize;
+            document.getElementById('overlay-color').value = selected.color;
+        }
+    };
+
     /* ------------------------------------------------------------------ *
      *  Photo handling
      * ------------------------------------------------------------------ */
@@ -937,14 +1400,13 @@ import { createDeviceProfile, getImportDimension } from './platform/DeviceProfil
 
     app.loadPhoto = function (file, maxDimension) {
         return new Promise(function (resolve, reject) {
-            var bitmap = null;
             var img = null;
             var objectURL = '';
+            var layers = null;
             var settled = false;
             var timeout = setTimeout(function () {
                 if (settled) return;
                 settled = true;
-                if (bitmap && typeof bitmap.close === 'function') bitmap.close();
                 if (img) {
                     img.onload = null;
                     img.onerror = null;
@@ -961,8 +1423,6 @@ import { createDeviceProfile, getImportDimension } from './platform/DeviceProfil
                 if (settled) return;
                 settled = true;
                 clearTimeout(timeout);
-                if (bitmap && typeof bitmap.close === 'function') bitmap.close();
-                bitmap = null;
                 if (img) {
                     img.onload = null;
                     img.onerror = null;
@@ -973,7 +1433,7 @@ import { createDeviceProfile, getImportDimension } from './platform/DeviceProfil
             function createPhoto(loadedImage, source) {
                 if (settled) return;
                 app.analyzeLoadedPhoto(loadedImage, fileBlob).then(function (analysis) {
-                    finish(resolve, {
+                    var photo = {
                         id: app.createId('photo'),
                         img: loadedImage,
                         src: source,
@@ -992,7 +1452,13 @@ import { createDeviceProfile, getImportDimension } from './platform/DeviceProfil
                         focusY: analysis.focusY,
                         aspectRatio: analysis.aspectRatio,
                         featured: false
-                    });
+                    };
+                    app.assetManager.hydratePhoto(photo, layers);
+                    if (objectURL) {
+                        URL.revokeObjectURL(objectURL);
+                        objectURL = '';
+                    }
+                    finish(resolve, photo);
                 }).catch(function (err) {
                     if (objectURL) {
                         app.photoObjectURLs.delete(objectURL);
@@ -1005,16 +1471,12 @@ import { createDeviceProfile, getImportDimension } from './platform/DeviceProfil
 
             var fileBlob = null;
             app.createPhotoBlob(file, maxDimension).then(function (result) {
-                if (settled) {
-                    if (result.bitmap && typeof result.bitmap.close === 'function') result.bitmap.close();
-                    return;
-                }
-                bitmap = result.bitmap;
-                fileBlob = result.blob;
+                if (settled) return;
+                layers = result;
+                fileBlob = result.workingBlob;
                 objectURL = URL.createObjectURL(fileBlob);
                 img = new Image();
                 img.onload = function () {
-                    app.photoObjectURLs.add(objectURL);
                     createPhoto(img, objectURL);
                 };
                 img.onerror = function () { finish(reject, new Error('decode failed')); };
@@ -1038,31 +1500,7 @@ import { createDeviceProfile, getImportDimension } from './platform/DeviceProfil
 
     app.createPhotoBlob = function (file, maxDimension) {
         maxDimension = Math.max(320, Math.min(app.maxPhotoDimension, Number(maxDimension) || app.maxPhotoDimension));
-        var mime = app.supportedImageTypes.indexOf(file.type) >= 0 ? file.type : '';
-        if (!mime) {
-            if (/\.png$/i.test(file.name)) mime = 'image/png';
-            else if (/\.webp$/i.test(file.name)) mime = 'image/webp';
-            else mime = 'image/jpeg';
-        }
-        var bitmapPromise = typeof window.createImageBitmap === 'function' ?
-            window.createImageBitmap(file) : app.createImageBitmapFallback(file);
-        return bitmapPromise.then(function (bitmap) {
-            var maxSide = Math.max(bitmap.width, bitmap.height);
-            if (!maxSide || maxSide <= maxDimension) return { blob: file, bitmap: bitmap };
-            var scale = maxDimension / maxSide;
-            var canvas = document.createElement('canvas');
-            canvas.width = Math.max(1, Math.round(bitmap.width * scale));
-            canvas.height = Math.max(1, Math.round(bitmap.height * scale));
-            canvas.getContext('2d').drawImage(bitmap, 0, 0, canvas.width, canvas.height);
-            return new Promise(function (resolve, reject) {
-                canvas.toBlob(function (blob) {
-                    canvas.width = 1;
-                    canvas.height = 1;
-                    if (blob) resolve({ blob: blob, bitmap: bitmap });
-                    else reject(new Error('resize encode failed'));
-                }, mime, mime === 'image/png' ? undefined : 0.9);
-            });
-        });
+        return app.assetManager.createLayers(file, maxDimension);
     };
 
     app.createImageBitmapFallback = function (blob) {
@@ -1085,6 +1523,7 @@ import { createDeviceProfile, getImportDimension } from './platform/DeviceProfil
         if (app.photos.length === 0) return;
         if (!window.confirm('确定清空全部 ' + app.photos.length + ' 张照片吗？此操作可以撤销。')) return;
         app.recordHistory();
+        app.photos.forEach(function (photo) { app.assetManager.releasePhoto(photo); });
         app.photos = [];
         app.updatePhotoCount();
         app.wall.setPhotos([]);
@@ -1145,7 +1584,8 @@ import { createDeviceProfile, getImportDimension } from './platform/DeviceProfil
     app.removePhoto = function (index) {
         if (!app.photos[index]) return;
         app.recordHistory();
-        app.photos.splice(index, 1);
+        var removed = app.photos.splice(index, 1)[0];
+        app.assetManager.releasePhoto(removed);
         app.updatePhotoCount();
         app.renderPhotoLibrary();
         app.wall.setPhotos(app.photos);
@@ -1156,6 +1596,40 @@ import { createDeviceProfile, getImportDimension } from './platform/DeviceProfil
     /* ------------------------------------------------------------------ *
      *  Portable project files
      * ------------------------------------------------------------------ */
+
+    app.captureAutosaveSnapshot = function () {
+        return {
+            project: app.serializeProject(),
+            photos: app.photos.slice()
+        };
+    };
+
+    app.tryRestoreAutosave = function () {
+        if (!app.autosave || !app.autosave.available) return;
+        app.autosave.loadLatest().then(function (snapshot) {
+            if (!snapshot || !snapshot.project || !snapshot.project.photos.length || app.photos.length) return;
+            var savedAt = snapshot.savedAt ? new Date(snapshot.savedAt) : null;
+            var timeLabel = savedAt && !Number.isNaN(savedAt.getTime()) ?
+                savedAt.toLocaleString() : '上次使用时';
+            if (!window.confirm('检测到 ' + timeLabel + ' 的自动保存项目，是否恢复？')) {
+                return app.autosave.clear();
+            }
+            app.autosaveRestoring = true;
+            app.autosave.suspend();
+            return app.restoreProject(snapshot.project, {
+                successMessage: '已从自动保存恢复 · ' + snapshot.project.photos.length + ' 张照片'
+            }).finally(function () {
+                app.autosaveRestoring = false;
+                app.autosave.resume();
+            });
+        }).catch(function (error) {
+            app.autosaveRestoring = false;
+            app.autosave.resume();
+            console.warn('读取自动保存失败:', error);
+            app.showLoading(false);
+            app.toast('自动保存内容无法恢复，可继续新建项目');
+        });
+    };
 
     app.serializeProject = function (photoSources) {
         var shape = Shapes[app.currentShapeKey];
@@ -1168,7 +1642,7 @@ import { createDeviceProfile, getImportDimension } from './platform/DeviceProfil
         }
         return {
             format: 'photo-wall-project',
-            version: 1,
+            version: 2,
             savedAt: new Date().toISOString(),
             shape: shapeData,
             settings: {
@@ -1178,7 +1652,8 @@ import { createDeviceProfile, getImportDimension } from './platform/DeviceProfil
                 photoShape: app.wall.photoShape,
                 smartPlacement: app.wall.smartPlacement,
                 mixedSizes: app.wall.mixedSizes,
-                rotationRange: app.wall.rotationRange
+                rotationRange: app.wall.rotationRange,
+                layoutSeed: app.wall.layoutSeed
             },
             photos: app.photos.map(function (photo, index) {
                 return {
@@ -1197,9 +1672,18 @@ import { createDeviceProfile, getImportDimension } from './platform/DeviceProfil
                     focusX: photo.focusX,
                     focusY: photo.focusY,
                     aspectRatio: photo.aspectRatio,
-                    featured: photo.featured === true
+                    featured: photo.featured === true,
+                    editZoom: photo.editZoom,
+                    editOffsetX: photo.editOffsetX,
+                    editOffsetY: photo.editOffsetY,
+                    editRotation: photo.editRotation,
+                    flipX: photo.flipX === true,
+                    flipY: photo.flipY === true,
+                    originalWidth: photo.originalWidth,
+                    originalHeight: photo.originalHeight
                 };
             }),
+            overlays: app.overlays.map(function (overlay) { return Object.assign({}, overlay); }),
             layout: app.wall.getLayoutSnapshot()
         };
     };
@@ -1210,24 +1694,16 @@ import { createDeviceProfile, getImportDimension } from './platform/DeviceProfil
             return;
         }
         app.showLoading(true, '正在打包项目…');
-        app.mapWithConcurrency(app.photos, app.deviceProfile.mobile ? 1 : 2, function (photo) {
-            if (photo.blob) return app.blobToDataURL(photo.blob);
-            if (/^data:image\//i.test(photo.src)) return Promise.resolve(photo.src);
-            return fetch(photo.src).then(function (response) {
-                if (!response.ok) throw new Error('photo fetch failed');
-                return response.blob();
-            }).then(app.blobToDataURL);
-        }, function (completed, total) {
-            app.showLoading(true, '正在打包项目 ' + completed + '/' + total + '…');
-        }).then(function (photoSources) {
-            var project = app.serializeProject(photoSources);
-            var blob = new Blob([JSON.stringify(project)], { type: 'application/json' });
+        var project = app.serializeProject();
+        Promise.resolve(app.autosave && app.autosave.createBackup('保存项目之前')).then(function () {
+            return createProjectContainer(project, app.photos, { appVersion: '1.0.0' });
+        }).then(function (blob) {
             var rawName = document.getElementById('export-name').value.trim() || '我的照片墙';
             var name = rawName.replace(/[<>:"/\\|?*\u0000-\u001F]/g, '-').replace(/[. ]+$/, '') || '我的照片墙';
             return saveBlob(blob, {
                 title: '保存照片墙项目',
-                fileName: name + '.photowall.json',
-                filters: [{ name: '照片墙项目', extensions: ['photowall.json', 'json'] }]
+                fileName: name + '.photowall',
+                filters: [{ name: '照片墙项目', extensions: ['photowall'] }]
             }).then(function (result) {
                 app.showLoading(false);
                 if (result.cancelled) app.toast('已取消保存');
@@ -1270,91 +1746,135 @@ import { createDeviceProfile, getImportDimension } from './platform/DeviceProfil
     };
 
     app.openProject = function (file) {
-        if (!file || file.size > 300 * 1024 * 1024) {
-            app.toast('项目文件无效或超过 300 MB');
+        if (!file || file.size > 1024 * 1024 * 1024) {
+            app.toast('项目文件无效或超过 1 GB');
             return;
         }
         app.showLoading(true, '正在打开项目…');
-        var reader = new FileReader();
-        reader.onload = function (event) {
-            try {
-                var project = JSON.parse(event.target.result);
-                if (!project || project.format !== 'photo-wall-project' || project.version !== 1 || !Array.isArray(project.photos)) {
-                    throw new Error('unsupported project');
-                }
-                if (project.photos.length > app.maxPhotos) throw new Error('too many photos');
-                app.restoreProject(project).catch(function (error) {
-                    console.error(error);
-                    app.showLoading(false);
-                    app.toast('项目内容损坏或图片无法读取');
-                });
-            } catch (error) {
-                console.error(error);
-                app.showLoading(false);
-                app.toast('不是有效的照片墙项目文件');
-            }
-        };
-        reader.onerror = function () {
+        file.arrayBuffer().then(function (buffer) {
+            var bytes = new Uint8Array(buffer);
+            if (isPhotowallContainer(bytes)) return openProjectContainer(bytes).then(function (result) { return result.project; });
+            var legacy = JSON.parse(new TextDecoder().decode(bytes));
+            return migrateProject(legacy);
+        }).then(function (project) {
+            if (project.photos.length > app.maxPhotos) throw new Error('too many photos');
+            return app.restoreProject(project);
+        }).catch(function (error) {
+            console.error(error);
             app.showLoading(false);
-            app.toast('项目文件读取失败');
-        };
-        reader.readAsText(file);
+            app.toast('项目内容损坏、版本不兼容或图片无法读取');
+        });
     };
 
-    app.loadProjectPhoto = function (saved) {
-        return new Promise(function (resolve, reject) {
-            if (!saved || typeof saved.src !== 'string' || !/^data:image\/(jpeg|jpg|png|webp);base64,/i.test(saved.src)) {
-                reject(new Error('invalid photo source'));
-                return;
+    app.restoreLatestBackup = function () {
+        if (!app.autosave || !app.autosave.available) {
+            app.toast('当前环境不支持本地备份');
+            return;
+        }
+        app.autosave.listBackups().then(function (backups) {
+            if (!backups.length) {
+                app.toast('还没有可恢复的手动备份');
+                return null;
             }
-            var img = new Image();
-            var settled = false;
-            var timeout = setTimeout(function () {
-                if (settled) return;
-                settled = true;
-                img.onload = null;
-                img.onerror = null;
-                img.src = '';
-                reject(new Error('project photo load timed out'));
-            }, app.photoLoadTimeout);
+            var latest = backups[0];
+            var label = new Date(latest.savedAt).toLocaleString();
+            if (!window.confirm('恢复 ' + label + ' 的最近备份？当前未保存改动仍可通过自动保存找回。')) return null;
+            app.showLoading(true, '正在恢复本地备份…');
+            return app.autosave.loadBackup(latest.id).then(function (backup) {
+                if (!backup) throw new Error('backup missing');
+                return app.restoreProject(backup.project, { successMessage: '本地备份已恢复' });
+            });
+        }).catch(function (error) {
+            console.error(error);
+            app.showLoading(false);
+            app.toast('本地备份恢复失败');
+        });
+    };
 
-            function finish(callback, value) {
-                if (settled) return;
-                settled = true;
-                clearTimeout(timeout);
-                img.onload = null;
-                img.onerror = null;
-                callback(value);
-            }
+    app.loadProjectPhoto = function (saved, maxDimension) {
+        var storedBlob = saved && (saved.originalBlob || saved.blob);
+        var hasBlob = typeof Blob !== 'undefined' && storedBlob instanceof Blob;
+        var hasDataURL = saved && typeof saved.src === 'string' &&
+            /^data:image\/(jpeg|jpg|png|webp);base64,/i.test(saved.src);
+        if (!hasBlob && !hasDataURL) return Promise.reject(new Error('invalid photo source'));
+        var blobPromise = hasBlob ? Promise.resolve(storedBlob) : fetch(saved.src).then(function (response) {
+            if (!response.ok) throw new Error('project photo read failed');
+            return response.blob();
+        });
+        return blobPromise.then(function (originalBlob) {
+            return app.assetManager.createLayers(originalBlob, maxDimension || app.maxPhotoDimension);
+        }).then(function (layers) {
+            return new Promise(function (resolve, reject) {
+                var img = new Image();
+                var objectURL = URL.createObjectURL(layers.workingBlob);
+                var settled = false;
+                var timeout = setTimeout(function () {
+                    if (settled) return;
+                    settled = true;
+                    img.onload = null;
+                    img.onerror = null;
+                    img.src = '';
+                    URL.revokeObjectURL(objectURL);
+                    reject(new Error('project photo load timed out'));
+                }, app.photoLoadTimeout);
 
-            img.onload = function () {
-                try {
-                    var analysis = analyzePhoto(img);
-                    finish(resolve, {
-                        id: saved.id || app.createId('photo'),
-                        img: img,
-                        src: saved.src,
-                        name: saved.name || '未命名照片',
-                        signature: saved.signature || '',
-                        r: Number.isFinite(saved.r) ? saved.r : analysis.r,
-                        g: Number.isFinite(saved.g) ? saved.g : analysis.g,
-                        b: Number.isFinite(saved.b) ? saved.b : analysis.b,
-                        brightness: Number.isFinite(saved.brightness) ? saved.brightness : analysis.brightness,
-                        hue: Number.isFinite(saved.hue) ? saved.hue : analysis.hue,
-                        saturation: Number.isFinite(saved.saturation) ? saved.saturation : analysis.saturation,
-                        contrast: Number.isFinite(saved.contrast) ? saved.contrast : analysis.contrast,
-                        sharpness: Number.isFinite(saved.sharpness) ? saved.sharpness : analysis.sharpness,
-                        focusX: Number.isFinite(saved.focusX) ? saved.focusX : analysis.focusX,
-                        focusY: Number.isFinite(saved.focusY) ? saved.focusY : analysis.focusY,
-                        aspectRatio: Number.isFinite(saved.aspectRatio) ? saved.aspectRatio : analysis.aspectRatio,
-                        featured: saved.featured === true
-                    });
-                } catch (error) {
-                    finish(reject, error);
+                function finish(callback, value, retainURL) {
+                    if (settled) return;
+                    settled = true;
+                    clearTimeout(timeout);
+                    img.onload = null;
+                    img.onerror = null;
+                    if (retainURL) app.photoObjectURLs.add(objectURL);
+                    else URL.revokeObjectURL(objectURL);
+                    callback(value);
                 }
-            };
-            img.onerror = function () { finish(reject, new Error('photo decode failed')); };
-            img.src = saved.src;
+
+                img.onload = function () {
+                    try {
+                        var analysisFields = [
+                            'r', 'g', 'b', 'brightness', 'hue', 'saturation',
+                            'contrast', 'sharpness', 'focusX', 'focusY', 'aspectRatio'
+                        ];
+                        var needsAnalysis = analysisFields.some(function (field) {
+                            return !Number.isFinite(saved[field]);
+                        });
+                        var analysis = needsAnalysis ? analyzePhoto(img) : saved;
+                        var photo = {
+                            id: saved.id || app.createId('photo'),
+                            img: img,
+                            src: objectURL,
+                            blob: layers.workingBlob,
+                            name: saved.name || '未命名照片',
+                            signature: saved.signature || '',
+                            r: Number.isFinite(saved.r) ? saved.r : analysis.r,
+                            g: Number.isFinite(saved.g) ? saved.g : analysis.g,
+                            b: Number.isFinite(saved.b) ? saved.b : analysis.b,
+                            brightness: Number.isFinite(saved.brightness) ? saved.brightness : analysis.brightness,
+                            hue: Number.isFinite(saved.hue) ? saved.hue : analysis.hue,
+                            saturation: Number.isFinite(saved.saturation) ? saved.saturation : analysis.saturation,
+                            contrast: Number.isFinite(saved.contrast) ? saved.contrast : analysis.contrast,
+                            sharpness: Number.isFinite(saved.sharpness) ? saved.sharpness : analysis.sharpness,
+                            focusX: Number.isFinite(saved.focusX) ? saved.focusX : analysis.focusX,
+                            focusY: Number.isFinite(saved.focusY) ? saved.focusY : analysis.focusY,
+                            aspectRatio: Number.isFinite(saved.aspectRatio) ? saved.aspectRatio : analysis.aspectRatio,
+                            featured: saved.featured === true,
+                            editZoom: Number.isFinite(saved.editZoom) ? saved.editZoom : 1,
+                            editOffsetX: Number.isFinite(saved.editOffsetX) ? saved.editOffsetX : 0,
+                            editOffsetY: Number.isFinite(saved.editOffsetY) ? saved.editOffsetY : 0,
+                            editRotation: Number.isFinite(saved.editRotation) ? saved.editRotation : 0,
+                            flipX: saved.flipX === true,
+                            flipY: saved.flipY === true
+                        };
+                        app.assetManager.hydratePhoto(photo, layers);
+                        URL.revokeObjectURL(objectURL);
+                        finish(resolve, photo, false);
+                    } catch (error) {
+                        finish(reject, error);
+                    }
+                };
+                img.onerror = function () { finish(reject, new Error('photo decode failed')); };
+                img.src = objectURL;
+            });
         });
     };
 
@@ -1363,11 +1883,12 @@ import { createDeviceProfile, getImportDimension } from './platform/DeviceProfil
         var nextIndex = 0;
         var completed = 0;
         var workerCount = Math.min(app.photoLoadConcurrency, savedPhotos.length);
+        var maxDimension = app.getPhotoImportDimension(savedPhotos.length);
 
         function runWorker() {
             var index = nextIndex++;
             if (index >= savedPhotos.length) return Promise.resolve();
-            return app.loadProjectPhoto(savedPhotos[index]).then(function (photo) {
+            return app.loadProjectPhoto(savedPhotos[index], maxDimension).then(function (photo) {
                 results[index] = photo;
                 completed++;
                 if (onProgress) onProgress(completed, savedPhotos.length);
@@ -1424,7 +1945,8 @@ import { createDeviceProfile, getImportDimension } from './platform/DeviceProfil
         });
     };
 
-    app.restoreProject = function (project) {
+    app.restoreProject = function (project, options) {
+        options = options || {};
         var totalPhotos = project.photos.length;
         app.showLoading(true, '正在恢复 0/' + totalPhotos + ' 张照片…');
         return Promise.all([
@@ -1441,6 +1963,7 @@ import { createDeviceProfile, getImportDimension } from './platform/DeviceProfil
                 if (!photo.id || usedIds.has(photo.id)) photo.id = app.createId('photo');
                 usedIds.add(photo.id);
             });
+            app.photos.forEach(function (photo) { app.assetManager.releasePhoto(photo); });
             app.history.clear();
             app.renderShapeButtons();
             if (Shapes[shapeKey] && Shapes[shapeKey].dynamic) app.addShapeButton(shapeKey, Shapes[shapeKey]);
@@ -1454,11 +1977,13 @@ import { createDeviceProfile, getImportDimension } from './platform/DeviceProfil
                 smartPlacement: settings.smartPlacement !== false,
                 mixedSizes: settings.mixedSizes !== false,
                 rotationRange: Math.max(0, Math.min(24, Number(settings.rotationRange) || 0)),
+                layoutSeed: Number(settings.layoutSeed) || 1,
+                overlays: normalizeOverlays(project.overlays),
                 arrangement: [],
                 layout: project.layout
             });
             app.showLoading(false);
-            app.toast('项目已恢复 · ' + photos.length + ' 张照片');
+            app.toast(options.successMessage || '项目已恢复 · ' + photos.length + ' 张照片');
         });
     };
 
@@ -1477,6 +2002,8 @@ import { createDeviceProfile, getImportDimension } from './platform/DeviceProfil
             smartPlacement: app.wall.smartPlacement,
             mixedSizes: app.wall.mixedSizes,
             rotationRange: app.wall.rotationRange,
+            layoutSeed: app.wall.layoutSeed,
+            overlays: app.overlays.map(function (overlay) { return Object.assign({}, overlay); }),
             arrangement: app.wall.getArrangement(),
             layout: app.wall.getLayoutSnapshot()
         };
@@ -1484,6 +2011,7 @@ import { createDeviceProfile, getImportDimension } from './platform/DeviceProfil
 
     app.recordHistory = function (snapshot) {
         if (app.history && app.wall) app.history.record(snapshot);
+        if (app.autosave && !app.autosaveRestoring) app.autosave.schedule();
     };
 
     app.restoreState = function (state) {
@@ -1491,7 +2019,15 @@ import { createDeviceProfile, getImportDimension } from './platform/DeviceProfil
         clearTimeout(app.densityTimer);
         clearTimeout(app.overlapTimer);
         clearTimeout(app.rotationTimer);
-        app.photos = state.photos.map(function (photo) { return Object.assign({}, photo); });
+        var restoredPhotoIds = new Set(state.photos.map(function (photo) { return photo.id; }));
+        app.photos.forEach(function (photo) {
+            if (!restoredPhotoIds.has(photo.id)) app.assetManager.releasePhoto(photo);
+        });
+        app.photos = state.photos.map(function (photo) {
+            var restored = Object.assign({}, photo, { img: null });
+            app.assetManager.attachURLs(restored);
+            return restored;
+        });
         app.currentShapeKey = state.shapeKey;
 
         app.wall.density = state.density;
@@ -1501,34 +2037,26 @@ import { createDeviceProfile, getImportDimension } from './platform/DeviceProfil
         app.wall.smartPlacement = state.smartPlacement;
         app.wall.mixedSizes = state.mixedSizes !== false;
         app.wall.rotationRange = Number(state.rotationRange) || 0;
+        app.wall.layoutSeed = Number(state.layoutSeed) || 1;
+        app.overlays = normalizeOverlays(state.overlays);
+        if (!app.overlays.some(function (overlay) { return overlay.id === app.selectedOverlayId; })) {
+            app.selectedOverlayId = null;
+        }
+        app.wall.overlays = app.overlays;
+        app.wall.selectedOverlayId = app.selectedOverlayId;
         app.wall.shapeKey = state.shapeKey;
         app.wall.shape = Shapes[state.shapeKey];
         app.wall.photos = app.photos;
         app.wall.generateLayout(false, true);
         if (!app.wall.setLayoutSnapshot(state.layout)) app.wall.setArrangement(state.arrangement);
 
-        document.querySelectorAll('.shape-btn').forEach(function (button) {
-            button.classList.toggle('active', button.getAttribute('data-shape') === state.shapeKey);
-        });
-        document.querySelectorAll('.mode-btn').forEach(function (button) {
-            button.classList.toggle('active', button.getAttribute('data-mode') === state.placementMode);
-        });
-        document.querySelectorAll('.ps-btn').forEach(function (button) {
-            button.classList.toggle('active', button.getAttribute('data-pshape') === state.photoShape);
-        });
-        document.getElementById('density-slider').value = state.density;
-        document.getElementById('density-value').textContent = Math.round(state.density * 100) + '%';
-        document.getElementById('overlap-slider').value = state.gap;
-        document.getElementById('overlap-value').textContent = Math.round(state.gap * 100) + '%';
-        document.getElementById('smart-toggle').checked = state.smartPlacement;
-        document.getElementById('mixed-size-toggle').checked = app.wall.mixedSizes;
-        document.getElementById('rotation-slider').value = app.wall.rotationRange;
-        document.getElementById('rotation-value').textContent = app.wall.rotationRange + '°';
-        app.updateModeHint();
+        app.syncLayoutControls();
         app.updatePhotoCount();
         app.renderPhotoLibrary();
+        app.renderLayers();
         if (app.photos.length) app.hideEmptyState(); else app.showEmptyState();
         app.updateActionState();
+        if (app.autosave && !app.autosaveRestoring) app.autosave.schedule();
     };
 
     app.undo = function () {
@@ -1576,6 +2104,145 @@ import { createDeviceProfile, getImportDimension } from './platform/DeviceProfil
     };
 
     /* ------------------------------------------------------------------ *
+     *  Single photo editor
+     * ------------------------------------------------------------------ */
+
+    app.openPhotoEditor = function (index) {
+        var photo = app.photos[index];
+        if (!photo) return;
+        app.photoEditorIndex = index;
+        app.photoEditorDraft = normalizePhotoTransform(photo);
+        app.photoEditorReplacement = null;
+        app.photoEditorReturnFocus = document.activeElement;
+        document.getElementById('photo-editor-name').textContent = photo.name || '未命名照片';
+        app.syncPhotoEditorControls();
+        var editor = document.getElementById('photo-editor');
+        document.querySelector('.app').inert = true;
+        editor.classList.add('active');
+        editor.setAttribute('aria-hidden', 'false');
+        app.renderPhotoEditorPreview();
+        setTimeout(function () { document.getElementById('photo-edit-zoom').focus(); }, 0);
+    };
+
+    app.activePhotoEditorPhoto = function () {
+        return app.photoEditorReplacement || app.photos[app.photoEditorIndex] || null;
+    };
+
+    app.syncPhotoEditorControls = function () {
+        var draft = app.photoEditorDraft;
+        if (!draft) return;
+        document.getElementById('photo-edit-zoom').value = draft.zoom;
+        document.getElementById('photo-edit-focus-x').value = draft.focusX;
+        document.getElementById('photo-edit-focus-y').value = draft.focusY;
+        document.getElementById('photo-edit-rotation').value = draft.rotation;
+        document.getElementById('photo-edit-zoom-value').textContent = Math.round(draft.zoom * 100) + '%';
+        document.getElementById('photo-edit-focus-x-value').textContent = Math.round(draft.focusX * 100) + '%';
+        document.getElementById('photo-edit-focus-y-value').textContent = Math.round(draft.focusY * 100) + '%';
+        document.getElementById('photo-edit-rotation-value').textContent = Math.round(draft.rotation) + '°';
+        document.getElementById('photo-edit-flip-x').setAttribute('aria-pressed', draft.flipX ? 'true' : 'false');
+        document.getElementById('photo-edit-flip-y').setAttribute('aria-pressed', draft.flipY ? 'true' : 'false');
+    };
+
+    app.updatePhotoEditorDraft = function () {
+        if (!app.photoEditorDraft) return;
+        app.photoEditorDraft.zoom = parseFloat(document.getElementById('photo-edit-zoom').value);
+        app.photoEditorDraft.focusX = parseFloat(document.getElementById('photo-edit-focus-x').value);
+        app.photoEditorDraft.focusY = parseFloat(document.getElementById('photo-edit-focus-y').value);
+        app.photoEditorDraft.rotation = parseFloat(document.getElementById('photo-edit-rotation').value);
+        app.syncPhotoEditorControls();
+        app.renderPhotoEditorPreview();
+    };
+
+    app.renderPhotoEditorPreview = function () {
+        var photo = app.activePhotoEditorPhoto();
+        if (!photo || !app.photoEditorDraft) return;
+        var token = ++app.photoEditorRenderToken;
+        app.assetManager.getBitmap(photo, 'original').then(function (bitmap) {
+            if (token !== app.photoEditorRenderToken) return;
+            var canvas = document.getElementById('photo-editor-canvas');
+            var context = canvas.getContext('2d');
+            context.clearRect(0, 0, canvas.width, canvas.height);
+            var margin = 34;
+            var width = canvas.width - margin * 2;
+            var height = canvas.height - margin * 2;
+            context.save();
+            context.translate(canvas.width / 2, canvas.height / 2);
+            context.fillStyle = '#09090e';
+            context.fillRect(-width / 2, -height / 2, width, height);
+            context.beginPath();
+            context.roundRect(-width / 2, -height / 2, width, height, 18);
+            context.clip();
+            var previewPhoto = Object.assign({}, photo);
+            applyPhotoTransform(previewPhoto, app.photoEditorDraft);
+            drawPhotoCover(context, bitmap, width, height, previewPhoto);
+            context.restore();
+            context.strokeStyle = 'rgba(157,143,255,.85)';
+            context.lineWidth = 3;
+            context.strokeRect(margin, margin, width, height);
+        }).catch(function (error) {
+            console.warn('照片精修预览失败:', error);
+        });
+    };
+
+    app.replacePhotoEditorSource = function (file) {
+        if (!file || file.size > app.maxFileSize) {
+            app.toast('替换照片无效或超过 40 MB');
+            return;
+        }
+        app.showLoading(true, '正在准备替换照片…');
+        app.loadPhoto(file, app.getPhotoImportDimension(app.photos.length)).then(function (photo) {
+            if (app.photoEditorReplacement) app.assetManager.releasePhoto(app.photoEditorReplacement);
+            app.photoEditorReplacement = photo;
+            app.photoEditorDraft = normalizePhotoTransform(photo);
+            document.getElementById('photo-editor-name').textContent = photo.name || '替换照片';
+            app.syncPhotoEditorControls();
+            app.renderPhotoEditorPreview();
+            app.showLoading(false);
+        }).catch(function (error) {
+            console.error(error);
+            app.showLoading(false);
+            app.toast('替换照片读取失败');
+        });
+    };
+
+    app.confirmPhotoEditor = function () {
+        var current = app.photos[app.photoEditorIndex];
+        var edited = app.activePhotoEditorPhoto();
+        if (!current || !edited || !app.photoEditorDraft) return;
+        app.recordHistory();
+        applyPhotoTransform(edited, app.photoEditorDraft);
+        if (app.photoEditorReplacement) {
+            edited.featured = current.featured === true;
+            app.assetManager.releasePhoto(current);
+            app.photos[app.photoEditorIndex] = edited;
+            app.photoEditorReplacement = null;
+            app.wall.setPhotos(app.photos);
+        } else {
+            app.wall.refreshPhotoRendering();
+        }
+        app.renderPhotoLibrary();
+        app.closePhotoEditor(true);
+        app.toast('照片调整已应用');
+    };
+
+    app.closePhotoEditor = function (keepReplacement) {
+        var editor = document.getElementById('photo-editor');
+        if (!editor.classList.contains('active')) return;
+        if (!keepReplacement && app.photoEditorReplacement) app.assetManager.releasePhoto(app.photoEditorReplacement);
+        app.photoEditorReplacement = null;
+        app.photoEditorDraft = null;
+        app.photoEditorIndex = -1;
+        app.photoEditorRenderToken++;
+        editor.classList.remove('active');
+        editor.setAttribute('aria-hidden', 'true');
+        document.querySelector('.app').inert = false;
+        if (app.photoEditorReturnFocus && typeof app.photoEditorReturnFocus.focus === 'function') {
+            app.photoEditorReturnFocus.focus();
+        }
+        app.photoEditorReturnFocus = null;
+    };
+
+    /* ------------------------------------------------------------------ *
      *  Lightbox
      * ------------------------------------------------------------------ */
 
@@ -1597,6 +2264,8 @@ import { createDeviceProfile, getImportDimension } from './platform/DeviceProfil
         document.querySelector('.app').inert = false;
         if (app.lightboxReturnFocus && typeof app.lightboxReturnFocus.focus === 'function') app.lightboxReturnFocus.focus();
         app.lightboxReturnFocus = null;
+        if (app.lightboxObjectURL) URL.revokeObjectURL(app.lightboxObjectURL);
+        app.lightboxObjectURL = '';
         app.lightboxIndex = -1;
     };
 
@@ -1611,10 +2280,13 @@ import { createDeviceProfile, getImportDimension } from './platform/DeviceProfil
         var item = app.wall.layout[app.lightboxIndex];
         if (!item) return;
         var img = document.getElementById('lightbox-img');
-        img.src = item.photo.src;
+        if (app.lightboxObjectURL) URL.revokeObjectURL(app.lightboxObjectURL);
+        app.lightboxObjectURL = URL.createObjectURL(item.photo.originalBlob || item.photo.workingBlob || item.photo.blob);
+        img.src = app.lightboxObjectURL;
         var info = document.getElementById('lightbox-info');
         info.textContent = item.photo.name + '  ·  ' +
-            item.photo.img.naturalWidth + '×' + item.photo.img.naturalHeight;
+            (item.photo.originalWidth || item.photo.workingWidth || '—') + '×' +
+            (item.photo.originalHeight || item.photo.workingHeight || '—');
     };
 
     /* ------------------------------------------------------------------ *
@@ -1682,6 +2354,7 @@ import { createDeviceProfile, getImportDimension } from './platform/DeviceProfil
             document.querySelector('input[name="export-background"][value="#ffffff"]').checked = true;
             app.toast('JPG 不支持透明背景，已切换为白色');
         }
+        document.getElementById('print-export-field').hidden = format !== 'pdf';
         app.updateExportDimensions();
         app.scheduleExportPreview();
     };
@@ -1691,6 +2364,19 @@ import { createDeviceProfile, getImportDimension } from './platform/DeviceProfil
         if (!target || !app.wall || !app.wall.cssWidth) return;
         var scale = parseInt(app.getCheckedValue('export-scale', '2'), 10);
         var aspectRatio = app.getCheckedValue('export-aspect', 'auto');
+        if (app.getCheckedValue('export-format', 'png') === 'pdf') {
+            var preset = getPrintPreset(document.getElementById('export-print-size').value);
+            var dpi = parseInt(document.getElementById('export-print-dpi').value, 10);
+            var bleed = document.getElementById('export-print-bleed').checked ? 3 : 0;
+            var printDimensions = printPixelDimensions(preset, dpi, bleed);
+            var assessment = assessPrintResolution(printDimensions.width, printDimensions.height, {
+                widthMm: preset.widthMm + bleed * 2,
+                heightMm: preset.heightMm + bleed * 2
+            });
+            target.textContent = preset.name + ' · ' + printDimensions.width + ' × ' + printDimensions.height + ' px';
+            document.getElementById('export-print-quality').textContent = assessment.dpi + ' DPI · ' + assessment.label;
+            return;
+        }
         var dimensions = app.wall.getExportDimensions(scale, aspectRatio);
         var width = dimensions.width;
         var height = dimensions.height;
@@ -1718,12 +2404,16 @@ import { createDeviceProfile, getImportDimension } from './platform/DeviceProfil
         if (!app.wall || !app.wall.layout.length) return;
         var aspectRatio = app.getCheckedValue('export-aspect', 'auto');
         var background = app.getExportBackground();
-        var dimensions = app.wall.getExportDimensions(1, aspectRatio);
+        var isPdf = app.getCheckedValue('export-format', 'png') === 'pdf';
+        var printPreset = isPdf ? getPrintPreset(document.getElementById('export-print-size').value) : null;
+        var targetAspect = printPreset ? printPreset.widthMm / printPreset.heightMm : null;
+        var dimensions = targetAspect ? { width: targetAspect * 720, height: 720 } : app.wall.getExportDimensions(1, aspectRatio);
         var previewScale = Math.min(1, 720 / Math.max(dimensions.width, dimensions.height));
         var source = app.wall.createExportCanvas({
             scale: previewScale,
             background: background,
-            aspectRatio: aspectRatio
+            aspectRatio: aspectRatio,
+            targetAspect: targetAspect
         });
         var preview = document.getElementById('export-preview-canvas');
         preview.width = source.width;
@@ -1731,11 +2421,11 @@ import { createDeviceProfile, getImportDimension } from './platform/DeviceProfil
         var context = preview.getContext('2d');
         context.clearRect(0, 0, preview.width, preview.height);
         context.drawImage(source, 0, 0);
-        document.getElementById('export-preview-ratio').textContent = {
+        document.getElementById('export-preview-ratio').textContent = printPreset ? printPreset.name : ({
             auto: '紧贴轮廓',
             '3:4': '3:4 常用照片',
             '9:16': '9:16 手机竖屏'
-        }[aspectRatio] || aspectRatio;
+        }[aspectRatio] || aspectRatio);
     };
 
     app.exportImage = function () {
@@ -1749,44 +2439,86 @@ import { createDeviceProfile, getImportDimension } from './platform/DeviceProfil
             var aspectRatio = app.getCheckedValue('export-aspect', 'auto');
             var background = app.getExportBackground();
 
-            var requestedScale = scale;
-            while (scale > 1) {
-                var candidateDimensions = app.wall.getExportDimensions(scale, aspectRatio);
-                if (candidateDimensions.width * candidateDimensions.height <= app.deviceProfile.maxExportPixels) break;
-                scale--;
-            }
-            if (scale !== requestedScale) {
-                app.toast('为避免设备内存不足，已将导出清晰度调整为 ' + scale + '×');
-            }
-
             var rawName = document.getElementById('export-name').value.trim() || '我的照片墙';
             var fileName = rawName.replace(/[<>:"/\\|?*\u0000-\u001F]/g, '-').replace(/[. ]+$/, '') || '我的照片墙';
-            var mime = format === 'jpeg' ? 'image/jpeg' : 'image/' + format;
-            var extension = format === 'jpeg' ? 'jpg' : format;
-
             app.closeExportDialog();
-            app.showLoading(true, '正在生成高清图片…');
-            var output = app.wall.createExportCanvas({ scale: scale, background: background, aspectRatio: aspectRatio });
-            output.toBlob(function (blob) {
-                app.showLoading(false);
-                if (!blob) {
-                    app.toast('导出失败，请降低清晰度后重试');
-                    return;
+            app.showLoading(true, format === 'pdf' ? '正在生成印刷 PDF…' : '正在生成高清图片…');
+
+            var outputPromise;
+            var extension;
+            var mime;
+            if (format === 'pdf') {
+                var preset = getPrintPreset(document.getElementById('export-print-size').value);
+                var dpi = parseInt(document.getElementById('export-print-dpi').value, 10);
+                var bleedMm = document.getElementById('export-print-bleed').checked ? 3 : 0;
+                var printDimensions = printPixelDimensions(preset, dpi, bleedMm);
+                if (printDimensions.width * printDimensions.height > app.deviceProfile.maxExportPixels && dpi > 150) {
+                    dpi = 150;
+                    printDimensions = printPixelDimensions(preset, dpi, bleedMm);
+                    app.toast('为避免设备内存不足，打印精度已调整为 150 DPI');
                 }
-                saveBlob(blob, {
+                outputPromise = app.wall.createExportCanvasAsync({
+                    targetWidth: printDimensions.width,
+                    targetHeight: printDimensions.height,
+                    background: background === 'transparent' ? '#ffffff' : background,
+                    useOriginal: true
+                }).then(function (canvas) {
+                    return createPrintPdf(canvas, {
+                        preset: preset,
+                        bleedMm: bleedMm,
+                        cropMarks: bleedMm > 0,
+                        title: fileName
+                    });
+                });
+                extension = 'pdf';
+                mime = 'application/pdf';
+            } else {
+                var requestedScale = scale;
+                while (scale > 1) {
+                    var candidateDimensions = app.wall.getExportDimensions(scale, aspectRatio);
+                    if (candidateDimensions.width * candidateDimensions.height <= app.deviceProfile.maxExportPixels) break;
+                    scale--;
+                }
+                if (scale !== requestedScale) app.toast('为避免设备内存不足，已将导出清晰度调整为 ' + scale + '×');
+                mime = format === 'jpeg' ? 'image/jpeg' : 'image/' + format;
+                extension = format === 'jpeg' ? 'jpg' : format;
+                outputPromise = app.wall.createExportCanvasAsync({
+                    scale: scale,
+                    background: background,
+                    aspectRatio: aspectRatio,
+                    useOriginal: true
+                }).then(function (canvas) { return app.canvasToBlob(canvas, mime, 0.94); });
+            }
+
+            outputPromise.then(function (blob) {
+                return saveBlob(blob, {
                     title: '导出照片墙图片',
                     fileName: fileName + '.' + extension,
-                    filters: [{ name: extension.toUpperCase() + ' 图片', extensions: [extension] }]
+                    filters: [{ name: extension.toUpperCase() + (mime === 'application/pdf' ? ' 文档' : ' 图片'), extensions: [extension] }]
                 }).then(function (result) {
+                    app.showLoading(false);
                     if (result.cancelled) app.toast('已取消导出');
-                    else app.toast('图片已导出 · ' + Math.round(blob.size / 1024) + ' KB');
+                    else app.toast((format === 'pdf' ? 'PDF' : '图片') + '已导出 · ' + Math.round(blob.size / 1024) + ' KB');
                 });
-            }, mime, 0.94);
+            }).catch(function (error) {
+                app.showLoading(false);
+                app.toast('导出失败，请降低规格后重试');
+                console.error(error);
+            });
         } catch (err) {
             app.showLoading(false);
             app.toast('导出失败');
             console.error(err);
         }
+    };
+
+    app.canvasToBlob = function (canvas, mime, quality) {
+        return new Promise(function (resolve, reject) {
+            canvas.toBlob(function (blob) {
+                if (blob) resolve(blob);
+                else reject(new Error('Canvas encode failed'));
+            }, mime, quality);
+        });
     };
 
     /* ------------------------------------------------------------------ *

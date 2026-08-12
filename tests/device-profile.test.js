@@ -7,6 +7,8 @@ test('desktop profile keeps higher concurrency and history depth', function () {
     assert.equal(profile.mobile, false);
     assert.equal(profile.photoLoadConcurrency, 6);
     assert.equal(profile.analysisWorkers, 4);
+    assert.equal(profile.maxWorkingBitmaps, 180);
+    assert.equal(profile.maxOriginalBitmaps, 8);
     assert.equal(profile.historyLimit, 30);
     assert.equal(getImportDimension(profile, 50), 1600);
 });
@@ -17,6 +19,9 @@ test('low-memory mobile profile limits decode and canvas pressure', function () 
     assert.equal(profile.photoLoadConcurrency, 2);
     assert.equal(profile.analysisWorkers, 1);
     assert.equal(profile.maxEditorDpr, 1.5);
+    assert.equal(profile.thumbnailDimension, 192);
+    assert.equal(profile.maxWorkingBitmaps, 32);
+    assert.equal(profile.maxOriginalBitmaps, 2);
     assert.equal(profile.historyLimit, 12);
     assert.equal(getImportDimension(profile, 80), 800);
     assert.equal(getImportDimension(profile, 350), 480);
