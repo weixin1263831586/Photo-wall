@@ -128,8 +128,8 @@ function canvasBlob(canvas, mime, quality) {
 
 function imageDimensions(image) {
     return {
-        width: Number(image.width || image.naturalWidth) || 1,
-        height: Number(image.height || image.naturalHeight) || 1
+        width: Number(image.videoWidth || image.width || image.naturalWidth) || 1,
+        height: Number(image.videoHeight || image.height || image.naturalHeight) || 1
     };
 }
 
@@ -237,6 +237,7 @@ export function createPhotoAssetManager(options) {
             await resizeImage(source, thumbnailDimension, 'image/webp', 0.82, documentRef);
         closeBitmap(source);
         return {
+            mediaType: 'image',
             originalBlob: originalBlob,
             workingBlob: working.blob,
             thumbnailBlob: thumbnail.blob,
@@ -249,6 +250,131 @@ export function createPhotoAssetManager(options) {
         };
     }
 
+    function loadVideoFrame(originalBlob) {
+        if (!documentRef || !urlAPI) return Promise.reject(new Error('Video decoding is unavailable'));
+        return new Promise(function (resolve, reject) {
+            var video = documentRef.createElement('video');
+            var url = urlAPI.createObjectURL(originalBlob);
+            var settled = false;
+            var timer = setTimeout(function () { finish(reject, new Error('Video poster frame timed out')); }, 8000);
+
+            function cleanup() {
+                clearTimeout(timer);
+                video.onloadedmetadata = null;
+                video.onloadeddata = null;
+                video.onseeked = null;
+                video.onerror = null;
+            }
+            function finish(callback, value) {
+                if (settled) return;
+                settled = true;
+                cleanup();
+                if (callback === reject) {
+                    video.removeAttribute('src');
+                    try { video.load(); } catch (ignore) {}
+                    urlAPI.revokeObjectURL(url);
+                }
+                callback(value);
+            }
+            function ready() {
+                if (!video.videoWidth || !video.videoHeight) return;
+                var duration = Number.isFinite(video.duration) ? video.duration : 0;
+                var posterTime = duration > 0.25 ? Math.min(Math.max(0.1, duration * 0.1), Math.max(0.1, duration - 0.05)) : 0;
+                if (posterTime > 0 && Math.abs(video.currentTime - posterTime) > 0.04) {
+                    video.onseeked = function () { finish(resolve, { video: video, url: url, duration: duration }); };
+                    try { video.currentTime = posterTime; } catch (ignore) { finish(resolve, { video: video, url: url, duration: duration }); }
+                } else {
+                    finish(resolve, { video: video, url: url, duration: duration });
+                }
+            }
+            video.preload = 'auto';
+            video.muted = true;
+            video.playsInline = true;
+            video.onloadedmetadata = ready;
+            video.onloadeddata = ready;
+            video.onerror = function () { finish(reject, new Error('Video decode failed')); };
+            video.src = url;
+            try { video.load(); } catch (ignore) {}
+        });
+    }
+
+    async function createVideoLayers(originalBlob, maxWorkingDimension) {
+        if (!(originalBlob instanceof Blob)) throw new Error('Video source must be a Blob');
+        if (!documentRef) throw new Error('A document is required to create video layers');
+        var loaded;
+        try {
+            loaded = await loadVideoFrame(originalBlob);
+        } catch (error) {
+            // Some WebViews cannot decode every codec inside a supported MP4
+            // container (notably HEVC on some desktop Chromium builds). Keep
+            // the original untouched and provide a clear poster placeholder;
+            // playback can still work on a device with the system codec.
+            var fallbackCanvas = documentRef.createElement('canvas');
+            fallbackCanvas.width = 640;
+            fallbackCanvas.height = 360;
+            var fallbackContext = fallbackCanvas.getContext('2d');
+            var gradient = fallbackContext.createLinearGradient(0, 0, 640, 360);
+            gradient.addColorStop(0, '#242436');
+            gradient.addColorStop(1, '#111119');
+            fallbackContext.fillStyle = gradient;
+            fallbackContext.fillRect(0, 0, 640, 360);
+            fallbackContext.fillStyle = 'rgba(255,255,255,.92)';
+            fallbackContext.beginPath();
+            fallbackContext.moveTo(278, 126);
+            fallbackContext.lineTo(278, 234);
+            fallbackContext.lineTo(382, 180);
+            fallbackContext.closePath();
+            fallbackContext.fill();
+            fallbackContext.font = '600 24px sans-serif';
+            fallbackContext.textAlign = 'center';
+            fallbackContext.fillText('VIDEO', 320, 300);
+            var fallbackWorking = await canvasBlob(fallbackCanvas, 'image/jpeg', 0.88);
+            var fallbackThumbnail = await resizeImage(fallbackCanvas, thumbnailDimension, 'image/webp', 0.82, documentRef);
+            fallbackCanvas.width = 1;
+            fallbackCanvas.height = 1;
+            return {
+                mediaType: 'video',
+                videoMime: originalBlob.type || 'video/mp4',
+                duration: 0,
+                posterFallback: true,
+                originalBlob: originalBlob,
+                workingBlob: fallbackWorking,
+                thumbnailBlob: fallbackThumbnail.blob,
+                originalWidth: 640,
+                originalHeight: 360,
+                workingWidth: 640,
+                workingHeight: 360,
+                thumbnailWidth: fallbackThumbnail.width,
+                thumbnailHeight: fallbackThumbnail.height
+            };
+        }
+        try {
+            var dimensions = imageDimensions(loaded.video);
+            var workingLimit = Math.max(320, Number(maxWorkingDimension) || 1600);
+            var working = await resizeImage(loaded.video, workingLimit, 'image/jpeg', 0.9, documentRef);
+            var thumbnail = await resizeImage(loaded.video, thumbnailDimension, 'image/webp', 0.82, documentRef);
+            return {
+                mediaType: 'video',
+                videoMime: originalBlob.type || 'video/mp4',
+                duration: loaded.duration,
+                originalBlob: originalBlob,
+                workingBlob: working.blob,
+                thumbnailBlob: thumbnail.blob,
+                originalWidth: dimensions.width,
+                originalHeight: dimensions.height,
+                workingWidth: working.width,
+                workingHeight: working.height,
+                thumbnailWidth: thumbnail.width,
+                thumbnailHeight: thumbnail.height
+            };
+        } finally {
+            loaded.video.pause();
+            loaded.video.removeAttribute('src');
+            try { loaded.video.load(); } catch (ignore) {}
+            urlAPI.revokeObjectURL(loaded.url);
+        }
+    }
+
     function hydratePhoto(photo, layers) {
         Object.assign(photo, layers);
         photo.blob = layers.workingBlob;
@@ -258,7 +384,10 @@ export function createPhotoAssetManager(options) {
     }
 
     function layerBlob(photo, layer) {
-        if (layer === 'original') return photo.originalBlob || photo.workingBlob || photo.blob;
+        // Static wall rendering and the crop editor use the generated poster
+        // for video assets. The untouched original video remains available to
+        // persistence and the lightbox player.
+        if (layer === 'original' && photo.mediaType !== 'video') return photo.originalBlob || photo.workingBlob || photo.blob;
         if (layer === 'thumbnail') return photo.thumbnailBlob || photo.workingBlob || photo.blob || photo.originalBlob;
         return photo.workingBlob || photo.blob || photo.originalBlob;
     }
@@ -305,6 +434,7 @@ export function createPhotoAssetManager(options) {
 
     return {
         createLayers: createLayers,
+        createVideoLayers: createVideoLayers,
         hydratePhoto: hydratePhoto,
         attachURLs: attachURLs,
         getBitmap: getBitmap,

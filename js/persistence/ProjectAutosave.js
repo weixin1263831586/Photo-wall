@@ -9,7 +9,8 @@ const PHOTO_METADATA_FIELDS = [
     'id', 'name', 'signature', 'r', 'g', 'b', 'brightness', 'hue',
     'saturation', 'contrast', 'sharpness', 'focusX', 'focusY',
     'aspectRatio', 'featured', 'editZoom', 'editOffsetX', 'editOffsetY',
-    'editRotation', 'flipX', 'flipY', 'originalWidth', 'originalHeight'
+    'editRotation', 'flipX', 'flipY', 'originalWidth', 'originalHeight',
+    'mediaType', 'videoMime', 'duration', 'posterFallback', 'focusSource', 'subjectScore', 'analysisVersion'
 ];
 
 function requestResult(request) {
@@ -73,7 +74,7 @@ export function autosavePhotoFingerprint(photo, blob) {
 async function resolvePhotoBlob(photo, fetchImpl) {
     if (isBlob(photo.originalBlob)) return photo.originalBlob;
     if (isBlob(photo.blob)) return photo.blob;
-    if (typeof photo.src !== 'string' || !/^(blob:|data:image\/)/i.test(photo.src)) {
+    if (typeof photo.src !== 'string' || !/^(blob:|data:(image|video)\/)/i.test(photo.src)) {
         throw new Error('Photo ' + (photo.id || '') + ' has no persistent source');
     }
     if (typeof fetchImpl !== 'function') throw new Error('Fetch is unavailable for autosave');

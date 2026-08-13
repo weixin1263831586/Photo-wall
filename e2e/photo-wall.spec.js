@@ -171,6 +171,32 @@ test('edits one photo and restores the edit with undo', async function ({ page }
     await expect(page.locator('#photo-count')).toHaveText('2');
 });
 
+test('opens the exact selected material without flashing a neighbouring photo', async function ({ page }) {
+    await page.locator('#file-input').setInputFiles([pngPhoto(20), pngPhoto(21), pngPhoto(22)]);
+    await page.locator('.photo-card').nth(1).click();
+    await expect(page.locator('#lightbox')).toHaveClass(/active/);
+    await expect(page.locator('#lightbox-info')).toContainText('photo-21.png');
+    await page.locator('#lightbox-close').click();
+});
+
+test('offers slot-local positioning and speed-controlled flow playback', async function ({ page }) {
+    await page.locator('#file-input').setInputFiles([pngPhoto(30), pngPhoto(31), pngPhoto(32), pngPhoto(33)]);
+    await expect(page.locator('#position-mode-btn')).toBeEnabled();
+    await page.locator('#position-mode-btn').click();
+    await expect(page.locator('#position-mode-btn')).toHaveAttribute('aria-pressed', 'true');
+    await expect(page.locator('#canvas-help')).toContainText('上下左右移动');
+
+    await page.locator('#flow-speed').selectOption('fast');
+    await page.locator('#flow-play-btn').click();
+    await expect(page.locator('#flow-play-btn')).toHaveAttribute('aria-pressed', 'true');
+    await expect(page.locator('#position-mode-btn')).toHaveAttribute('aria-pressed', 'false');
+    await expect(page.locator('#flow-play-label')).toHaveText('停止流动');
+    await page.waitForTimeout(650);
+    await page.locator('#flow-play-btn').click();
+    await expect(page.locator('#flow-play-label')).toHaveText('流动播放');
+    await expect(page.locator('#undo-btn')).toBeEnabled();
+});
+
 test('adds editable layers and generates a repeatable next layout option', async function ({ page }) {
     await page.locator('#file-input').setInputFiles([pngPhoto(1), pngPhoto(2), pngPhoto(3)]);
     await page.locator('#add-title-btn').click();

@@ -8,6 +8,7 @@ import {
 import { createTemplateLibrary } from './layout/TemplateLibrary.js';
 import { analyzePhoto } from './image/PhotoAnalyzer.js';
 import { createPhotoAssetManager } from './image/PhotoAssetManager.js';
+import { refineSubjectFocus } from './image/SubjectFocus.js';
 import { applyPhotoTransform, drawPhotoCover, normalizePhotoTransform } from './image/PhotoTransform.js';
 import { createOverlay, normalizeOverlays } from './overlay/OverlayRenderer.js';
 import { createPhotoAnalysisWorkerClient } from './image/PhotoAnalysisWorkerClient.js';
@@ -20,7 +21,7 @@ import {
     migrateProject,
     openProjectContainer
 } from './persistence/ProjectContainer.js';
-import { isNativeApp, saveBlob } from './platform/NativeFileService.js';
+import { isNativeApp, openBlobWithSystem, saveBlob } from './platform/NativeFileService.js';
 import { checkAndInstallUpdate, installCrashCapture } from './platform/RuntimeServices.js';
 import { createDeviceProfile, getImportDimension } from './platform/DeviceProfile.js';
 import {
@@ -51,6 +52,13 @@ import {
         shapeEditorReturnFocus: null,
         lightboxReturnFocus: null,
         lightboxObjectURL: '',
+        lightboxTranscodedURL: '',
+        lightboxTranscodeToken: 0,
+        localAdjustSnapshot: null,
+        flowPlaying: false,
+        flowTimer: null,
+        flowSnapshot: null,
+        flowCycleCount: 0,
         photoEditorIndex: -1,
         photoEditorDraft: null,
         photoEditorReplacement: null,
@@ -79,10 +87,12 @@ import {
         photoObjectURLCleanupTimer: null,
         maxPhotos: 1000,
         maxFileSize: 40 * 1024 * 1024,
+        maxVideoFileSize: 200 * 1024 * 1024,
         maxPhotoDimension: 1600,
         photoLoadConcurrency: 3,
         photoLoadTimeout: 30000,
-        supportedImageTypes: ['image/jpeg', 'image/png', 'image/webp']
+        supportedImageTypes: ['image/jpeg', 'image/png', 'image/webp'],
+        supportedVideoTypes: ['video/mp4', 'video/webm', 'video/quicktime', 'video/x-m4v']
     };
 
     /* ------------------------------------------------------------------ *
@@ -136,10 +146,13 @@ import {
             onReorder: app.reorderPhoto,
             onFeature: app.toggleFeaturedPhoto,
             onEdit: app.openPhotoEditor,
-            onRemove: app.removePhoto
+            onRemove: app.removePhoto,
+            onOpen: app.openLightbox
         });
-        app.wall.onPhotoClick = function (item, index) {
-            app.openLightbox(index);
+        app.wall.onPhotoClick = function (item) {
+            var photoIndex = item && Number.isInteger(item.photoIndex) ? item.photoIndex :
+                app.photos.findIndex(function (photo) { return item && item.photo && photo.id === item.photo.id; });
+            if (photoIndex >= 0) app.openLightbox(photoIndex);
         };
         app.wall.onBeforeSwap = function () {
             app.recordHistory();
@@ -148,13 +161,22 @@ import {
             app.toast('已交换两张照片的位置');
             app.updateActionState();
         };
+        app.wall.onBeforeLocalAdjust = function () {
+            app.localAdjustSnapshot = app.captureState();
+        };
+        app.wall.onLocalAdjust = function () {
+            if (app.localAdjustSnapshot) app.recordHistory(app.localAdjustSnapshot);
+            app.localAdjustSnapshot = null;
+            app.toast('已调整照片在当前格位中的位置');
+            app.updateActionState();
+        };
         app.wall.onLayout = function (slotCount, largeCount) {
             var status = document.getElementById('canvas-status');
             if (!status) return;
             status.textContent = app.photos.length ?
-                app.photos.length + ' 张照片 · ' + slotCount + ' 个填充格位' +
+                app.photos.length + ' 个素材 · ' + slotCount + ' 个填充格位' +
                     (largeCount ? ' · ' + largeCount + ' 个大图' : '') + ' · 本地处理' :
-                '所有照片仅在本地处理';
+                '所有素材仅在本地处理';
             app.updateExportDimensions();
             app.updateLayoutPresetSelection();
         };
@@ -194,6 +216,7 @@ import {
             }, 200);
         });
         window.addEventListener('beforeunload', function () {
+            app.stopFlowPlayback(false);
             if (app.autosave) app.autosave.saveNow();
             if (app.photoAnalyzerWorker) app.photoAnalyzerWorker.terminate();
             if (app.assetManager) app.assetManager.destroy();
@@ -203,7 +226,10 @@ import {
             app.photoObjectURLs.clear();
         });
         document.addEventListener('visibilitychange', function () {
-            if (document.visibilityState === 'hidden' && app.autosave) app.autosave.saveNow();
+            if (document.visibilityState === 'hidden') {
+                app.stopFlowPlayback(true);
+                if (app.autosave) app.autosave.saveNow();
+            }
         });
     };
 
@@ -237,6 +263,9 @@ import {
      * ------------------------------------------------------------------ */
 
     app.bindUI = function () {
+        document.querySelector('.sidebar').addEventListener('pointerdown', function (event) {
+            if (app.flowPlaying && event.target.closest('button, input, select, textarea')) app.stopFlowPlayback(true);
+        });
         // ---- Product presets ----
         document.getElementById('preset-buttons').addEventListener('click', function (e) {
             var deleteButton = e.target.closest('.preset-delete');
@@ -515,9 +544,20 @@ import {
         // ---- Actions ----
         document.getElementById('shuffle-btn').addEventListener('click', function () {
             if (!app.photos.length) return;
+            app.stopFlowPlayback(true);
             app.recordHistory();
             var seed = app.wall.nextLayoutVariant();
             app.toast('已生成新方案 · #' + seed);
+        });
+        document.getElementById('position-mode-btn').addEventListener('click', function () {
+            app.setPositionMode(app.wall.interactionMode !== 'adjust');
+        });
+        document.getElementById('flow-play-btn').addEventListener('click', function () {
+            if (app.flowPlaying) app.stopFlowPlayback(true);
+            else app.startFlowPlayback();
+        });
+        document.getElementById('flow-speed').addEventListener('change', function () {
+            if (app.flowPlaying) app.scheduleNextFlowCycle();
         });
         document.getElementById('clear-btn').addEventListener('click', function () {
             app.clearPhotos();
@@ -574,13 +614,35 @@ import {
             e.stopPropagation();
             app.navigateLightbox(1);
         });
+        document.getElementById('lightbox-system-player').addEventListener('click', function (e) {
+            e.stopPropagation();
+            var photo = app.photos[app.lightboxIndex];
+            var source = photo && (photo.originalBlob || photo.workingBlob || photo.blob);
+            if (!photo || photo.mediaType !== 'video' || !(source instanceof Blob)) return;
+            var button = e.currentTarget;
+            button.disabled = true;
+            button.textContent = isNativeApp() ? '正在打开系统播放器…' : '正在下载原视频…';
+            openBlobWithSystem(source, photo.name || 'video.mp4').then(function (result) {
+                if (result && result.cancelled) return;
+                app.toast(result && result.opened ? '已交给系统播放器' : '原视频已保存，请使用系统播放器打开');
+            }).catch(function (error) {
+                console.error(error);
+                app.toast('无法打开原视频');
+            }).finally(function () {
+                button.disabled = false;
+                button.textContent = isNativeApp() ? '使用系统播放器' : '下载原视频';
+            });
+        });
+        document.getElementById('lightbox-browser-play').addEventListener('click', function (e) {
+            e.stopPropagation();
+            app.playLightboxVideoInBrowser();
+        });
         document.getElementById('lightbox-edit').addEventListener('click', function (e) {
             e.stopPropagation();
-            var item = app.wall.layout[app.lightboxIndex];
-            if (!item) return;
-            var photoIndex = app.photos.findIndex(function (photo) { return photo.id === item.photo.id; });
+            var photoIndex = app.lightboxIndex;
+            if (!app.photos[photoIndex]) return;
             app.closeLightbox();
-            if (photoIndex >= 0) app.openPhotoEditor(photoIndex);
+            app.openPhotoEditor(photoIndex);
         });
 
         // ---- Single photo editor ----
@@ -1130,6 +1192,7 @@ import {
     app.applyLayoutPreset = function (presetId) {
         var preset = app.findTemplate(presetId);
         if (!preset || layoutPresetMatches(app.wall, app.currentShapeKey, preset)) return;
+        app.stopFlowPlayback(true);
         app.recordHistory();
         clearTimeout(app.densityTimer);
         clearTimeout(app.overlapTimer);
@@ -1321,39 +1384,51 @@ import {
         return prefix + '-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
     };
 
+    app.isVideoFile = function (file) {
+        return Boolean(file) && (app.supportedVideoTypes.indexOf(file.type) >= 0 || /\.(mp4|webm|mov|m4v)$/i.test(file.name || ''));
+    };
+
+    app.videoMimeForFile = function (file) {
+        if (file && /^video\//i.test(file.type)) return file.type;
+        var extension = ((file && file.name) || '').split('.').pop().toLowerCase();
+        return { mp4: 'video/mp4', webm: 'video/webm', mov: 'video/quicktime', m4v: 'video/x-m4v' }[extension] || 'video/mp4';
+    };
+
     app.handleFiles = function (files) {
         var incoming = Array.prototype.slice.call(files);
         var existingSignatures = new Set(app.photos.map(function (photo) { return photo.signature; }).filter(Boolean));
         var skippedLarge = 0, skippedDuplicate = 0;
-        var imageFiles = incoming.filter(function (file) {
-            var supportedType = app.supportedImageTypes.indexOf(file.type) >= 0;
-            var supportedExtension = /\.(jpe?g|png|webp)$/i.test(file.name);
+        var mediaFiles = incoming.filter(function (file) {
+            var video = app.isVideoFile(file);
+            var supportedType = app.supportedImageTypes.indexOf(file.type) >= 0 || video;
+            var supportedExtension = /\.(jpe?g|png|webp|mp4|webm|mov|m4v)$/i.test(file.name);
             if (!supportedType && !supportedExtension) return false;
-            if (file.size > app.maxFileSize) { skippedLarge++; return false; }
+            if (file.size > (video ? app.maxVideoFileSize : app.maxFileSize)) { skippedLarge++; return false; }
             var signature = [file.name, file.size, file.lastModified].join(':');
             if (existingSignatures.has(signature)) { skippedDuplicate++; return false; }
             existingSignatures.add(signature);
             return true;
         });
         var remaining = Math.max(0, app.maxPhotos - app.photos.length);
-        var skippedLimit = Math.max(0, imageFiles.length - remaining);
-        imageFiles = imageFiles.slice(0, remaining);
-        if (imageFiles.length === 0) {
-            if (!remaining) app.toast('最多支持 ' + app.maxPhotos + ' 张照片');
-            else if (skippedDuplicate) app.toast('这些照片已经添加过了');
-            else if (skippedLarge) app.toast('单张照片不能超过 40 MB');
-            else app.toast('请选择 JPG、PNG 或 WebP 图片');
+        var skippedLimit = Math.max(0, mediaFiles.length - remaining);
+        mediaFiles = mediaFiles.slice(0, remaining);
+        if (mediaFiles.length === 0) {
+            if (!remaining) app.toast('最多支持 ' + app.maxPhotos + ' 个素材');
+            else if (skippedDuplicate) app.toast('这些素材已经添加过了');
+            else if (skippedLarge) app.toast('照片不能超过 40 MB，视频不能超过 200 MB');
+            else app.toast('请选择 JPG、PNG、WebP、MP4、WebM 或 MOV 文件');
             return;
         }
+        app.stopFlowPlayback(true);
 
-        var total = imageFiles.length;
+        var total = mediaFiles.length;
         if (app.deviceProfile.mobile && app.photos.length + total > app.deviceProfile.recommendedPhotoCount) {
-            app.toast('手机端建议不超过 ' + app.deviceProfile.recommendedPhotoCount + ' 张，仍将继续导入并自动压缩');
+            app.toast('手机端建议不超过 ' + app.deviceProfile.recommendedPhotoCount + ' 个素材；编辑预览会降采样，原文件仍保留');
         }
         var importDimension = app.getPhotoImportDimension(app.photos.length + total);
-        app.showLoading(true, '正在读取 0/' + total + ' 张照片…');
-        app.loadPhotoBatch(imageFiles, function (completed) {
-            app.showLoading(true, '正在读取 ' + completed + '/' + total + ' 张照片…');
+        app.showLoading(true, '正在读取 0/' + total + ' 个素材…');
+        app.loadPhotoBatch(mediaFiles, function (completed) {
+            app.showLoading(true, '正在读取 ' + completed + '/' + total + ' 个素材…');
         }, importDimension).then(function (loadedPhotos) {
             var valid = loadedPhotos.filter(Boolean);
             if (valid.length) app.recordHistory();
@@ -1364,11 +1439,13 @@ import {
             if (app.photos.length) app.hideEmptyState();
             app.showLoading(false);
             var skipped = skippedLarge + skippedDuplicate + skippedLimit + (total - valid.length);
-            app.toast('已添加 ' + valid.length + ' 张照片' + (skipped ? ' · 跳过 ' + skipped + ' 张' : ''));
+            var fallbackVideos = valid.filter(function (photo) { return photo.posterFallback; }).length;
+            app.toast('已添加 ' + valid.length + ' 个素材' + (skipped ? ' · 跳过 ' + skipped + ' 个' : '') +
+                (fallbackVideos ? ' · ' + fallbackVideos + ' 个视频需使用设备解码播放' : ''));
         }).catch(function (err) {
-            console.error('批量读取照片失败:', err);
+            console.error('批量读取素材失败:', err);
             app.showLoading(false);
-            app.toast('照片读取失败，请重试');
+            app.toast('素材读取失败，请重试');
         });
     };
 
@@ -1384,7 +1461,7 @@ import {
             return app.loadPhoto(files[index], maxDimension).then(function (photo) {
                 results[index] = photo;
             }).catch(function (err) {
-                console.error('图片加载失败:', files[index].name, err);
+                console.error('素材加载失败:', files[index].name, err);
                 results[index] = null;
             }).then(function () {
                 completed++;
@@ -1450,7 +1527,14 @@ import {
                         sharpness: analysis.sharpness,
                         focusX: analysis.focusX,
                         focusY: analysis.focusY,
+                        focusSource: analysis.focusSource || 'saliency',
+                        subjectScore: Number(analysis.subjectScore) || 0,
+                        analysisVersion: 2,
                         aspectRatio: analysis.aspectRatio,
+                        mediaType: layers.mediaType || 'image',
+                        videoMime: layers.videoMime || '',
+                        duration: Number(layers.duration) || 0,
+                        posterFallback: layers.posterFallback === true,
                         featured: false
                     };
                     app.assetManager.hydratePhoto(photo, layers);
@@ -1488,9 +1572,12 @@ import {
     };
 
     app.analyzeLoadedPhoto = function (image, blob) {
-        if (!app.photoAnalyzerWorker) return Promise.resolve(analyzePhoto(image));
-        return app.photoAnalyzerWorker.analyze(blob).catch(function () {
+        var analysisPromise = !app.photoAnalyzerWorker ? Promise.resolve(analyzePhoto(image)) :
+            app.photoAnalyzerWorker.analyze(blob).catch(function () {
             return analyzePhoto(image);
+        });
+        return analysisPromise.then(function (analysis) {
+            return refineSubjectFocus(image, analysis);
         });
     };
 
@@ -1500,6 +1587,10 @@ import {
 
     app.createPhotoBlob = function (file, maxDimension) {
         maxDimension = Math.max(320, Math.min(app.maxPhotoDimension, Number(maxDimension) || app.maxPhotoDimension));
+        if (app.isVideoFile(file)) {
+            var videoBlob = /^video\//i.test(file.type) ? file : file.slice(0, file.size, app.videoMimeForFile(file));
+            return app.assetManager.createVideoLayers(videoBlob, maxDimension);
+        }
         return app.assetManager.createLayers(file, maxDimension);
     };
 
@@ -1522,6 +1613,7 @@ import {
     app.clearPhotos = function () {
         if (app.photos.length === 0) return;
         if (!window.confirm('确定清空全部 ' + app.photos.length + ' 张照片吗？此操作可以撤销。')) return;
+        app.stopFlowPlayback(true);
         app.recordHistory();
         app.photos.forEach(function (photo) { app.assetManager.releasePhoto(photo); });
         app.photos = [];
@@ -1564,6 +1656,7 @@ import {
 
     app.reorderPhoto = function (fromIndex, targetIndex) {
         if (!app.photos[fromIndex] || !app.photos[targetIndex]) return;
+        app.stopFlowPlayback(true);
         app.recordHistory();
         var moved = app.photos.splice(fromIndex, 1)[0];
         app.photos.splice(targetIndex, 0, moved);
@@ -1574,6 +1667,7 @@ import {
 
     app.toggleFeaturedPhoto = function (index) {
         if (!app.photos[index]) return;
+        app.stopFlowPlayback(true);
         app.recordHistory();
         app.photos[index].featured = !app.photos[index].featured;
         app.renderPhotoLibrary();
@@ -1583,6 +1677,7 @@ import {
 
     app.removePhoto = function (index) {
         if (!app.photos[index]) return;
+        app.stopFlowPlayback(true);
         app.recordHistory();
         var removed = app.photos.splice(index, 1)[0];
         app.assetManager.releasePhoto(removed);
@@ -1671,7 +1766,14 @@ import {
                     sharpness: photo.sharpness,
                     focusX: photo.focusX,
                     focusY: photo.focusY,
+                    focusSource: photo.focusSource,
+                    subjectScore: photo.subjectScore,
+                    analysisVersion: Number(photo.analysisVersion) || 1,
                     aspectRatio: photo.aspectRatio,
+                    mediaType: photo.mediaType || 'image',
+                    videoMime: photo.videoMime || '',
+                    duration: Number(photo.duration) || 0,
+                    posterFallback: photo.posterFallback === true,
                     featured: photo.featured === true,
                     editZoom: photo.editZoom,
                     editOffsetX: photo.editOffsetX,
@@ -1750,6 +1852,7 @@ import {
             app.toast('项目文件无效或超过 1 GB');
             return;
         }
+        app.stopFlowPlayback(true);
         app.showLoading(true, '正在打开项目…');
         file.arrayBuffer().then(function (buffer) {
             var bytes = new Uint8Array(buffer);
@@ -1802,7 +1905,9 @@ import {
             return response.blob();
         });
         return blobPromise.then(function (originalBlob) {
-            return app.assetManager.createLayers(originalBlob, maxDimension || app.maxPhotoDimension);
+            var video = saved.mediaType === 'video' || /^video\//i.test(originalBlob.type);
+            return video ? app.assetManager.createVideoLayers(originalBlob, maxDimension || app.maxPhotoDimension) :
+                app.assetManager.createLayers(originalBlob, maxDimension || app.maxPhotoDimension);
         }).then(function (layers) {
             return new Promise(function (resolve, reject) {
                 var img = new Image();
@@ -1837,7 +1942,7 @@ import {
                         ];
                         var needsAnalysis = analysisFields.some(function (field) {
                             return !Number.isFinite(saved[field]);
-                        });
+                        }) || Number(saved.analysisVersion) < 2;
                         var analysis = needsAnalysis ? analyzePhoto(img) : saved;
                         var photo = {
                             id: saved.id || app.createId('photo'),
@@ -1854,9 +1959,16 @@ import {
                             saturation: Number.isFinite(saved.saturation) ? saved.saturation : analysis.saturation,
                             contrast: Number.isFinite(saved.contrast) ? saved.contrast : analysis.contrast,
                             sharpness: Number.isFinite(saved.sharpness) ? saved.sharpness : analysis.sharpness,
-                            focusX: Number.isFinite(saved.focusX) ? saved.focusX : analysis.focusX,
-                            focusY: Number.isFinite(saved.focusY) ? saved.focusY : analysis.focusY,
+                            focusX: !needsAnalysis && Number.isFinite(saved.focusX) ? saved.focusX : analysis.focusX,
+                            focusY: !needsAnalysis && Number.isFinite(saved.focusY) ? saved.focusY : analysis.focusY,
+                            focusSource: !needsAnalysis && saved.focusSource ? saved.focusSource : (analysis.focusSource || 'saliency'),
+                            subjectScore: !needsAnalysis ? (Number(saved.subjectScore) || 0) : (Number(analysis.subjectScore) || 0),
+                            analysisVersion: 2,
                             aspectRatio: Number.isFinite(saved.aspectRatio) ? saved.aspectRatio : analysis.aspectRatio,
+                            mediaType: layers.mediaType || saved.mediaType || 'image',
+                            videoMime: layers.videoMime || saved.videoMime || '',
+                            duration: Number(layers.duration || saved.duration) || 0,
+                            posterFallback: layers.posterFallback === true || saved.posterFallback === true,
                             featured: saved.featured === true,
                             editZoom: Number.isFinite(saved.editZoom) ? saved.editZoom : 1,
                             editOffsetX: Number.isFinite(saved.editOffsetX) ? saved.editOffsetX : 0,
@@ -2016,6 +2128,7 @@ import {
 
     app.restoreState = function (state) {
         if (!state) return;
+        app.stopFlowPlayback(false);
         clearTimeout(app.densityTimer);
         clearTimeout(app.overlapTimer);
         clearTimeout(app.rotationTimer);
@@ -2060,23 +2173,101 @@ import {
     };
 
     app.undo = function () {
+        app.stopFlowPlayback(true);
         if (app.history.undo()) app.toast('已撤销');
     };
 
     app.redo = function () {
+        app.stopFlowPlayback(true);
         if (app.history.redo()) app.toast('已重做');
+    };
+
+    app.setPositionMode = function (enabled) {
+        if (enabled) app.stopFlowPlayback(true);
+        app.localAdjustSnapshot = null;
+        app.wall.setInteractionMode(enabled ? 'adjust' : 'swap');
+        var button = document.getElementById('position-mode-btn');
+        button.classList.toggle('active', enabled);
+        button.setAttribute('aria-pressed', String(enabled));
+        button.title = enabled ? '拖动照片可调整其在当前格位中的可见区域' : '在格位内移动照片以突出人物';
+        document.getElementById('canvas-help').textContent = enabled ?
+            '局部调图模式 · 拖动照片可上下左右移动，点击仍可查看原素材' :
+            '拖拽素材可交换位置 · 开启局部调图后可在格位内移动人物';
+    };
+
+    app.flowTiming = function () {
+        var speed = document.getElementById('flow-speed').value;
+        return {
+            slow: { interval: 5200, transition: 1200 },
+            normal: { interval: 3200, transition: 800 },
+            fast: { interval: 1800, transition: 500 }
+        }[speed] || { interval: 3200, transition: 800 };
+    };
+
+    app.runFlowCycle = function () {
+        if (!app.flowPlaying || app.photos.length < 2) return;
+        var timing = app.flowTiming();
+        var seed = app.wall.layoutSeed + 1;
+        if (app.wall.randomizeAssignments(seed, timing.transition)) app.flowCycleCount++;
+        app.scheduleNextFlowCycle();
+    };
+
+    app.scheduleNextFlowCycle = function () {
+        clearTimeout(app.flowTimer);
+        if (!app.flowPlaying) return;
+        app.flowTimer = setTimeout(app.runFlowCycle, app.flowTiming().interval);
+    };
+
+    app.startFlowPlayback = function () {
+        if (app.photos.length < 2 || app.wall.layout.length < 2) {
+            app.toast('至少需要两个素材才能流动播放');
+            return;
+        }
+        app.setPositionMode(false);
+        app.flowSnapshot = app.captureState();
+        app.flowCycleCount = 0;
+        app.flowPlaying = true;
+        app.updateFlowControls();
+        app.runFlowCycle();
+    };
+
+    app.stopFlowPlayback = function (saveHistory) {
+        clearTimeout(app.flowTimer);
+        app.flowTimer = null;
+        if (!app.flowPlaying) return;
+        app.flowPlaying = false;
+        if (saveHistory && app.flowCycleCount && app.flowSnapshot) app.recordHistory(app.flowSnapshot);
+        app.flowSnapshot = null;
+        app.flowCycleCount = 0;
+        app.updateFlowControls();
+    };
+
+    app.updateFlowControls = function () {
+        var button = document.getElementById('flow-play-btn');
+        if (!button) return;
+        button.classList.toggle('active', app.flowPlaying);
+        button.setAttribute('aria-pressed', String(app.flowPlaying));
+        document.getElementById('flow-play-icon').textContent = app.flowPlaying ? '■' : '▶';
+        document.getElementById('flow-play-label').textContent = app.flowPlaying ? '停止流动' : '流动播放';
     };
 
     app.updateActionState = function () {
         var hasPhotos = app.photos.length > 0;
+        if (app.flowPlaying && app.photos.length < 2) app.stopFlowPlayback(false);
         var exportButton = document.getElementById('export-btn');
         var shuffleButton = document.getElementById('shuffle-btn');
         var undoButton = document.getElementById('undo-btn');
         var redoButton = document.getElementById('redo-btn');
+        var positionButton = document.getElementById('position-mode-btn');
+        var flowButton = document.getElementById('flow-play-btn');
+        var flowSpeed = document.getElementById('flow-speed');
         if (exportButton) exportButton.disabled = !hasPhotos;
         if (shuffleButton) shuffleButton.disabled = !hasPhotos;
         if (undoButton) undoButton.disabled = !app.history || !app.history.canUndo();
         if (redoButton) redoButton.disabled = !app.history || !app.history.canRedo();
+        if (positionButton) positionButton.disabled = !hasPhotos;
+        if (flowButton) flowButton.disabled = app.photos.length < 2;
+        if (flowSpeed) flowSpeed.disabled = app.photos.length < 2;
         var saveProjectButton = document.getElementById('save-project-btn');
         if (saveProjectButton) saveProjectButton.disabled = !hasPhotos;
     };
@@ -2110,6 +2301,7 @@ import {
     app.openPhotoEditor = function (index) {
         var photo = app.photos[index];
         if (!photo) return;
+        app.stopFlowPlayback(true);
         app.photoEditorIndex = index;
         app.photoEditorDraft = normalizePhotoTransform(photo);
         app.photoEditorReplacement = null;
@@ -2185,23 +2377,24 @@ import {
     };
 
     app.replacePhotoEditorSource = function (file) {
-        if (!file || file.size > app.maxFileSize) {
-            app.toast('替换照片无效或超过 40 MB');
+        var maxSize = app.isVideoFile(file) ? app.maxVideoFileSize : app.maxFileSize;
+        if (!file || file.size > maxSize) {
+            app.toast('替换素材无效，或超过照片 40 MB / 视频 200 MB 限制');
             return;
         }
-        app.showLoading(true, '正在准备替换照片…');
+        app.showLoading(true, '正在准备替换素材…');
         app.loadPhoto(file, app.getPhotoImportDimension(app.photos.length)).then(function (photo) {
             if (app.photoEditorReplacement) app.assetManager.releasePhoto(app.photoEditorReplacement);
             app.photoEditorReplacement = photo;
             app.photoEditorDraft = normalizePhotoTransform(photo);
-            document.getElementById('photo-editor-name').textContent = photo.name || '替换照片';
+            document.getElementById('photo-editor-name').textContent = photo.name || '替换素材';
             app.syncPhotoEditorControls();
             app.renderPhotoEditorPreview();
             app.showLoading(false);
         }).catch(function (error) {
             console.error(error);
             app.showLoading(false);
-            app.toast('替换照片读取失败');
+            app.toast('替换素材读取失败');
         });
     };
 
@@ -2247,6 +2440,7 @@ import {
      * ------------------------------------------------------------------ */
 
     app.openLightbox = function (index) {
+        app.stopFlowPlayback(true);
         app.lightboxIndex = index;
         var lb = document.getElementById('lightbox');
         app.lightboxReturnFocus = document.activeElement === document.body ? document.getElementById('wall-canvas') : document.activeElement;
@@ -2266,27 +2460,137 @@ import {
         app.lightboxReturnFocus = null;
         if (app.lightboxObjectURL) URL.revokeObjectURL(app.lightboxObjectURL);
         app.lightboxObjectURL = '';
+        if (app.lightboxTranscodedURL) URL.revokeObjectURL(app.lightboxTranscodedURL);
+        app.lightboxTranscodedURL = '';
+        app.lightboxTranscodeToken++;
+        var img = document.getElementById('lightbox-img');
+        var video = document.getElementById('lightbox-video');
+        document.getElementById('lightbox-system-player').hidden = true;
+        document.getElementById('lightbox-browser-play').hidden = true;
+        img.removeAttribute('src');
+        video.pause();
+        video.onerror = null;
+        video.onloadeddata = null;
+        video.removeAttribute('src');
+        video.load();
         app.lightboxIndex = -1;
     };
 
     app.navigateLightbox = function (dir) {
         if (app.lightboxIndex < 0) return;
-        var n = app.wall.layout.length;
+        var n = app.photos.length;
+        if (!n) return;
         app.lightboxIndex = (app.lightboxIndex + dir + n) % n;
         app.updateLightboxImage();
     };
 
     app.updateLightboxImage = function () {
-        var item = app.wall.layout[app.lightboxIndex];
-        if (!item) return;
+        var photo = app.photos[app.lightboxIndex];
+        if (!photo) return;
         var img = document.getElementById('lightbox-img');
+        var video = document.getElementById('lightbox-video');
+        var systemPlayer = document.getElementById('lightbox-system-player');
+        var browserPlayer = document.getElementById('lightbox-browser-play');
+        systemPlayer.hidden = true;
+        browserPlayer.hidden = true;
+        browserPlayer.disabled = false;
+        browserPlayer.textContent = '浏览器转码播放';
+        systemPlayer.textContent = isNativeApp() ? '使用系统播放器' : '下载原视频';
         if (app.lightboxObjectURL) URL.revokeObjectURL(app.lightboxObjectURL);
-        app.lightboxObjectURL = URL.createObjectURL(item.photo.originalBlob || item.photo.workingBlob || item.photo.blob);
-        img.src = app.lightboxObjectURL;
+        if (app.lightboxTranscodedURL) URL.revokeObjectURL(app.lightboxTranscodedURL);
+        app.lightboxTranscodedURL = '';
+        app.lightboxTranscodeToken++;
+        app.lightboxObjectURL = URL.createObjectURL(photo.originalBlob || photo.workingBlob || photo.blob);
+        img.removeAttribute('src');
+        video.pause();
+        video.onerror = null;
+        video.onloadeddata = null;
+        video.removeAttribute('src');
+        video.load();
+        if (photo.mediaType === 'video') {
+            img.hidden = true;
+            video.hidden = false;
+            video.src = app.lightboxObjectURL;
+            video.poster = photo.workingSrc || photo.thumbnailSrc || '';
+            if (photo.posterFallback) {
+                browserPlayer.hidden = false;
+                systemPlayer.hidden = false;
+            }
+        } else {
+            video.hidden = true;
+            img.hidden = false;
+            video.removeAttribute('poster');
+            img.src = app.lightboxObjectURL;
+        }
         var info = document.getElementById('lightbox-info');
-        info.textContent = item.photo.name + '  ·  ' +
-            (item.photo.originalWidth || item.photo.workingWidth || '—') + '×' +
-            (item.photo.originalHeight || item.photo.workingHeight || '—');
+        document.getElementById('lightbox-edit').textContent = photo.mediaType === 'video' ? '调整视频封面' : '裁切与精修';
+        var seconds = Math.max(0, Math.round(photo.duration || 0));
+        var duration = photo.mediaType === 'video' && seconds ?
+            ' · ' + Math.floor(seconds / 60) + ':' + String(seconds % 60).padStart(2, '0') : '';
+        var dimensions = photo.posterFallback ? '尺寸待设备解码' :
+            (photo.originalWidth || photo.workingWidth || '—') + '×' +
+            (photo.originalHeight || photo.workingHeight || '—');
+        info.textContent = photo.name + '  ·  ' + dimensions + duration;
+        if (photo.mediaType === 'video') {
+            video.onloadeddata = function () {
+                if (!photo.posterFallback) {
+                    browserPlayer.hidden = true;
+                    systemPlayer.hidden = true;
+                }
+            };
+            video.onerror = function () {
+                if (app.photos[app.lightboxIndex] === photo) {
+                    info.textContent = photo.name + ' · 当前设备不支持此视频编码，可在浏览器内本地转码播放';
+                    browserPlayer.hidden = false;
+                    systemPlayer.hidden = false;
+                }
+            };
+        }
+    };
+
+    app.playLightboxVideoInBrowser = function () {
+        var photo = app.photos[app.lightboxIndex];
+        var source = photo && (photo.originalBlob || photo.workingBlob || photo.blob);
+        if (!photo || photo.mediaType !== 'video' || !(source instanceof Blob)) return;
+        var button = document.getElementById('lightbox-browser-play');
+        var info = document.getElementById('lightbox-info');
+        var video = document.getElementById('lightbox-video');
+        var token = ++app.lightboxTranscodeToken;
+        button.disabled = true;
+        button.textContent = '正在加载视频引擎…';
+        import('./video/BrowserVideoTranscoder.js').then(function (module) {
+            return module.transcodeVideoForBrowser(source, {
+                name: photo.name,
+                onStatus: function (status) {
+                    if (token !== app.lightboxTranscodeToken) return;
+                    button.textContent = status.message || '正在本地转码…';
+                    info.textContent = photo.name + ' · 转码仅在当前设备内完成，原文件保持不变';
+                }
+            });
+        }).then(function (playableBlob) {
+            if (token !== app.lightboxTranscodeToken || app.photos[app.lightboxIndex] !== photo) return;
+            if (app.lightboxTranscodedURL) URL.revokeObjectURL(app.lightboxTranscodedURL);
+            app.lightboxTranscodedURL = URL.createObjectURL(playableBlob);
+            video.onerror = function () {
+                if (token === app.lightboxTranscodeToken) app.toast('转码后仍无法播放，请使用系统播放器');
+            };
+            video.src = app.lightboxTranscodedURL;
+            video.load();
+            return video.play().then(function () { return true; }).catch(function () { return false; });
+        }).then(function (started) {
+            if (token !== app.lightboxTranscodeToken || !app.lightboxTranscodedURL) return;
+            button.hidden = true;
+            info.textContent = photo.name + (started ?
+                ' · 正在播放本地转码副本，原文件保持不变' :
+                ' · 转码完成，请点击视频播放；原文件保持不变');
+        }).catch(function (error) {
+            if (token !== app.lightboxTranscodeToken) return;
+            console.error('浏览器视频转码失败:', error);
+            button.disabled = false;
+            button.textContent = '重试浏览器转码';
+            info.textContent = photo.name + ' · ' + (error && error.message ? error.message : '本地转码失败');
+            document.getElementById('lightbox-system-player').hidden = false;
+        });
     };
 
     /* ------------------------------------------------------------------ *
@@ -2298,6 +2602,7 @@ import {
             app.toast('请先上传照片');
             return;
         }
+        app.stopFlowPlayback(true);
         var dialog = document.getElementById('export-dialog');
         app.exportReturnFocus = document.activeElement;
         document.querySelector('.app').inert = true;
@@ -2423,8 +2728,10 @@ import {
         context.drawImage(source, 0, 0);
         document.getElementById('export-preview-ratio').textContent = printPreset ? printPreset.name : ({
             auto: '紧贴轮廓',
-            '3:4': '3:4 常用照片',
-            '9:16': '9:16 手机竖屏'
+            '3:4': '3:4 竖版（轮廓外扩）',
+            '4:3': '4:3 横版（轮廓外扩）',
+            '9:16': '9:16 竖版（轮廓外扩）',
+            '16:9': '16:9 横版（轮廓外扩）'
         }[aspectRatio] || aspectRatio);
     };
 

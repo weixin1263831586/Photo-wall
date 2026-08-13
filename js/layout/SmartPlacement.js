@@ -33,7 +33,8 @@ function photoMetrics(photo) {
         focalOffset: Math.hypot(clamp01(photo.focusX) - 0.5, clamp01(photo.focusY) - 0.5) / Math.SQRT1_2,
         quality: clamp01(sharpness * 2.5) * 0.6 + contrast * 0.4,
         contrast: contrast,
-        importance: importance
+        importance: importance,
+        subjectScore: clamp01(photo.subjectScore)
     };
 }
 
@@ -50,6 +51,7 @@ function scoreMetrics(photo, cell) {
         0.15 * focal +
         0.20 * photo.importance;
     if (cell.isLarge) score += photo.importance ? 1.5 : photo.quality * 0.25;
+    if (cell.isBoundary) score += photo.subjectScore * 0.12;
     return score;
 }
 
@@ -90,7 +92,8 @@ export function assignPhotosToCells(photos, cells, options) {
             logAspect: Math.log(cellAspect),
             clearance: Math.min(1, (Number(cell.boundaryDistance) || 0) /
                 Math.max(1, Math.min(cell.width, cell.height) * 0.5)),
-            isLarge: cell.isLarge === true
+            isLarge: cell.isLarge === true,
+            isBoundary: cell.isBoundary === true
         };
     });
     var cellOrder = cells.map(function (_, index) { return index; }).sort(function (a, b) {

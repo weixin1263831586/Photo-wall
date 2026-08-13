@@ -29,3 +29,20 @@ test('analyzePixels locates a high-contrast subject', function () {
     assert.ok(result.focusX > 0.55);
     assert.ok(result.contrast > 0.5);
 });
+
+test('analyzePixels uses a connected skin-tone subject away from the centre', function () {
+    var width = 20, height = 20;
+    var data = new Uint8ClampedArray(width * height * 4);
+    for (var y = 0; y < height; y++) for (var x = 0; x < width; x++) {
+        var index = (y * width + x) * 4;
+        var subject = x >= 14 && x <= 18 && y >= 4 && y <= 11;
+        data[index] = subject ? 205 : 35;
+        data[index + 1] = subject ? 145 : 45;
+        data[index + 2] = subject ? 112 : 55;
+        data[index + 3] = 255;
+    }
+    var result = analyzePixels(data, width, height, width, height);
+    assert.equal(result.focusSource, 'subject');
+    assert.ok(result.focusX > 0.68);
+    assert.ok(result.focusY < 0.55);
+});

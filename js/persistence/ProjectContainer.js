@@ -45,6 +45,10 @@ function safeId(value, index) {
 function extensionForMime(mime) {
     if (mime === 'image/png') return 'png';
     if (mime === 'image/webp') return 'webp';
+    if (mime === 'video/mp4') return 'mp4';
+    if (mime === 'video/webm') return 'webm';
+    if (mime === 'video/quicktime') return 'mov';
+    if (mime === 'video/x-m4v') return 'm4v';
     return 'jpg';
 }
 
@@ -185,6 +189,13 @@ export function migrateProject(project) {
     }, project.settings || {});
     migrated.photos = project.photos.map(function (photo) {
         return Object.assign({
+            mediaType: 'image',
+            videoMime: '',
+            duration: 0,
+            posterFallback: false,
+            focusSource: 'saliency',
+            subjectScore: 0,
+            analysisVersion: 1,
             editZoom: 1,
             editOffsetX: 0,
             editOffsetY: 0,

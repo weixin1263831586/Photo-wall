@@ -41,3 +41,65 @@ test('1000-photo layout remains near its target count', function () {
     var wall = createWall(1000, true);
     assert.ok(Math.abs(wall.layout.length - 1000) / 1000 < 0.08);
 });
+
+test('a thin boundary cell grows toward visible mask pixels', function () {
+    var wall = createWall(10, false);
+    var width = 100, height = 100, stride = width + 1;
+    var integral = new Uint32Array((width + 1) * (height + 1));
+    for (var y = 1; y <= height; y++) {
+        var rowSum = 0;
+        for (var x = 1; x <= width; x++) {
+            if (x >= 45) rowSum++;
+            integral[y * stride + x] = integral[(y - 1) * stride + x] + rowSum;
+        }
+    }
+    var mask = new Uint8Array(width * height);
+    for (var my = 0; my < height; my++) for (var mx = 44; mx < width; mx++) mask[my * width + mx] = 1;
+    wall.maskData = { width: width, height: height, integral: integral, mask: mask };
+    var fitted = wall._fitBoundaryCell(35, 30, 20, 20);
+    assert.equal(fitted.isBoundary, true);
+    assert.ok(fitted.width > 20 || fitted.height > 20);
+    assert.ok(wall._rectMaskArea(fitted.x, fitted.y, fitted.width, fitted.height) > 200);
+    assert.ok(fitted.visibleFocusX > 0.5);
+});
+
+test('export ratios expand from tight bounds in both orientations', function () {
+    var wall = Object.create(PhotoWall.prototype);
+    wall.getExportBounds = function () { return { x: 20, y: 30, width: 300, height: 500 }; };
+    assert.equal(wall.getExportFrame('3:4').width / wall.getExportFrame('3:4').height, 3 / 4);
+    assert.equal(wall.getExportFrame('4:3').width / wall.getExportFrame('4:3').height, 4 / 3);
+    assert.equal(wall.getExportFrame('9:16').width / wall.getExportFrame('9:16').height, 9 / 16);
+    assert.equal(wall.getExportFrame('16:9').width / wall.getExportFrame('16:9').height, 16 / 9);
+    assert.equal(wall.getExportFrame('4:3').y + wall.getExportFrame('4:3').height / 2, 280);
+});
+
+test('slot-local photo offsets survive a layout snapshot round trip', function () {
+    var wall = createWall(8, true);
+    wall.layout[0].localOffsetX = 0.65;
+    wall.layout[0].localOffsetY = -0.4;
+    wall.layout[0].visibleFocusX = 0;
+    wall.layout[0].visibleFocusY = 0;
+    var snapshot = wall.getLayoutSnapshot();
+    wall.layout[0].localOffsetX = 0;
+    wall.layout[0].localOffsetY = 0;
+    assert.equal(wall.setLayoutSnapshot(snapshot), true);
+    assert.equal(wall.layout[0].localOffsetX, 0.65);
+    assert.equal(wall.layout[0].localOffsetY, -0.4);
+    assert.equal(wall.layout[0].visibleFocusX, 0);
+    assert.equal(wall.layout[0].visibleFocusY, 0);
+});
+
+test('flow randomization is seeded, changes assignments and preserves every slot', function () {
+    function randomized(seed) {
+        var wall = createWall(12, false);
+        wall._capturePreviousLayer = function () {};
+        wall._invalidateRenderCache = function () {};
+        var before = wall.getArrangement();
+        assert.equal(wall.randomizeAssignments(seed, 0), true);
+        var after = wall.getArrangement();
+        assert.notDeepEqual(after, before);
+        assert.deepEqual(after.slice().sort(), before.slice().sort());
+        return after;
+    }
+    assert.deepEqual(randomized(20260812), randomized(20260812));
+});

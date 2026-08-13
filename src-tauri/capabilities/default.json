@@ -9,6 +9,10 @@
     "dialog:allow-save",
     "fs:allow-write-file",
     "fs:allow-read-file",
+    {
+      "identifier": "opener:allow-open-path",
+      "allow": [{ "path": "$APPCACHE/*" }]
+    },
     "log:default"
   ]
 }

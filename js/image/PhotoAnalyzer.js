@@ -28,7 +28,9 @@ export function analyzePixels(data, width, height, naturalWidth, naturalHeight) 
     if (hue < 0) hue += 360;
 
     var meanLight = luminanceSum / count;
-    var variance = 0, edgeTotal = 0, focusWeight = 0, focusX = 0, focusY = 0;
+    var variance = 0, edgeTotal = 0, saliencyTotal = 0;
+    var saliency = new Float32Array(count);
+    var skinMask = new Uint8Array(count);
     for (var y = 0; y < height; y++) {
         for (var x = 0; x < width; x++) {
             var index = y * width + x;
@@ -38,12 +40,72 @@ export function analyzePixels(data, width, height, naturalWidth, naturalHeight) 
             if (x) edge += Math.abs(luminance[index] - luminance[index - 1]);
             if (y) edge += Math.abs(luminance[index] - luminance[index - width]);
             edgeTotal += edge;
-            var weight = 1 + edge + Math.abs(difference) * 0.3;
-            focusWeight += weight;
-            focusX += (width > 1 ? x / (width - 1) : 0.5) * weight;
-            focusY += (height > 1 ? y / (height - 1) : 0.5) * weight;
+            var weight = edge * 1.7 + Math.abs(difference) * 0.42;
+            saliency[index] = weight;
+            saliencyTotal += weight;
+            var pixel = index * 4;
+            var pr = data[pixel], pg = data[pixel + 1], pb = data[pixel + 2];
+            var colourMax = Math.max(pr, pg, pb), colourMin = Math.min(pr, pg, pb);
+            skinMask[index] = pr > 75 && pg > 35 && pb > 18 && pr > pg && pr > pb &&
+                colourMax - colourMin > 12 && Math.abs(pr - pg) > 8 ? 1 : 0;
         }
     }
+
+    // Ignore low-information background pixels. The previous constant weight
+    // on every pixel pulled virtually every focal point back to the centre.
+    var saliencyMean = saliencyTotal / count;
+    var saliencyThreshold = saliencyMean * 1.18;
+    var focusWeight = 0, focusX = 0, focusY = 0;
+    for (var sy = 0; sy < height; sy++) {
+        for (var sx = 0; sx < width; sx++) {
+            var saliencyIndex = sy * width + sx;
+            var salientWeight = Math.max(0, saliency[saliencyIndex] - saliencyThreshold);
+            if (!salientWeight) continue;
+            focusWeight += salientWeight;
+            focusX += (width > 1 ? sx / (width - 1) : 0.5) * salientWeight;
+            focusY += (height > 1 ? sy / (height - 1) : 0.5) * salientWeight;
+        }
+    }
+    var saliencyX = focusWeight ? focusX / focusWeight : 0.5;
+    var saliencyY = focusWeight ? focusY / focusWeight : 0.5;
+
+    // Find the strongest connected skin-tone region as an inexpensive,
+    // offline person/face hint when the browser FaceDetector API is absent.
+    var visited = new Uint8Array(count);
+    var bestSkin = null;
+    for (var start = 0; start < count; start++) {
+        if (!skinMask[start] || visited[start]) continue;
+        var queue = [start], cursor = 0, componentCount = 0, componentX = 0, componentY = 0, componentDetail = 0;
+        visited[start] = 1;
+        while (cursor < queue.length) {
+            var current = queue[cursor++];
+            var cx = current % width, cy = Math.floor(current / width);
+            componentCount++;
+            componentX += cx;
+            componentY += cy;
+            componentDetail += saliency[current];
+            var neighbours = [current - 1, current + 1, current - width, current + width];
+            for (var neighbourIndex = 0; neighbourIndex < neighbours.length; neighbourIndex++) {
+                var neighbour = neighbours[neighbourIndex];
+                if (neighbour < 0 || neighbour >= count || visited[neighbour] || !skinMask[neighbour]) continue;
+                var nx = neighbour % width;
+                if (Math.abs(nx - cx) > 1) continue;
+                visited[neighbour] = 1;
+                queue.push(neighbour);
+            }
+        }
+        if (componentCount < Math.max(3, count * 0.004)) continue;
+        var componentFocusX = width > 1 ? componentX / componentCount / (width - 1) : 0.5;
+        var componentFocusY = height > 1 ? componentY / componentCount / (height - 1) : 0.5;
+        var centrality = 1 - Math.min(1, Math.hypot(componentFocusX - 0.5, componentFocusY - 0.45));
+        var componentScore = componentCount * (1 + centrality * 0.2) + componentDetail / 255;
+        if (!bestSkin || componentScore > bestSkin.score) {
+            bestSkin = { x: componentFocusX, y: componentFocusY, count: componentCount, score: componentScore };
+        }
+    }
+    var hasSubject = bestSkin && bestSkin.count / count >= 0.008;
+    var detectedFocusX = hasSubject ? bestSkin.x * 0.82 + saliencyX * 0.18 : saliencyX;
+    var detectedFocusY = hasSubject ? bestSkin.y * 0.82 + saliencyY * 0.18 : saliencyY;
     return {
         r: red,
         g: green,
@@ -53,14 +115,16 @@ export function analyzePixels(data, width, height, naturalWidth, naturalHeight) 
         saturation: max ? delta / max : 0,
         contrast: Math.sqrt(variance / count) / 128,
         sharpness: edgeTotal / Math.max(1, count * 255 * 2),
-        focusX: focusWeight ? focusX / focusWeight : 0.5,
-        focusY: focusWeight ? focusY / focusWeight : 0.5,
+        focusX: detectedFocusX,
+        focusY: detectedFocusY,
+        focusSource: hasSubject ? 'subject' : 'saliency',
+        subjectScore: hasSubject ? Math.min(1, bestSkin.count / count * 4) : 0,
         aspectRatio: Math.max(1, naturalWidth || width) / Math.max(1, naturalHeight || height)
     };
 }
 
 export function analyzePhoto(img, sampleSize) {
-    var size = Math.max(8, Number(sampleSize) || 24);
+    var size = Math.max(8, Number(sampleSize) || 48);
     var canvas = document.createElement('canvas');
     canvas.width = size;
     canvas.height = size;

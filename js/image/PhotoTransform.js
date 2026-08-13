@@ -47,9 +47,8 @@ export function photoImageDimensions(image) {
     };
 }
 
-/** Draw a transformed image so the rotated source still covers the target box. */
-export function drawPhotoCover(context, image, width, height, photo) {
-    if (!context || !image || width <= 0 || height <= 0) return;
+/** Calculates a cover crop that places the detected subject at a requested target point. */
+export function photoCoverLayout(image, width, height, photo, placement) {
     var transform = normalizePhotoTransform(photo);
     var dimensions = photoImageDimensions(image);
     var radians = transform.rotation * Math.PI / 180;
@@ -57,22 +56,45 @@ export function drawPhotoCover(context, image, width, height, photo) {
     var sine = Math.abs(Math.sin(radians));
     var requiredWidth = width * cosine + height * sine;
     var requiredHeight = width * sine + height * cosine;
-    var scale = Math.max(requiredWidth / dimensions.width, requiredHeight / dimensions.height) * transform.zoom;
+    var placementZoom = clamp(placement && placement.zoom, 1, 1.5, 1);
+    var scale = Math.max(requiredWidth / dimensions.width, requiredHeight / dimensions.height) * transform.zoom * placementZoom;
     var drawWidth = dimensions.width * scale;
     var drawHeight = dimensions.height * scale;
-    var focusOffsetX = (0.5 - transform.focusX) * Math.max(0, drawWidth - requiredWidth);
-    var focusOffsetY = (0.5 - transform.focusY) * Math.max(0, drawHeight - requiredHeight);
+    placement = placement || {};
+    var targetX = clamp(placement.targetX, 0, 1, 0.5);
+    var targetY = clamp(placement.targetY, 0, 1, 0.5);
+    var localOffsetX = clamp(placement.offsetX, -1, 1, 0);
+    var localOffsetY = clamp(placement.offsetY, -1, 1, 0);
+    var desiredX = (targetX - 0.5) * requiredWidth - transform.focusX * drawWidth + localOffsetX * requiredWidth * 0.5;
+    var desiredY = (targetY - 0.5) * requiredHeight - transform.focusY * drawHeight + localOffsetY * requiredHeight * 0.5;
+    return {
+        transform: transform,
+        radians: radians,
+        requiredWidth: requiredWidth,
+        requiredHeight: requiredHeight,
+        drawWidth: drawWidth,
+        drawHeight: drawHeight,
+        drawX: clamp(desiredX, requiredWidth / 2 - drawWidth, -requiredWidth / 2, -drawWidth / 2),
+        drawY: clamp(desiredY, requiredHeight / 2 - drawHeight, -requiredHeight / 2, -drawHeight / 2)
+    };
+}
+
+/** Draw a transformed image so the rotated source still covers the target box. */
+export function drawPhotoCover(context, image, width, height, photo, placement) {
+    if (!context || !image || width <= 0 || height <= 0) return;
+    var layout = photoCoverLayout(image, width, height, photo, placement);
+    var transform = layout.transform;
 
     context.save();
     context.translate(transform.offsetX * width * 0.5, transform.offsetY * height * 0.5);
-    context.rotate(radians);
+    context.rotate(layout.radians);
     context.scale(transform.flipX ? -1 : 1, transform.flipY ? -1 : 1);
     context.drawImage(
         image,
-        -drawWidth / 2 + focusOffsetX,
-        -drawHeight / 2 + focusOffsetY,
-        drawWidth,
-        drawHeight
+        layout.drawX,
+        layout.drawY,
+        layout.drawWidth,
+        layout.drawHeight
     );
     context.restore();
 }

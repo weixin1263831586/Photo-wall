@@ -46,10 +46,14 @@ import { drawOverlays, getOverlayAt } from './overlay/OverlayRenderer.js';
         this.hoveredIndex = -1;
         this.draggingIndex = -1;
         this.dragOverIndex = -1;
+        this.interactionMode = 'swap';
+        this.localAdjustIndex = -1;
         this.pointer = null;
         this.onPhotoClick = null;
         this.onBeforeSwap = null;
         this.onSwap = null;
+        this.onBeforeLocalAdjust = null;
+        this.onLocalAdjust = null;
         this.onLayout = null;
         this._animStart = 0;
         this._animRAF = null;
@@ -61,9 +65,14 @@ import { drawOverlays, getOverlayAt } from './overlay/OverlayRenderer.js';
         this._layerContext = this._layerCanvas.getContext('2d');
         this._stagingCanvas = document.createElement('canvas');
         this._stagingContext = this._stagingCanvas.getContext('2d');
+        this._previousLayerCanvas = document.createElement('canvas');
+        this._previousLayerContext = this._previousLayerCanvas.getContext('2d');
         this._composeRevision = -1;
         this._composePromise = null;
         this._hasComposedLayer = false;
+        this._transitionPendingDuration = 0;
+        this._transitionProgress = 1;
+        this._transitionRAF = null;
         this._bindEvents();
     }
 
@@ -87,6 +96,9 @@ import { drawOverlays, getOverlayAt } from './overlay/OverlayRenderer.js';
         this._layerCanvas.height = this.canvas.height;
         this._stagingCanvas.width = this.canvas.width;
         this._stagingCanvas.height = this.canvas.height;
+        this._previousLayerCanvas.width = this.canvas.width;
+        this._previousLayerCanvas.height = this.canvas.height;
+        this._cancelLayerTransition();
         this._hasComposedLayer = false;
         this._invalidateRenderCache();
         this.ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
@@ -105,6 +117,16 @@ import { drawOverlays, getOverlayAt } from './overlay/OverlayRenderer.js';
     PhotoWall.prototype.setPhotos = function (photos) {
         this.photos = photos || [];
         if (this.shape) this.generateLayout();
+    };
+    PhotoWall.prototype.setInteractionMode = function (mode) {
+        this.interactionMode = mode === 'adjust' ? 'adjust' : 'swap';
+        this._pointerDown = null;
+        this.draggingIndex = -1;
+        this.dragOverIndex = -1;
+        this.localAdjustIndex = -1;
+        this.pointer = null;
+        this.canvas.style.cursor = this.interactionMode === 'adjust' ? 'move' : 'default';
+        this.render();
     };
     PhotoWall.prototype.setDensity = function (value) {
         this.density = value;
@@ -149,6 +171,35 @@ import { drawOverlays, getOverlayAt } from './overlay/OverlayRenderer.js';
     };
     PhotoWall.prototype.shuffle = function () {
         this.nextLayoutVariant();
+    };
+    PhotoWall.prototype.randomizeAssignments = function (seed, transitionDuration) {
+        if (this.layout.length < 2) return false;
+        seed = normalizeSeed(seed === undefined ? this.layoutSeed + 1 : seed);
+        this.layoutSeed = seed;
+        var random = createSeededRandom(seed);
+        var assignments = this.layout.map(function (item) {
+            return { photo: item.photo, photoIndex: item.photoIndex, photoId: item.photoId };
+        });
+        for (var index = assignments.length - 1; index > 0; index--) {
+            var target = Math.floor(random() * (index + 1));
+            var temporary = assignments[index];
+            assignments[index] = assignments[target];
+            assignments[target] = temporary;
+        }
+        var unchanged = assignments.every(function (assignment, index) {
+            return assignment.photoId === this.layout[index].photoId;
+        }, this);
+        if (unchanged) assignments.push(assignments.shift());
+
+        this._capturePreviousLayer(Math.max(0, Number(transitionDuration) || 0));
+        this.layout.forEach(function (item, index) {
+            item.photo = assignments[index].photo;
+            item.photoIndex = assignments[index].photoIndex;
+            item.photoId = assignments[index].photoId;
+        });
+        this._invalidateRenderCache();
+        this.render();
+        return true;
     };
     PhotoWall.prototype.setLayoutSeed = function (value, regenerate) {
         this.layoutSeed = normalizeSeed(value);
@@ -238,6 +289,82 @@ import { drawOverlays, getOverlayAt } from './overlay/OverlayRenderer.js';
         return a[y2 * stride + x2] - a[y1 * stride + x2] - a[y2 * stride + x1] + a[y1 * stride + x1];
     };
 
+    PhotoWall.prototype._visibleMaskCentroid = function (x, y, width, height) {
+        var md = this.maskData;
+        if (!md || !md.mask) return { x: 0.5, y: 0.5 };
+        var x1 = Math.max(0, Math.floor(x)), y1 = Math.max(0, Math.floor(y));
+        var x2 = Math.min(md.width, Math.ceil(x + width)), y2 = Math.min(md.height, Math.ceil(y + height));
+        var count = 0, sumX = 0, sumY = 0;
+        for (var py = y1; py < y2; py++) {
+            for (var px = x1; px < x2; px++) {
+                if (!md.mask[py * md.width + px]) continue;
+                count++;
+                sumX += px + 0.5;
+                sumY += py + 0.5;
+            }
+        }
+        return count ? {
+            x: Math.max(0.05, Math.min(0.95, (sumX / count - x) / Math.max(1, width))),
+            y: Math.max(0.05, Math.min(0.95, (sumY / count - y) / Math.max(1, height)))
+        } : { x: 0.5, y: 0.5 };
+    };
+
+    PhotoWall.prototype._fitBoundaryCell = function (x, y, width, height) {
+        var cellArea = Math.max(1, width * height);
+        var visible = this._rectMaskArea(x, y, width, height);
+        var coverage = visible / cellArea;
+        if (coverage >= 0.62) {
+            var directCentroid = this._visibleMaskCentroid(x, y, width, height);
+            return {
+                x: x, y: y, width: width, height: height, coverage: coverage,
+                isBoundary: coverage < 0.9, visibleFocusX: directCentroid.x, visibleFocusY: directCentroid.y
+            };
+        }
+
+        // Keep the original edge cell covered, then grow it toward nearby
+        // interior mask pixels. This turns tiny contour slivers into useful,
+        // organically sized photo windows without punching holes in the mask.
+        var grow = [0, 0.35, 0.65];
+        var best = { x: x, y: y, width: width, height: height, coverage: coverage, visible: visible, score: coverage * 0.28 };
+        for (var leftIndex = 0; leftIndex < grow.length; leftIndex++) {
+            for (var rightIndex = 0; rightIndex < grow.length; rightIndex++) {
+                var leftGrow = grow[leftIndex] * width;
+                var rightGrow = grow[rightIndex] * width;
+                for (var topIndex = 0; topIndex < grow.length; topIndex++) {
+                    for (var bottomIndex = 0; bottomIndex < grow.length; bottomIndex++) {
+                        var topGrow = grow[topIndex] * height;
+                        var bottomGrow = grow[bottomIndex] * height;
+                        var candidateX = x - leftGrow, candidateY = y - topGrow;
+                        var candidateWidth = width + leftGrow + rightGrow;
+                        var candidateHeight = height + topGrow + bottomGrow;
+                        var candidateArea = candidateWidth * candidateHeight;
+                        var candidateVisible = this._rectMaskArea(candidateX, candidateY, candidateWidth, candidateHeight);
+                        var candidateCoverage = candidateVisible / Math.max(1, candidateArea);
+                        var visibleGain = (candidateVisible - visible) / cellArea;
+                        var expansion = candidateArea / cellArea - 1;
+                        var score = visibleGain * 0.78 + candidateCoverage * 0.28 - expansion * 0.035;
+                        if (score > best.score && candidateVisible > visible * 1.2) {
+                            best = {
+                                x: candidateX,
+                                y: candidateY,
+                                width: candidateWidth,
+                                height: candidateHeight,
+                                coverage: candidateCoverage,
+                                visible: candidateVisible,
+                                score: score
+                            };
+                        }
+                    }
+                }
+            }
+        }
+        best.isBoundary = true;
+        var centroid = this._visibleMaskCentroid(best.x, best.y, best.width, best.height);
+        best.visibleFocusX = centroid.x;
+        best.visibleFocusY = centroid.y;
+        return best;
+    };
+
     PhotoWall.prototype._buildCells = function (cellSize) {
         var b = this.maskData.bounds, cells = [];
         var cols = Math.max(1, Math.ceil(b.width / cellSize));
@@ -250,26 +377,31 @@ import { drawOverlays, getOverlayAt } from './overlay/OverlayRenderer.js';
             for (var col = 0; col < cols + extra; col++) {
                 var x = b.x + col * cellW + shift, y = b.y + row * cellH;
                 if (this._rectMaskArea(x, y, cellW, cellH) === 0) continue;
+                var fitted = this._fitBoundaryCell(x, y, cellW, cellH);
                 var jitterX = 0, jitterY = 0;
-                if (this.placementMode === 'organic') {
+                if (this.placementMode === 'organic' && !fitted.isBoundary) {
                     var seed = mixSeed(this.layoutSeed,
                         ((row + 1) * 73856093 ^ (col + 1) * 19349663) >>> 0);
                     jitterX = ((seed % 101) / 100 - 0.5) * cellW * 0.22;
                     jitterY = (((seed >> 8) % 101) / 100 - 0.5) * cellH * 0.22;
                 }
                 cells.push({
-                    x: x + cellW / 2 + jitterX,
-                    y: y + cellH / 2 + jitterY,
-                    baseX: x,
-                    baseY: y,
-                    width: cellW,
-                    height: cellH,
-                    size: Math.max(cellW, cellH),
+                    x: fitted.x + fitted.width / 2 + jitterX,
+                    y: fitted.y + fitted.height / 2 + jitterY,
+                    baseX: fitted.x,
+                    baseY: fitted.y,
+                    width: fitted.width,
+                    height: fitted.height,
+                    size: Math.max(fitted.width, fitted.height),
                     row: row,
                     col: col,
                     isLarge: false,
+                    isBoundary: fitted.isBoundary === true,
+                    maskCoverage: fitted.coverage,
+                    visibleFocusX: fitted.visibleFocusX,
+                    visibleFocusY: fitted.visibleFocusY,
                     boundaryDistance: sampleDistance(this.maskData.distance, this.maskData.width, this.maskData.height,
-                        x + cellW / 2, y + cellH / 2)
+                        fitted.x + fitted.width / 2, fitted.y + fitted.height / 2)
                 });
             }
         }
@@ -288,6 +420,7 @@ import { drawOverlays, getOverlayAt } from './overlay/OverlayRenderer.js';
         var candidates = [];
 
         cells.forEach(function (cell) {
+            if (cell.isBoundary) return;
             var group = [];
             for (var rowOffset = 0; rowOffset < spanRows; rowOffset++) {
                 for (var colOffset = 0; colOffset < spanCols; colOffset++) {
@@ -443,7 +576,7 @@ import { drawOverlays, getOverlayAt } from './overlay/OverlayRenderer.js';
             cell.photo = this.photos[photoIndex];
             cell.photoId = cell.photo.id;
             cell.rotation = this.rotationRange ? unitRotation * this.rotationRange : 0;
-            cell.zIndex = index;
+            cell.zIndex = cell.isBoundary ? index - cells.length : index;
             return cell;
         }, this);
     };
@@ -463,6 +596,44 @@ import { drawOverlays, getOverlayAt } from './overlay/OverlayRenderer.js';
             else { self._animRAF = null; self.render(); }
         }
         this._animRAF = requestAnimationFrame(frame);
+    };
+
+    PhotoWall.prototype._cancelLayerTransition = function () {
+        if (this._transitionRAF) cancelAnimationFrame(this._transitionRAF);
+        this._transitionRAF = null;
+        this._transitionPendingDuration = 0;
+        this._transitionProgress = 1;
+    };
+
+    PhotoWall.prototype._capturePreviousLayer = function (duration) {
+        this._cancelLayerTransition();
+        if (!duration || !this._hasComposedLayer || !this._layerCanvas.width) return;
+        var previous = this._previousLayerCanvas;
+        if (previous.width !== this._layerCanvas.width || previous.height !== this._layerCanvas.height) {
+            previous.width = this._layerCanvas.width;
+            previous.height = this._layerCanvas.height;
+        }
+        this._previousLayerContext.setTransform(1, 0, 0, 1, 0, 0);
+        this._previousLayerContext.clearRect(0, 0, previous.width, previous.height);
+        this._previousLayerContext.drawImage(this._layerCanvas, 0, 0);
+        this._transitionPendingDuration = duration;
+        this._transitionProgress = 0;
+    };
+
+    PhotoWall.prototype._startLayerTransition = function () {
+        var duration = this._transitionPendingDuration;
+        if (!duration) return;
+        this._transitionPendingDuration = 0;
+        var self = this;
+        var startedAt = performance.now();
+        function frame(now) {
+            var elapsed = Math.max(0, now - startedAt);
+            self._transitionProgress = Math.min(1, elapsed / duration);
+            self.render();
+            if (self._transitionProgress < 1) self._transitionRAF = requestAnimationFrame(frame);
+            else self._transitionRAF = null;
+        }
+        this._transitionRAF = requestAnimationFrame(frame);
     };
 
     PhotoWall.prototype.render = function (progress, exportMode) {
@@ -508,7 +679,24 @@ import { drawOverlays, getOverlayAt } from './overlay/OverlayRenderer.js';
             lx.globalCompositeOperation = 'source-over';
             if (cacheable) this._cachedLayerRevision = this._renderRevision;
         }
-        if (!this.assetManager || this._hasComposedLayer) ctx.drawImage(layer, 0, 0, w, h);
+        if (!this.assetManager || this._hasComposedLayer) {
+            if (this._transitionProgress < 1 && this._previousLayerCanvas.width) {
+                ctx.drawImage(this._previousLayerCanvas, 0, 0, w, h);
+                ctx.save();
+                ctx.globalAlpha = 1 - Math.pow(1 - this._transitionProgress, 2);
+                ctx.drawImage(layer, 0, 0, w, h);
+                ctx.restore();
+            } else {
+                ctx.drawImage(layer, 0, 0, w, h);
+            }
+        }
+        if (!exportMode && this.localAdjustIndex >= 0 && this.layout[this.localAdjustIndex]) {
+            this._drawPhoto(ctx, this.layout[this.localAdjustIndex], false, 1, false);
+            ctx.save();
+            ctx.globalCompositeOperation = 'destination-in';
+            ctx.drawImage(this.maskData.maskCanvas, 0, 0, w, h);
+            ctx.restore();
+        }
         drawOverlays(ctx, this.overlays, w, h, { bounds: this.getExportBounds() });
 
         // Hovering and dragging used to redraw every photo on every pointer
@@ -605,6 +793,7 @@ import { drawOverlays, getOverlayAt } from './overlay/OverlayRenderer.js';
             self._cachedLayerRevision = revision;
             self._hasComposedLayer = true;
             self.photos.forEach(function (photo) { self.assetManager.releaseElement(photo); });
+            self._startLayerTransition();
             self.render();
             return true;
         }).finally(function () {
@@ -629,7 +818,21 @@ import { drawOverlays, getOverlayAt } from './overlay/OverlayRenderer.js';
         }
         this._photoPath(ctx, 0, 0, width, height);
         ctx.clip();
-        drawPhotoCover(ctx, img, width, height, item.photo);
+        var localOffsetX = Math.max(-1, Math.min(1, Number(item.localOffsetX) || 0));
+        var localOffsetY = Math.max(-1, Math.min(1, Number(item.localOffsetY) || 0));
+        var visibleFocusX = Number(item.visibleFocusX);
+        var visibleFocusY = Number(item.visibleFocusY);
+        var maskCoverage = Number(item.maskCoverage);
+        var placement = {
+            targetX: item.isBoundary && Number.isFinite(visibleFocusX) ? visibleFocusX : 0.5,
+            targetY: item.isBoundary && Number.isFinite(visibleFocusY) ? visibleFocusY : 0.5,
+            offsetX: localOffsetX,
+            offsetY: localOffsetY,
+            zoom: item.isBoundary ?
+                1.12 + Math.max(0, 0.75 - (Number.isFinite(maskCoverage) ? maskCoverage : 0.75)) * 0.4 :
+                (Math.abs(localOffsetX) + Math.abs(localOffsetY) > 0.01 ? 1.12 : 1)
+        };
+        drawPhotoCover(ctx, img, width, height, item.photo, placement);
         if (hovered || dropTarget) {
             ctx.shadowColor = 'transparent'; ctx.lineWidth = 2;
             ctx.strokeStyle = dropTarget ? '#60e1be' : '#a99cff';
@@ -696,7 +899,7 @@ import { drawOverlays, getOverlayAt } from './overlay/OverlayRenderer.js';
 
     PhotoWall.prototype.getExportFrame = function (aspectRatio) {
         var bounds = this.getExportBounds();
-        var ratios = { '3:4': 3 / 4, '9:16': 9 / 16 };
+        var ratios = { '3:4': 3 / 4, '4:3': 4 / 3, '9:16': 9 / 16, '16:9': 16 / 9 };
         var targetRatio = ratios[aspectRatio];
         if (!targetRatio) return bounds;
 
@@ -721,7 +924,7 @@ import { drawOverlays, getOverlayAt } from './overlay/OverlayRenderer.js';
     PhotoWall.prototype.getExportDimensions = function (scale, aspectRatio) {
         scale = Math.max(0.1, Math.min(3, Number(scale) || 2));
         var bounds = this.getExportFrame(aspectRatio);
-        var ratioUnits = { '3:4': [3, 4], '9:16': [9, 16] }[aspectRatio];
+        var ratioUnits = { '3:4': [3, 4], '4:3': [4, 3], '9:16': [9, 16], '16:9': [16, 9] }[aspectRatio];
         if (ratioUnits) {
             var unit = Math.ceil(Math.max(
                 bounds.width * scale / ratioUnits[0],
@@ -891,6 +1094,12 @@ import { drawOverlays, getOverlayAt } from './overlay/OverlayRenderer.js';
                     row: item.row,
                     col: item.col,
                     isLarge: item.isLarge === true,
+                    isBoundary: item.isBoundary === true,
+                    maskCoverage: item.maskCoverage,
+                    visibleFocusX: item.visibleFocusX,
+                    visibleFocusY: item.visibleFocusY,
+                    localOffsetX: Number(item.localOffsetX) || 0,
+                    localOffsetY: Number(item.localOffsetY) || 0,
                     spanRows: item.spanRows,
                     spanCols: item.spanCols,
                     boundaryDistance: item.boundaryDistance
@@ -929,10 +1138,30 @@ import { drawOverlays, getOverlayAt } from './overlay/OverlayRenderer.js';
                 row: Number(saved.row) || 0,
                 col: Number(saved.col) || 0,
                 isLarge: saved.isLarge === true,
+                isBoundary: saved.isBoundary === true,
+                maskCoverage: Math.max(0, Math.min(1, Number(saved.maskCoverage) || 0)),
+                visibleFocusX: Number.isFinite(Number(saved.visibleFocusX)) ?
+                    Math.max(0, Math.min(1, Number(saved.visibleFocusX))) : 0.5,
+                visibleFocusY: Number.isFinite(Number(saved.visibleFocusY)) ?
+                    Math.max(0, Math.min(1, Number(saved.visibleFocusY))) : 0.5,
+                localOffsetX: Math.max(-1, Math.min(1, Number(saved.localOffsetX) || 0)),
+                localOffsetY: Math.max(-1, Math.min(1, Number(saved.localOffsetY) || 0)),
                 spanRows: Number(saved.spanRows) || 1,
                 spanCols: Number(saved.spanCols) || 1,
                 boundaryDistance: Math.max(0, Number(saved.boundaryDistance) || 0)
             };
+            var itemLeft = item.x - item.width / 2;
+            var itemTop = item.y - item.height / 2;
+            if (!Number.isFinite(Number(saved.maskCoverage))) {
+                item.maskCoverage = this._rectMaskArea(itemLeft, itemTop, item.width, item.height) /
+                    Math.max(1, item.width * item.height);
+            }
+            item.isBoundary = saved.isBoundary === true || item.maskCoverage < 0.9;
+            if (item.isBoundary && (!Number.isFinite(Number(saved.visibleFocusX)) || !Number.isFinite(Number(saved.visibleFocusY)))) {
+                var visibleCentroid = this._visibleMaskCentroid(itemLeft, itemTop, item.width, item.height);
+                item.visibleFocusX = visibleCentroid.x;
+                item.visibleFocusY = visibleCentroid.y;
+            }
             item.size = Math.max(item.width, item.height);
             restored.push(item);
         }, this);
@@ -999,7 +1228,12 @@ import { drawOverlays, getOverlayAt } from './overlay/OverlayRenderer.js';
             }
             var idx = self.getPhotoAt(p.x, p.y);
             if (idx < 0) return;
-            self._pointerDown = { x: p.x, y: p.y, index: idx, time: Date.now() };
+            var selected = self.layout[idx];
+            self._pointerDown = {
+                x: p.x, y: p.y, index: idx, time: Date.now(), adjusted: false,
+                localOffsetX: Number(selected.localOffsetX) || 0,
+                localOffsetY: Number(selected.localOffsetY) || 0
+            };
             self.canvas.setPointerCapture(e.pointerId);
         });
         this.canvas.addEventListener('pointermove', function (e) {
@@ -1021,6 +1255,23 @@ import { drawOverlays, getOverlayAt } from './overlay/OverlayRenderer.js';
             }
             if (self._pointerDown) {
                 var moved = Math.hypot(p.x - self._pointerDown.x, p.y - self._pointerDown.y);
+                if (self.interactionMode === 'adjust') {
+                    var adjustedItem = self.layout[self._pointerDown.index];
+                    if (moved > 3 && !self._pointerDown.adjusted) {
+                        self._pointerDown.adjusted = true;
+                        self.localAdjustIndex = self._pointerDown.index;
+                        if (self.onBeforeLocalAdjust) self.onBeforeLocalAdjust(self._pointerDown.index);
+                    }
+                    if (self._pointerDown.adjusted && adjustedItem) {
+                        adjustedItem.localOffsetX = Math.max(-1, Math.min(1,
+                            self._pointerDown.localOffsetX + (p.x - self._pointerDown.x) / Math.max(20, adjustedItem.width * 0.5)));
+                        adjustedItem.localOffsetY = Math.max(-1, Math.min(1,
+                            self._pointerDown.localOffsetY + (p.y - self._pointerDown.y) / Math.max(20, adjustedItem.height * 0.5)));
+                        self.canvas.style.cursor = 'grabbing';
+                        self.render();
+                    }
+                    return;
+                }
                 if (moved > 5 && self.draggingIndex < 0) self.draggingIndex = self._pointerDown.index;
                 if (self.draggingIndex >= 0) {
                     self.pointer = p;
@@ -1031,7 +1282,8 @@ import { drawOverlays, getOverlayAt } from './overlay/OverlayRenderer.js';
             }
             var hover = self.getPhotoAt(p.x, p.y);
             if (hover !== self.hoveredIndex) {
-                self.hoveredIndex = hover; self.canvas.style.cursor = hover >= 0 ? 'grab' : 'default';
+                self.hoveredIndex = hover;
+                self.canvas.style.cursor = hover >= 0 ? (self.interactionMode === 'adjust' ? 'move' : 'grab') : 'default';
                 if (!self._animRAF) self.render();
             }
         });
@@ -1047,6 +1299,20 @@ import { drawOverlays, getOverlayAt } from './overlay/OverlayRenderer.js';
             }
             if (!self._pointerDown) return;
             var source = self._pointerDown.index, target = self.dragOverIndex;
+            if (self.interactionMode === 'adjust') {
+                var wasAdjusted = self._pointerDown.adjusted;
+                self._pointerDown = null;
+                self.localAdjustIndex = -1;
+                self.canvas.style.cursor = 'move';
+                if (wasAdjusted) {
+                    self._invalidateRenderCache();
+                    if (self.onLocalAdjust) self.onLocalAdjust(source);
+                }
+                else if (!wasAdjusted && self.onPhotoClick) self.onPhotoClick(self.layout[source], source);
+                self.render();
+                try { self.canvas.releasePointerCapture(e.pointerId); } catch (ignore) {}
+                return;
+            }
             var wasDrag = self.draggingIndex >= 0;
             if (wasDrag && target >= 0) {
                 if (self.onBeforeSwap) self.onBeforeSwap(source, target);

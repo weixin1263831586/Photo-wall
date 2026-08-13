@@ -60,15 +60,15 @@
 
         <!-- Upload -->
         <section class="panel">
-            <h3 class="panel-title">上传照片</h3>
+            <h3 class="panel-title">上传素材</h3>
             <div class="drop-zone" id="drop-zone">
                 <div class="drop-zone-icon">📁</div>
-                <p class="drop-zone-text">点击或拖放照片到这里</p>
-                <p class="drop-zone-hint">JPG / PNG / WebP · 最多 1000 张 · 单张 40 MB</p>
+                <p class="drop-zone-text">点击或拖放照片、视频到这里</p>
+                <p class="drop-zone-hint">照片 + 视频混合 · 照片 40 MB / 视频 200 MB · 最多 1000 个素材</p>
             </div>
-            <input type="file" id="file-input" multiple accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp" hidden>
+            <input type="file" id="file-input" multiple accept=".jpg,.jpeg,.png,.webp,.mp4,.webm,.mov,.m4v,image/jpeg,image/png,image/webp,video/mp4,video/webm,video/quicktime,video/x-m4v" hidden>
             <div class="photo-count-bar">
-                已上传 <strong id="photo-count">0</strong> 张照片
+                已上传 <strong id="photo-count">0</strong> 个素材
             </div>
         </section>
 
@@ -202,7 +202,7 @@
         <header class="workspace-bar" aria-label="画布工具栏">
             <div class="canvas-status-wrap">
                 <span class="status-dot"></span>
-                <span id="canvas-status">所有照片仅在本地处理</span>
+                <span id="canvas-status">所有素材仅在本地处理</span>
             </div>
             <div class="workspace-actions">
                 <div class="history-actions" aria-label="历史操作">
@@ -227,7 +227,7 @@
                 </button>
                 <button class="toolbar-btn" id="add-photos-btn" type="button">
                     <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
-                    <span>添加照片</span>
+                    <span>添加素材</span>
                 </button>
                 <button class="toolbar-btn" id="shuffle-btn" type="button" disabled>
                     <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16 3h5v5M4 20l5.5-5.5M21 16v5h-5M15 5l-11 11M14.5 14.5 21 21"/></svg>
@@ -240,16 +240,32 @@
             </div>
             <input type="file" id="project-file-input" accept=".photowall,.photowall.json,.json,application/x-photowall,application/json" hidden>
         </header>
-        <div class="canvas-help" id="canvas-help">拖拽照片可交换位置 · 点击照片可查看原图</div>
+        <div class="canvas-help" id="canvas-help">拖拽素材可交换位置 · 开启局部调图后可在格位内移动人物</div>
         <div class="canvas-stage" id="canvas-stage">
+            <div class="canvas-motion-controls" id="canvas-motion-controls" aria-label="画布交互与播放">
+                <button class="canvas-control-btn" id="position-mode-btn" type="button" aria-pressed="false" disabled>
+                    <span aria-hidden="true">✥</span><span>局部调图</span>
+                </button>
+                <button class="canvas-control-btn" id="flow-play-btn" type="button" aria-pressed="false" disabled>
+                    <span aria-hidden="true" id="flow-play-icon">▶</span><span id="flow-play-label">流动播放</span>
+                </button>
+                <label class="flow-speed-field" for="flow-speed">
+                    <span>速度</span>
+                    <select id="flow-speed" disabled>
+                        <option value="slow">慢</option>
+                        <option value="normal" selected>中</option>
+                        <option value="fast">快</option>
+                    </select>
+                </label>
+            </div>
             <canvas id="wall-canvas" tabindex="0" aria-label="照片墙编辑画布，点击照片可查看原图"></canvas>
             <div class="empty-state" id="empty-state">
                 <div class="empty-visual" aria-hidden="true">
                     <svg viewBox="0 0 72 72"><rect x="9" y="14" width="54" height="44" rx="8"/><circle cx="27" cy="30" r="5"/><path d="M14 52l15-14 10 9 7-6 12 11"/></svg>
                 </div>
                 <p>把照片变成专属拼贴墙</p>
-                <p class="empty-hint">拖放照片到画布，或点击下方按钮开始</p>
-                <button class="btn btn-primary empty-upload-btn" id="empty-upload-btn" type="button">选择照片</button>
+                <p class="empty-hint">拖放照片或视频到画布，或点击下方按钮开始</p>
+                <button class="btn btn-primary empty-upload-btn" id="empty-upload-btn" type="button">选择素材</button>
             </div>
         </div>
     </main>
@@ -322,8 +338,10 @@
                 <legend>画布比例</legend>
                 <div class="option-segments" id="export-aspect-options">
                     <label><input type="radio" name="export-aspect" value="auto" checked><span>紧贴轮廓<small>最少空白</small></span></label>
-                    <label><input type="radio" name="export-aspect" value="3:4"><span>3:4<small>常用照片</small></span></label>
+                    <label><input type="radio" name="export-aspect" value="3:4"><span>3:4<small>竖版照片</small></span></label>
+                    <label><input type="radio" name="export-aspect" value="4:3"><span>4:3<small>横版照片</small></span></label>
                     <label><input type="radio" name="export-aspect" value="9:16"><span>9:16<small>手机竖屏</small></span></label>
+                    <label><input type="radio" name="export-aspect" value="16:9"><span>16:9<small>手机横屏</small></span></label>
                 </div>
             </fieldset>
             <fieldset class="export-field">
@@ -427,13 +445,16 @@
 </div>
 
 <!-- ======================== Lightbox ======================== -->
-<div class="lightbox" id="lightbox" role="dialog" aria-modal="true" aria-label="照片原图预览" aria-hidden="true">
+<div class="lightbox" id="lightbox" role="dialog" aria-modal="true" aria-label="照片与视频原始素材预览" aria-hidden="true">
     <button class="lb-close" id="lightbox-close" type="button" title="关闭 (Esc)" aria-label="关闭照片预览">×</button>
     <button class="lb-nav lb-prev" id="lightbox-prev" type="button" title="上一张 (←)" aria-label="上一张照片">‹</button>
     <button class="lb-nav lb-next" id="lightbox-next" type="button" title="下一张 (→)" aria-label="下一张照片">›</button>
     <div class="lb-content">
         <img id="lightbox-img" src="" alt="放大查看">
+        <video id="lightbox-video" controls playsinline preload="metadata" hidden aria-label="视频预览"></video>
         <p class="lb-info" id="lightbox-info"></p>
+        <button class="btn btn-primary" id="lightbox-browser-play" type="button" hidden>浏览器转码播放</button>
+        <button class="btn btn-ghost" id="lightbox-system-player" type="button" hidden>使用系统播放器</button>
         <button class="btn btn-primary" id="lightbox-edit" type="button">裁切与精修</button>
     </div>
 </div>
@@ -475,9 +496,9 @@
                     <button class="btn btn-ghost" id="photo-edit-flip-y" type="button" aria-pressed="false">垂直翻转</button>
                 </div>
                 <div class="photo-edit-actions-row">
-                    <button class="btn btn-ghost" id="photo-edit-replace" type="button">替换照片</button>
+                    <button class="btn btn-ghost" id="photo-edit-replace" type="button">替换素材</button>
                     <button class="btn btn-ghost" id="photo-edit-reset" type="button">重置调整</button>
-                    <input type="file" id="photo-edit-file" accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp" hidden>
+                    <input type="file" id="photo-edit-file" accept=".jpg,.jpeg,.png,.webp,.mp4,.webm,.mov,.m4v,image/jpeg,image/png,image/webp,video/mp4,video/webm,video/quicktime,video/x-m4v" hidden>
                 </div>
             </div>
         </div>

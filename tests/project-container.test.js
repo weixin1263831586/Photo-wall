@@ -45,3 +45,21 @@ test('v1 JSON projects migrate with safe editing defaults', function () {
     assert.equal(migrated.photos[0].editZoom, 1);
     assert.deepEqual(migrated.overlays, []);
 });
+
+test('photowall v2 preserves an original video and its poster metadata', async function () {
+    var videoBlob = new Blob(['original-video-bytes'], { type: 'video/mp4' });
+    var posterBlob = new Blob(['poster'], { type: 'image/webp' });
+    var project = {
+        format: 'photo-wall-project',
+        version: 2,
+        photos: [{ id: 'video-1', name: 'clip.mp4', mediaType: 'video', duration: 12.5 }]
+    };
+    var archive = await createProjectContainer(project, [{
+        id: 'video-1', originalBlob: videoBlob, thumbnailBlob: posterBlob
+    }]);
+    var restored = await openProjectContainer(archive);
+    assert.equal(restored.project.photos[0].mediaType, 'video');
+    assert.equal(restored.project.photos[0].duration, 12.5);
+    assert.equal(restored.project.photos[0].originalBlob.type, 'video/mp4');
+    assert.equal(await restored.project.photos[0].originalBlob.text(), 'original-video-bytes');
+});
