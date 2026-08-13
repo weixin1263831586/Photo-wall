@@ -1,0 +1,98 @@
+function extensionFor(blob, fallback) {
+    var type = String(blob && blob.type || '').toLowerCase();
+    if (type.indexOf('webm') >= 0) return 'webm';
+    if (type.indexOf('quicktime') >= 0) return 'mov';
+    if (type.indexOf('wav') >= 0) return 'wav';
+    if (type.indexOf('mpeg') >= 0) return 'mp3';
+    if (type.indexOf('ogg') >= 0) return 'ogg';
+    if (type.indexOf('aac') >= 0) return 'aac';
+    if (type.indexOf('audio/mp4') >= 0) return 'm4a';
+    return fallback || 'mp4';
+}
+
+function nativeRuntimeAvailable() {
+    return typeof window !== 'undefined' && Boolean(window.__TAURI_INTERNALS__);
+}
+
+async function removeQuietly(filesystem, path) {
+    if (!path) return;
+    try { await filesystem.remove(path); } catch (ignore) {}
+}
+
+/**
+ * Uses the Tauri native-video plugin when available. The recorded browser
+ * stream is staged in the app cache, transcoded by the platform media stack,
+ * read back once, and then removed. Any unsupported codec/device falls back
+ * to the existing ffmpeg.wasm path.
+ */
+export async function transcodeVideoForPlatform(blob, options) {
+    options = options || {};
+    if (!nativeRuntimeAvailable()) {
+        var browser = await import('./BrowserVideoTranscoder.js');
+        return browser.transcodeVideoForBrowser(blob, options);
+    }
+
+    var filesystem;
+    var inputPath = '';
+    var outputPath = '';
+    var audioPath = '';
+    try {
+        var modules = await Promise.all([
+            import('@tauri-apps/api/core'),
+            import('@tauri-apps/api/path'),
+            import('@tauri-apps/plugin-fs')
+        ]);
+        var invoke = modules[0].invoke;
+        var pathAPI = modules[1];
+        filesystem = modules[2];
+        var capabilities = await invoke('plugin:native-video|capabilities');
+        if (!capabilities || !capabilities.available) throw new Error('当前系统没有可用的原生编码器');
+
+        var cacheDirectory = await pathAPI.appCacheDir();
+        var jobId = Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
+        inputPath = await pathAPI.join(cacheDirectory, 'native-video-' + jobId + '.' + extensionFor(blob, 'webm'));
+        outputPath = await pathAPI.join(cacheDirectory, 'native-video-' + jobId + '.mp4');
+        await filesystem.writeFile(inputPath, new Uint8Array(await blob.arrayBuffer()));
+
+        var music = options.backgroundMusic;
+        var musicBlob = music && (music.originalBlob || music.blob);
+        if (musicBlob instanceof Blob) {
+            audioPath = await pathAPI.join(cacheDirectory, 'native-audio-' + jobId + '.' + extensionFor(musicBlob, 'wav'));
+            await filesystem.writeFile(audioPath, new Uint8Array(await musicBlob.arrayBuffer()));
+        }
+        if (options.onStatus) {
+            options.onStatus({ phase: 'native', message: '正在使用' + capabilities.encoder + '编码…' });
+        }
+        var result = await invoke('plugin:native-video|transcode', {
+            payload: {
+                inputPath: inputPath,
+                outputPath: outputPath,
+                audioPath: audioPath || null,
+                duration: Math.max(0, Number(options.duration) || 0),
+                volume: music ? music.volume : 0.7,
+                startTime: music ? music.startTime : 0,
+                loopAudio: music ? music.loop !== false : false,
+                fadeIn: music ? music.fadeIn : 0,
+                fadeOut: music ? music.fadeOut : 0
+            }
+        });
+        var bytes = await filesystem.readFile(result.outputPath || outputPath);
+        if (!bytes || bytes.byteLength < 512) throw new Error('原生编码器未生成有效视频');
+        return new Blob([bytes], { type: 'video/mp4' });
+    } catch (error) {
+        console.warn('原生视频编码失败，回退到浏览器编码。', error);
+        if (options.onStatus) options.onStatus({ phase: 'fallback', message: '原生编码不可用，正在使用本地兼容引擎…' });
+        var fallback = await import('./BrowserVideoTranscoder.js');
+        return fallback.transcodeVideoForBrowser(blob, options);
+    } finally {
+        if (filesystem) {
+            await removeQuietly(filesystem, inputPath);
+            await removeQuietly(filesystem, outputPath);
+            await removeQuietly(filesystem, audioPath);
+        }
+    }
+}
+
+export function hasNativeVideoEncoder() {
+    return nativeRuntimeAvailable();
+}

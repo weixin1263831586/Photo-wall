@@ -63,3 +63,21 @@ test('photowall v2 preserves an original video and its poster metadata', async f
     assert.equal(restored.project.photos[0].originalBlob.type, 'video/mp4');
     assert.equal(await restored.project.photos[0].originalBlob.text(), 'original-video-bytes');
 });
+
+test('photowall v2 preserves background music and its edit settings', async function () {
+    var photoBlob = new Blob(['photo'], { type: 'image/jpeg' });
+    var musicBlob = new Blob(['music-bytes'], { type: 'audio/mpeg' });
+    var project = {
+        format: 'photo-wall-project', version: 2,
+        photos: [{ id: 'photo-1', name: 'one.jpg' }],
+        backgroundMusic: { name: 'song.mp3', volume: 0.6, startTime: 3, loop: true, originalBlob: musicBlob }
+    };
+    var archive = await createProjectContainer(project, [{ id: 'photo-1', originalBlob: photoBlob }], {
+        backgroundMusic: project.backgroundMusic
+    });
+    var restored = await openProjectContainer(archive);
+    assert.equal(restored.project.backgroundMusic.name, 'song.mp3');
+    assert.equal(restored.project.backgroundMusic.volume, 0.6);
+    assert.equal(restored.project.backgroundMusic.originalBlob.type, 'audio/mpeg');
+    assert.equal(await restored.project.backgroundMusic.originalBlob.text(), 'music-bytes');
+});

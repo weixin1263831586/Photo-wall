@@ -76,6 +76,7 @@ export function analyzePixels(data, width, height, naturalWidth, naturalHeight) 
     for (var start = 0; start < count; start++) {
         if (!skinMask[start] || visited[start]) continue;
         var queue = [start], cursor = 0, componentCount = 0, componentX = 0, componentY = 0, componentDetail = 0;
+        var componentMinX = width, componentMinY = height, componentMaxX = 0, componentMaxY = 0;
         visited[start] = 1;
         while (cursor < queue.length) {
             var current = queue[cursor++];
@@ -84,6 +85,10 @@ export function analyzePixels(data, width, height, naturalWidth, naturalHeight) 
             componentX += cx;
             componentY += cy;
             componentDetail += saliency[current];
+            componentMinX = Math.min(componentMinX, cx);
+            componentMinY = Math.min(componentMinY, cy);
+            componentMaxX = Math.max(componentMaxX, cx);
+            componentMaxY = Math.max(componentMaxY, cy);
             var neighbours = [current - 1, current + 1, current - width, current + width];
             for (var neighbourIndex = 0; neighbourIndex < neighbours.length; neighbourIndex++) {
                 var neighbour = neighbours[neighbourIndex];
@@ -100,12 +105,31 @@ export function analyzePixels(data, width, height, naturalWidth, naturalHeight) 
         var centrality = 1 - Math.min(1, Math.hypot(componentFocusX - 0.5, componentFocusY - 0.45));
         var componentScore = componentCount * (1 + centrality * 0.2) + componentDetail / 255;
         if (!bestSkin || componentScore > bestSkin.score) {
-            bestSkin = { x: componentFocusX, y: componentFocusY, count: componentCount, score: componentScore };
+            bestSkin = {
+                x: componentFocusX, y: componentFocusY, count: componentCount, score: componentScore,
+                minX: componentMinX, minY: componentMinY, maxX: componentMaxX, maxY: componentMaxY
+            };
         }
     }
     var hasSubject = bestSkin && bestSkin.count / count >= 0.008;
     var detectedFocusX = hasSubject ? bestSkin.x * 0.82 + saliencyX * 0.18 : saliencyX;
     var detectedFocusY = hasSubject ? bestSkin.y * 0.82 + saliencyY * 0.18 : saliencyY;
+    var faceBox = null, personBox = null;
+    if (hasSubject) {
+        faceBox = {
+            x: Math.max(0, bestSkin.minX / width),
+            y: Math.max(0, bestSkin.minY / height),
+            width: Math.min(1, (bestSkin.maxX - bestSkin.minX + 1) / width),
+            height: Math.min(1, (bestSkin.maxY - bestSkin.minY + 1) / height)
+        };
+        var personX = Math.max(0, faceBox.x - faceBox.width * 0.3);
+        personBox = {
+            x: personX,
+            y: faceBox.y,
+            width: Math.min(1 - personX, faceBox.width * 1.6),
+            height: Math.min(1 - faceBox.y, faceBox.height * 2.8)
+        };
+    }
     return {
         r: red,
         g: green,
@@ -119,6 +143,8 @@ export function analyzePixels(data, width, height, naturalWidth, naturalHeight) 
         focusY: detectedFocusY,
         focusSource: hasSubject ? 'subject' : 'saliency',
         subjectScore: hasSubject ? Math.min(1, bestSkin.count / count * 4) : 0,
+        faceBox: faceBox,
+        personBox: personBox,
         aspectRatio: Math.max(1, naturalWidth || width) / Math.max(1, naturalHeight || height)
     };
 }

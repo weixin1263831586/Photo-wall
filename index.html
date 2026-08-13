@@ -32,6 +32,9 @@
                     <option value="生日">生日</option>
                     <option value="旅行">旅行</option>
                     <option value="生活">生活</option>
+                    <option value="矩阵">矩阵</option>
+                    <option value="社交">社交</option>
+                    <option value="节日">节日</option>
                     <option value="通用">通用</option>
                     <option value="自定义">自定义</option>
                 </select>
@@ -79,6 +82,18 @@
                 <button class="mode-btn active" data-mode="grid">紧密方格</button>
                 <button class="mode-btn" data-mode="brick">错落拼贴</button>
                 <button class="mode-btn" data-mode="organic">自然分布</button>
+            </div>
+            <div class="matrix-layout-row">
+                <label for="matrix-columns">矩阵规格</label>
+                <select id="matrix-columns">
+                    <option value="0">自动</option>
+                    <option value="2">2 × 2</option>
+                    <option value="3">3 × 3</option>
+                    <option value="4">4 × 4</option>
+                    <option value="5">5 × 5</option>
+                    <option value="6">6 × 6</option>
+                    <option value="8">8 × 8</option>
+                </select>
             </div>
             <p class="setting-hint" id="mode-hint">无缝铺满，适合清晰轮廓</p>
         </section>
@@ -171,13 +186,37 @@
                     <option value="film">胶片</option>
                 </select>
                 <input type="color" id="border-color" value="#ffffff" aria-label="边框颜色">
+                <button class="border-remove-btn" id="border-remove-btn" type="button" hidden>移除</button>
             </div>
             <div class="overlay-inspector" id="overlay-inspector" hidden>
                 <input type="text" id="overlay-content" maxlength="120" aria-label="图层文字">
                 <label>大小 <input type="range" id="overlay-size" min="0.018" max="0.22" step="0.002" value="0.055"></label>
                 <label>颜色 <input type="color" id="overlay-color" value="#ffffff"></label>
+                <button class="overlay-delete-btn" id="overlay-delete-btn" type="button">删除当前图层</button>
             </div>
             <div class="layer-list" id="layer-list" aria-label="图层列表"></div>
+        </section>
+
+        <section class="panel music-panel">
+            <div class="panel-title-row">
+                <h3 class="panel-title">背景音乐</h3>
+                <button class="text-action danger" id="music-remove-btn" type="button" hidden>移除</button>
+            </div>
+            <div class="music-library" id="music-library" aria-label="内置背景音乐"></div>
+            <input id="music-file-input" type="file" accept="audio/mpeg,audio/wav,audio/mp4,audio/aac,audio/ogg,.mp3,.wav,.m4a,.aac,.ogg" hidden>
+            <button class="music-upload-btn" id="music-upload-btn" type="button">＋ 上传本地音乐</button>
+            <div class="music-editor" id="music-editor" hidden>
+                <div class="music-summary"><span id="music-name">—</span><small id="music-duration">0:00</small></div>
+                <button class="music-preview-btn" id="music-preview-btn" type="button">▶ 试听</button>
+                <label>音量 <input type="range" id="music-volume" min="0" max="1" step="0.01" value="0.7"><output id="music-volume-value">70%</output></label>
+                <label>音乐起点 <input type="range" id="music-start" min="0" max="0" step="0.1" value="0"><output id="music-start-value">0:00</output></label>
+                <div class="music-fade-row">
+                    <label>淡入 <input type="number" id="music-fade-in" min="0" max="10" step="0.5" value="1"> 秒</label>
+                    <label>淡出 <input type="number" id="music-fade-out" min="0" max="10" step="0.5" value="1"> 秒</label>
+                </div>
+                <label class="music-loop-option"><input type="checkbox" id="music-loop" checked> 音乐不足时循环</label>
+            </div>
+            <p class="setting-hint">内置曲目为本地程序生成的原创配乐；也可导入自有或已授权歌曲</p>
         </section>
 
         <section class="panel photo-library-panel" id="photo-library-panel" hidden>
@@ -249,6 +288,32 @@
                 <button class="canvas-control-btn" id="flow-play-btn" type="button" aria-pressed="false" disabled>
                     <span aria-hidden="true" id="flow-play-icon">▶</span><span id="flow-play-label">流动播放</span>
                 </button>
+                <label class="flow-speed-field" for="playback-mode">
+                    <span>模式</span>
+                    <select id="playback-mode" disabled>
+                        <option value="reveal">逐张出现</option>
+                        <option value="shuffle" selected>流动换位</option>
+                    </select>
+                </label>
+                <label class="flow-speed-field" for="playback-order">
+                    <span>顺序</span>
+                    <select id="playback-order" disabled>
+                        <option value="center-out">从中心扩散</option>
+                        <option value="center-deep">从形状深处</option>
+                        <option value="outside-in">从边缘到中心</option>
+                        <option value="top-left">左上角</option>
+                        <option value="top-right">右上角</option>
+                        <option value="bottom-left">左下角</option>
+                        <option value="bottom-right">右下角</option>
+                        <option value="left-right">从左到右</option>
+                        <option value="right-left">从右到左</option>
+                        <option value="top-bottom">从上到下</option>
+                        <option value="bottom-top">从下到上</option>
+                        <option value="spiral">螺旋扩散</option>
+                        <option value="random">随机</option>
+                        <option value="custom">点击选择起点</option>
+                    </select>
+                </label>
                 <label class="flow-speed-field" for="flow-speed">
                     <span>速度</span>
                     <select id="flow-speed" disabled>
@@ -259,6 +324,7 @@
                 </label>
             </div>
             <canvas id="wall-canvas" tabindex="0" aria-label="照片墙编辑画布，点击照片可查看原图"></canvas>
+            <div class="playback-origin-marker" id="playback-origin-marker" aria-hidden="true"></div>
             <div class="empty-state" id="empty-state">
                 <div class="empty-visual" aria-hidden="true">
                     <svg viewBox="0 0 72 72"><rect x="9" y="14" width="54" height="44" rx="8"/><circle cx="27" cy="30" r="5"/><path d="M14 52l15-14 10 9 7-6 12 11"/></svg>
@@ -306,6 +372,8 @@
                     <label><input type="radio" name="export-format" value="jpeg"><span>JPG<small>文件较小</small></span></label>
                     <label><input type="radio" name="export-format" value="webp"><span>WebP<small>体积更小</small></span></label>
                     <label><input type="radio" name="export-format" value="pdf"><span>PDF<small>专业打印</small></span></label>
+                    <label><input type="radio" name="export-format" value="webm"><span>视频<small>动态 WebM</small></span></label>
+                    <label><input type="radio" name="export-format" value="mp4"><span>MP4<small>动态视频</small></span></label>
                 </div>
             </fieldset>
             <fieldset class="export-field print-export-field" id="print-export-field" hidden>
@@ -326,7 +394,7 @@
                 <label class="print-bleed-option"><input type="checkbox" id="export-print-bleed" checked><span>包含 3 mm 出血与裁切标记</span></label>
                 <p class="print-quality" id="export-print-quality">300 DPI · 专业印刷</p>
             </fieldset>
-            <fieldset class="export-field">
+            <fieldset class="export-field" id="export-scale-field">
                 <legend>清晰度</legend>
                 <div class="option-segments compact" id="export-scale-options">
                     <label><input type="radio" name="export-scale" value="1"><span>标准 <small>1×</small></span></label>
@@ -344,7 +412,7 @@
                     <label><input type="radio" name="export-aspect" value="16:9"><span>16:9<small>手机横屏</small></span></label>
                 </div>
             </fieldset>
-            <fieldset class="export-field">
+            <fieldset class="export-field" id="export-background-field">
                 <legend>画布背景</legend>
                 <div class="background-options" id="export-background-options">
                     <label><input type="radio" name="export-background" value="#ffffff" checked><span class="background-swatch white"></span><span>白色</span></label>

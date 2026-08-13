@@ -1,8 +1,9 @@
 const DEFAULT_DATABASE_NAME = 'photo-wall-autosave';
-const DATABASE_VERSION = 2;
+const DATABASE_VERSION = 3;
 const PROJECT_STORE = 'projects';
 const PHOTO_STORE = 'photos';
 const BACKUP_STORE = 'backups';
+const AUDIO_STORE = 'audio';
 const LATEST_PROJECT_ID = 'latest';
 
 const PHOTO_METADATA_FIELDS = [
@@ -10,7 +11,8 @@ const PHOTO_METADATA_FIELDS = [
     'saturation', 'contrast', 'sharpness', 'focusX', 'focusY',
     'aspectRatio', 'featured', 'editZoom', 'editOffsetX', 'editOffsetY',
     'editRotation', 'flipX', 'flipY', 'originalWidth', 'originalHeight',
-    'mediaType', 'videoMime', 'duration', 'posterFallback', 'focusSource', 'subjectScore', 'analysisVersion'
+    'mediaType', 'videoMime', 'duration', 'posterFallback', 'focusSource', 'subjectScore', 'analysisVersion',
+    'faceBox', 'personBox'
 ];
 
 function requestResult(request) {
@@ -41,6 +43,9 @@ function openDatabase(factory, databaseName) {
             }
             if (!database.objectStoreNames.contains(BACKUP_STORE)) {
                 database.createObjectStore(BACKUP_STORE, { keyPath: 'id' });
+            }
+            if (!database.objectStoreNames.contains(AUDIO_STORE)) {
+                database.createObjectStore(AUDIO_STORE, { keyPath: 'id' });
             }
         };
         request.onsuccess = function () { resolve(request.result); };
@@ -142,13 +147,25 @@ export function createProjectAutosave(options) {
             retainedIds.add(photo.id);
         });
 
+        var rawMusic = snapshot.project.backgroundMusic;
+        var musicBlob = rawMusic && (rawMusic.originalBlob || rawMusic.blob);
+        var musicMetadata = rawMusic ? Object.assign({}, rawMusic) : null;
+        if (musicMetadata) {
+            delete musicMetadata.originalBlob;
+            delete musicMetadata.blob;
+            delete musicMetadata.url;
+        }
+        var musicFingerprint = musicBlob instanceof Blob ?
+            [rawMusic.name || '', musicBlob.size, musicBlob.type].join(':') : '';
         var project = Object.assign({}, snapshot.project, {
             savedAt: new Date().toISOString(),
-            photos: preparedPhotos.map(function (photo) { return photo.metadata; })
+            photos: preparedPhotos.map(function (photo) { return photo.metadata; }),
+            backgroundMusic: musicMetadata
         });
-        var transaction = db.transaction([PROJECT_STORE, PHOTO_STORE], 'readwrite');
+        var transaction = db.transaction([PROJECT_STORE, PHOTO_STORE, AUDIO_STORE], 'readwrite');
         var projectStore = transaction.objectStore(PROJECT_STORE);
         var photoStore = transaction.objectStore(PHOTO_STORE);
+        var audioStore = transaction.objectStore(AUDIO_STORE);
         preparedPhotos.forEach(function (photo) {
             if (previousFingerprints[photo.id] !== photo.fingerprint) {
                 photoStore.put({ id: photo.id, blob: photo.blob });
@@ -157,11 +174,14 @@ export function createProjectAutosave(options) {
         Object.keys(previousFingerprints).forEach(function (id) {
             if (!retainedIds.has(id)) photoStore.delete(id);
         });
+        if (musicBlob instanceof Blob) audioStore.put({ id: 'background', blob: musicBlob });
+        else audioStore.delete('background');
         projectStore.put({
             id: LATEST_PROJECT_ID,
             savedAt: project.savedAt,
             project: project,
-            fingerprints: fingerprints
+            fingerprints: fingerprints,
+            musicFingerprint: musicFingerprint
         });
         await transactionDone(transaction);
         onSaved({ savedAt: project.savedAt, photoCount: preparedPhotos.length });
@@ -205,9 +225,17 @@ export function createProjectAutosave(options) {
             if (!stored || !isBlob(stored.blob)) throw new Error('Autosave photo data is incomplete');
             return Object.assign({}, metadata, { originalBlob: stored.blob, blob: stored.blob });
         });
+        var music = null;
+        if (record.project.backgroundMusic) {
+            var audioTransaction = db.transaction(AUDIO_STORE, 'readonly');
+            var storedMusic = await requestResult(audioTransaction.objectStore(AUDIO_STORE).get('background'));
+            await transactionDone(audioTransaction);
+            if (!storedMusic || !isBlob(storedMusic.blob)) throw new Error('Autosave background music is incomplete');
+            music = Object.assign({}, record.project.backgroundMusic, { originalBlob: storedMusic.blob });
+        }
         return {
             savedAt: record.savedAt,
-            project: Object.assign({}, record.project, { photos: photos })
+            project: Object.assign({}, record.project, { photos: photos, backgroundMusic: music })
         };
     }
 
@@ -217,9 +245,10 @@ export function createProjectAutosave(options) {
         saveQueue = saveQueue.catch(function () {}).then(async function () {
             if (!factory) return;
             var db = await database();
-            var transaction = db.transaction([PROJECT_STORE, PHOTO_STORE], 'readwrite');
+            var transaction = db.transaction([PROJECT_STORE, PHOTO_STORE, AUDIO_STORE], 'readwrite');
             transaction.objectStore(PROJECT_STORE).clear();
             transaction.objectStore(PHOTO_STORE).clear();
+            transaction.objectStore(AUDIO_STORE).clear();
             await transactionDone(transaction);
         });
         return saveQueue;

@@ -11,6 +11,11 @@ import { createPhotoAssetManager } from './image/PhotoAssetManager.js';
 import { refineSubjectFocus } from './image/SubjectFocus.js';
 import { applyPhotoTransform, drawPhotoCover, normalizePhotoTransform } from './image/PhotoTransform.js';
 import { createOverlay, normalizeOverlays } from './overlay/OverlayRenderer.js';
+import { createTimeline } from './playback/PlaybackTimeline.js';
+import { PLAYBACK_ORDER_KEYS, PlaybackOrderLabels } from './playback/PlaybackOrder.js';
+import { recordTimelineCanvas, pickVideoMimeType } from './video/VideoRecorder.js';
+import { musicVolumeAt, normalizeBackgroundMusic } from './audio/BackgroundMusic.js';
+import { BUILT_IN_MUSIC, createBuiltInMusicFile } from './audio/BuiltInMusic.js';
 import { createPhotoAnalysisWorkerClient } from './image/PhotoAnalysisWorkerClient.js';
 import { createPhotoLibrary } from './ui/PhotoLibrary.js';
 import { createHistoryManager } from './history/HistoryManager.js';
@@ -42,6 +47,7 @@ import {
         overlays: [],
         selectedOverlayId: null,
         overlayEditSnapshot: null,
+        musicEditSnapshot: null,
         lightboxIndex: -1,
         resizeTimer: null,
         densityTimer: null,
@@ -59,6 +65,18 @@ import {
         flowTimer: null,
         flowSnapshot: null,
         flowCycleCount: 0,
+        playbackMode: 'shuffle',
+        playbackOrder: 'center-out',
+        revealTimeline: null,
+        revealRAF: null,
+        revealStartTime: 0,
+        revealSnapshot: null,
+        customOrigin: null,
+        backgroundMusic: null,
+        musicObjectURL: '',
+        musicAudio: null,
+        musicStandalonePreview: false,
+        musicPlaybackStartedAt: 0,
         photoEditorIndex: -1,
         photoEditorDraft: null,
         photoEditorReplacement: null,
@@ -197,6 +215,8 @@ import {
         });
 
         app.bindUI();
+        app.renderBuiltInMusic();
+        app.syncMusicControls();
         app.renderLayoutPresets();
         app.renderLayers();
         app.renderShapeButtons();
@@ -213,10 +233,11 @@ import {
             clearTimeout(app.resizeTimer);
             app.resizeTimer = setTimeout(function () {
                 app.wall.resize();
+                app.updateCustomOriginMarker();
             }, 200);
         });
         window.addEventListener('beforeunload', function () {
-            app.stopFlowPlayback(false);
+            app.stopAllPlayback(false);
             if (app.autosave) app.autosave.saveNow();
             if (app.photoAnalyzerWorker) app.photoAnalyzerWorker.terminate();
             if (app.assetManager) app.assetManager.destroy();
@@ -224,10 +245,11 @@ import {
             clearTimeout(app.photoObjectURLCleanupTimer);
             app.photoObjectURLs.forEach(function (url) { URL.revokeObjectURL(url); });
             app.photoObjectURLs.clear();
+            app.releaseMusicAudio();
         });
         document.addEventListener('visibilitychange', function () {
             if (document.visibilityState === 'hidden') {
-                app.stopFlowPlayback(true);
+                app.stopAllPlayback(true);
                 if (app.autosave) app.autosave.saveNow();
             }
         });
@@ -264,7 +286,7 @@ import {
 
     app.bindUI = function () {
         document.querySelector('.sidebar').addEventListener('pointerdown', function (event) {
-            if (app.flowPlaying && event.target.closest('button, input, select, textarea')) app.stopFlowPlayback(true);
+            if (app.flowPlaying && event.target.closest('button, input, select, textarea')) app.stopAllPlayback(true);
         });
         // ---- Product presets ----
         document.getElementById('preset-buttons').addEventListener('click', function (e) {
@@ -298,6 +320,10 @@ import {
         });
         document.getElementById('border-style').addEventListener('change', app.updateBorderOverlay);
         document.getElementById('border-color').addEventListener('change', app.updateBorderOverlay);
+        document.getElementById('border-remove-btn').addEventListener('click', app.removeBorderOverlay);
+        document.getElementById('overlay-delete-btn').addEventListener('click', function () {
+            if (app.selectedOverlayId) app.deleteOverlay(app.selectedOverlayId);
+        });
         document.getElementById('layer-list').addEventListener('click', app.handleLayerAction);
         var inspector = document.getElementById('overlay-inspector');
         inspector.addEventListener('focusin', function () {
@@ -307,6 +333,37 @@ import {
         inspector.addEventListener('change', function () {
             if (app.overlayEditSnapshot) app.recordHistory(app.overlayEditSnapshot);
             app.overlayEditSnapshot = null;
+        });
+
+        // ---- Background music ----
+        document.getElementById('music-library').addEventListener('click', function (event) {
+            var button = event.target.closest('[data-music-track]');
+            if (button) app.useBuiltInMusic(button.getAttribute('data-music-track'));
+        });
+        document.getElementById('music-upload-btn').addEventListener('click', function () {
+            document.getElementById('music-file-input').click();
+        });
+        document.getElementById('music-file-input').addEventListener('change', function (event) {
+            var file = event.target.files[0];
+            event.target.value = '';
+            if (file) app.loadBackgroundMusic(file);
+        });
+        document.getElementById('music-remove-btn').addEventListener('click', app.removeBackgroundMusic);
+        document.getElementById('music-preview-btn').addEventListener('click', app.toggleMusicPreview);
+        var musicSettingIds = ['music-volume', 'music-start', 'music-fade-in', 'music-fade-out', 'music-loop'];
+        musicSettingIds.forEach(function (id) {
+            document.getElementById(id).addEventListener('input', app.updateBackgroundMusicSettings);
+            document.getElementById(id).addEventListener('change', app.updateBackgroundMusicSettings);
+        });
+        var musicEditor = document.getElementById('music-editor');
+        musicEditor.addEventListener('focusin', function (event) {
+            if (musicSettingIds.indexOf(event.target.id) >= 0 && !app.musicEditSnapshot) {
+                app.musicEditSnapshot = app.captureState();
+            }
+        });
+        musicEditor.addEventListener('change', function () {
+            if (app.musicEditSnapshot) app.recordHistory(app.musicEditSnapshot);
+            app.musicEditSnapshot = null;
         });
 
         // ---- Shape buttons ----
@@ -522,7 +579,17 @@ import {
             });
             btn.classList.add('active');
             app.wall.setPlacementMode(mode);
+            document.getElementById('matrix-columns').value = app.wall.matrixColumns;
             app.updateModeHint();
+        });
+
+        document.getElementById('matrix-columns').addEventListener('change', function () {
+            var columns = Number(this.value) || 0;
+            if (columns === app.wall.matrixColumns) return;
+            app.recordHistory();
+            app.wall.setMatrixColumns(columns);
+            app.syncLayoutControls();
+            app.toast(columns ? '已应用 ' + columns + ' × ' + columns + ' 矩阵' : '已恢复自动布局');
         });
 
         // ---- Photo shape buttons ----
@@ -544,7 +611,7 @@ import {
         // ---- Actions ----
         document.getElementById('shuffle-btn').addEventListener('click', function () {
             if (!app.photos.length) return;
-            app.stopFlowPlayback(true);
+            app.stopAllPlayback(true);
             app.recordHistory();
             var seed = app.wall.nextLayoutVariant();
             app.toast('已生成新方案 · #' + seed);
@@ -553,12 +620,54 @@ import {
             app.setPositionMode(app.wall.interactionMode !== 'adjust');
         });
         document.getElementById('flow-play-btn').addEventListener('click', function () {
-            if (app.flowPlaying) app.stopFlowPlayback(true);
-            else app.startFlowPlayback();
+            if (app.flowPlaying || app.revealTimeline) app.stopAllPlayback(true);
+            else app.startPlayback();
         });
         document.getElementById('flow-speed').addEventListener('change', function () {
-            if (app.flowPlaying) app.scheduleNextFlowCycle();
+            if (app.flowPlaying) app.restartPlayback();
         });
+        document.getElementById('playback-mode').addEventListener('change', function () {
+            app.playbackMode = this.value;
+            app.updateFlowControls();
+            app.updateActionState();
+            if (app.autosave) app.autosave.schedule();
+            if (app.flowPlaying || app.revealTimeline) {
+                app.stopAllPlayback(true);
+                app.startPlayback();
+            }
+        });
+        document.getElementById('playback-order').addEventListener('change', function () {
+            app.playbackOrder = this.value;
+            if (app.playbackOrder === 'custom') {
+                app.customOrigin = null;
+                document.getElementById('wall-canvas').classList.add('selecting-playback-origin');
+                app.toast('请在照片墙上点击播放起点');
+            } else {
+                document.getElementById('wall-canvas').classList.remove('selecting-playback-origin');
+                document.getElementById('playback-origin-marker').classList.remove('visible');
+            }
+            app.updateActionState();
+            if (app.autosave) app.autosave.schedule();
+            if (app.flowPlaying || app.revealTimeline) {
+                app.stopAllPlayback(true);
+                app.startPlayback();
+            }
+        });
+        document.getElementById('wall-canvas').addEventListener('pointerdown', function (event) {
+            if (app.playbackOrder !== 'custom' || app.flowPlaying) return;
+            var rect = this.getBoundingClientRect();
+            if (!rect.width || !rect.height) return;
+            app.customOrigin = {
+                normalizedX: Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width)),
+                normalizedY: Math.max(0, Math.min(1, (event.clientY - rect.top) / rect.height))
+            };
+            this.classList.remove('selecting-playback-origin');
+            app.updateCustomOriginMarker();
+            if (app.autosave) app.autosave.schedule();
+            app.toast('播放起点已设置，点击播放即可预览');
+            event.preventDefault();
+            event.stopImmediatePropagation();
+        }, true);
         document.getElementById('clear-btn').addEventListener('click', function () {
             app.clearPhotos();
         });
@@ -703,6 +812,11 @@ import {
             if ((e.ctrlKey || e.metaKey) && !isTyping && e.key.toLowerCase() === 'y') {
                 e.preventDefault();
                 app.redo();
+                return;
+            }
+            if ((e.key === 'Delete' || e.key === 'Backspace') && !isTyping && app.selectedOverlayId) {
+                e.preventDefault();
+                app.deleteOverlay(app.selectedOverlayId);
                 return;
             }
             if (e.key === 'Escape' && document.getElementById('shape-editor').classList.contains('active')) {
@@ -1185,6 +1299,9 @@ import {
         document.getElementById('rotation-value').textContent = app.wall.rotationRange + '°';
         document.getElementById('smart-toggle').checked = app.wall.smartPlacement;
         document.getElementById('mixed-size-toggle').checked = app.wall.mixedSizes;
+        document.getElementById('matrix-columns').value = app.wall.matrixColumns;
+        document.getElementById('density-slider').disabled = app.wall.matrixColumns > 0;
+        document.getElementById('mixed-size-toggle').disabled = app.wall.matrixColumns > 0;
         app.updateModeHint();
         app.updateLayoutPresetSelection();
     };
@@ -1192,7 +1309,7 @@ import {
     app.applyLayoutPreset = function (presetId) {
         var preset = app.findTemplate(presetId);
         if (!preset || layoutPresetMatches(app.wall, app.currentShapeKey, preset)) return;
-        app.stopFlowPlayback(true);
+        app.stopAllPlayback(true);
         app.recordHistory();
         clearTimeout(app.densityTimer);
         clearTimeout(app.overlapTimer);
@@ -1238,6 +1355,7 @@ import {
                     density: app.wall.density,
                     gap: app.wall.gap,
                     placementMode: app.wall.placementMode,
+                    matrixColumns: app.wall.matrixColumns,
                     photoShape: app.wall.photoShape,
                     smartPlacement: app.wall.smartPlacement,
                     mixedSizes: app.wall.mixedSizes,
@@ -1258,6 +1376,192 @@ import {
         if (!id || !app.templateLibrary.remove(id)) return;
         app.renderLayoutPresets();
         app.toast('自定义模板已删除');
+    };
+
+    app.formatMediaTime = function (seconds) {
+        seconds = Math.max(0, Number(seconds) || 0);
+        var minutes = Math.floor(seconds / 60);
+        return minutes + ':' + String(Math.floor(seconds % 60)).padStart(2, '0');
+    };
+
+    app.renderBuiltInMusic = function () {
+        var library = document.getElementById('music-library');
+        if (!library) return;
+        library.innerHTML = BUILT_IN_MUSIC.map(function (track) {
+            return '<button class="music-library-item" type="button" data-music-track="' +
+                app.escapeHTML(track.id) + '" style="--music-color:' + app.escapeHTML(track.color) + '">' +
+                '<span class="music-library-color" aria-hidden="true"></span><span class="music-library-copy"><strong>' +
+                app.escapeHTML(track.name) + '</strong><small>' + app.escapeHTML(track.mood) + '</small></span></button>';
+        }).join('');
+    };
+
+    app.useBuiltInMusic = function (id) {
+        var button = document.querySelector('[data-music-track="' + id + '"]');
+        if (button) button.classList.add('active');
+        app.showLoading(true, '正在生成内置配乐…');
+        createBuiltInMusicFile(id).then(function (file) {
+            app.showLoading(false);
+            app.loadBackgroundMusic(file);
+        }).catch(function (error) {
+            app.showLoading(false);
+            if (button) button.classList.remove('active');
+            console.error(error);
+            app.toast('内置配乐生成失败');
+        });
+    };
+
+    app.releaseMusicAudio = function () {
+        if (app.musicAudio) {
+            app.musicAudio.pause();
+            app.musicAudio.removeAttribute('src');
+            app.musicAudio.load();
+        }
+        app.musicAudio = null;
+        app.musicStandalonePreview = false;
+        if (app.musicObjectURL) URL.revokeObjectURL(app.musicObjectURL);
+        app.musicObjectURL = '';
+    };
+
+    app.attachMusicAudio = function () {
+        app.releaseMusicAudio();
+        if (!app.backgroundMusic || !(app.backgroundMusic.originalBlob instanceof Blob)) return;
+        app.musicObjectURL = URL.createObjectURL(app.backgroundMusic.originalBlob);
+        app.musicAudio = new Audio(app.musicObjectURL);
+        app.musicAudio.preload = 'auto';
+        app.musicAudio.addEventListener('ended', function () {
+            if (!app.backgroundMusic || app.backgroundMusic.loop || app.flowPlaying) return;
+            app.musicStandalonePreview = false;
+            app.syncMusicControls();
+        });
+    };
+
+    app.loadBackgroundMusic = function (file) {
+        var valid = /^audio\//i.test(file.type) || /\.(mp3|wav|m4a|aac|ogg)$/i.test(file.name || '');
+        if (!valid || file.size > 80 * 1024 * 1024) {
+            app.toast(valid ? '音乐文件不能超过 80 MB' : '请选择 MP3、WAV、M4A、AAC 或 OGG 音乐');
+            return;
+        }
+        app.recordHistory();
+        var probeURL = URL.createObjectURL(file);
+        var probe = new Audio(probeURL);
+        probe.preload = 'metadata';
+        var settled = false;
+        function finish() {
+            if (settled) return;
+            settled = true;
+            URL.revokeObjectURL(probeURL);
+        }
+        probe.addEventListener('loadedmetadata', function () {
+            var duration = Number.isFinite(probe.duration) ? probe.duration : 0;
+            finish();
+            app.backgroundMusic = normalizeBackgroundMusic({
+                name: file.name,
+                type: file.type || 'audio/mpeg',
+                duration: duration,
+                volume: 0.7,
+                startTime: 0,
+                loop: true,
+                fadeIn: 1,
+                fadeOut: 1,
+                originalBlob: file
+            });
+            app.attachMusicAudio();
+            app.syncMusicControls();
+            if (app.autosave) app.autosave.schedule();
+            app.toast('背景音乐已添加');
+        }, { once: true });
+        probe.addEventListener('error', function () {
+            finish();
+            app.toast('音乐无法读取，请尝试其他格式');
+        }, { once: true });
+    };
+
+    app.removeBackgroundMusic = function () {
+        if (!app.backgroundMusic) return;
+        app.recordHistory();
+        app.stopMusicPlayback();
+        app.releaseMusicAudio();
+        app.backgroundMusic = null;
+        app.syncMusicControls();
+        if (app.autosave) app.autosave.schedule();
+        app.toast('背景音乐已移除');
+    };
+
+    app.updateBackgroundMusicSettings = function () {
+        if (!app.backgroundMusic) return;
+        app.backgroundMusic = normalizeBackgroundMusic(Object.assign({}, app.backgroundMusic, {
+            volume: document.getElementById('music-volume').value,
+            startTime: document.getElementById('music-start').value,
+            fadeIn: document.getElementById('music-fade-in').value,
+            fadeOut: document.getElementById('music-fade-out').value,
+            loop: document.getElementById('music-loop').checked
+        }));
+        if (app.musicAudio) {
+            app.musicAudio.loop = app.backgroundMusic.loop;
+            app.musicAudio.volume = app.backgroundMusic.volume;
+            if (document.activeElement === document.getElementById('music-start')) {
+                app.musicAudio.currentTime = app.backgroundMusic.startTime;
+            }
+        }
+        app.syncMusicControls();
+        if (app.autosave) app.autosave.schedule();
+    };
+
+    app.syncMusicControls = function () {
+        var music = app.backgroundMusic;
+        document.getElementById('music-editor').hidden = !music;
+        document.getElementById('music-remove-btn').hidden = !music;
+        document.getElementById('music-upload-btn').textContent = music ? '更换音乐' : '＋ 上传本地音乐';
+        if (!music) {
+            document.querySelectorAll('[data-music-track]').forEach(function (button) { button.classList.remove('active'); });
+            return;
+        }
+        document.getElementById('music-name').textContent = music.name;
+        document.getElementById('music-duration').textContent = app.formatMediaTime(music.duration);
+        document.getElementById('music-volume').value = music.volume;
+        document.getElementById('music-volume-value').textContent = Math.round(music.volume * 100) + '%';
+        var start = document.getElementById('music-start');
+        start.max = Math.max(0, music.duration - 0.05);
+        start.value = music.startTime;
+        document.getElementById('music-start-value').textContent = app.formatMediaTime(music.startTime);
+        document.getElementById('music-fade-in').value = music.fadeIn;
+        document.getElementById('music-fade-out').value = music.fadeOut;
+        document.getElementById('music-loop').checked = music.loop;
+        document.getElementById('music-preview-btn').textContent = app.musicStandalonePreview ? '■ 停止试听' : '▶ 试听';
+        document.querySelectorAll('[data-music-track]').forEach(function (button) {
+            button.classList.toggle('active', music.name === button.getAttribute('data-music-track') + '.wav');
+        });
+    };
+
+    app.startMusicPlayback = function (timelineDurationMs, standalone) {
+        if (!app.backgroundMusic || !app.musicAudio) return;
+        var music = app.backgroundMusic;
+        try { app.musicAudio.currentTime = Math.min(music.startTime, Math.max(0, music.duration - 0.05)); } catch (ignore) {}
+        app.musicAudio.loop = music.loop;
+        app.musicAudio.volume = standalone ? music.volume : musicVolumeAt(music, 0, timelineDurationMs / 1000);
+        app.musicStandalonePreview = standalone === true;
+        app.musicPlaybackStartedAt = performance.now();
+        app.musicAudio.play().catch(function () { app.toast('浏览器阻止了音乐播放，请再次点击播放'); });
+        app.syncMusicControls();
+    };
+
+    app.stopMusicPlayback = function () {
+        if (app.musicAudio) app.musicAudio.pause();
+        app.musicStandalonePreview = false;
+        app.musicPlaybackStartedAt = 0;
+        app.syncMusicControls();
+    };
+
+    app.updateMusicPlayback = function (elapsedMs, totalMs) {
+        if (!app.musicAudio || !app.backgroundMusic || app.musicStandalonePreview) return;
+        var elapsed = app.musicPlaybackStartedAt ? performance.now() - app.musicPlaybackStartedAt : elapsedMs;
+        app.musicAudio.volume = musicVolumeAt(app.backgroundMusic, elapsed / 1000, totalMs / 1000);
+    };
+
+    app.toggleMusicPreview = function () {
+        if (!app.backgroundMusic) return;
+        if (app.musicStandalonePreview && app.musicAudio && !app.musicAudio.paused) app.stopMusicPlayback();
+        else app.startMusicPlayback(0, true);
     };
 
     app.reindexOverlays = function () {
@@ -1302,6 +1606,25 @@ import {
         app.renderLayers();
     };
 
+    app.removeBorderOverlay = function () {
+        var border = app.overlays.find(function (overlay) { return overlay.type === 'border'; });
+        if (border) app.deleteOverlay(border.id);
+    };
+
+    app.deleteOverlay = function (id) {
+        var index = app.overlays.findIndex(function (overlay) { return overlay.id === id; });
+        if (index < 0) return false;
+        var removed = app.overlays[index];
+        app.recordHistory();
+        app.overlays.splice(index, 1);
+        if (app.selectedOverlayId === id) app.selectedOverlayId = null;
+        app.reindexOverlays();
+        app.wall.selectOverlay(app.selectedOverlayId);
+        app.renderLayers();
+        app.toast(removed.type === 'border' ? '边框已移除' : removed.type === 'sticker' ? '贴纸已删除' : '图层已删除');
+        return true;
+    };
+
     app.selectOverlay = function (id) {
         app.selectedOverlayId = id;
         app.wall.selectOverlay(id);
@@ -1321,11 +1644,12 @@ import {
         var action = actionButton.getAttribute('data-layer-action');
         var index = app.overlays.findIndex(function (overlay) { return overlay.id === id; });
         if (index < 0) return;
-        app.recordHistory();
         if (action === 'delete') {
-            app.overlays.splice(index, 1);
-            if (app.selectedOverlayId === id) app.selectedOverlayId = null;
-        } else if (action === 'visibility') {
+            app.deleteOverlay(id);
+            return;
+        }
+        app.recordHistory();
+        if (action === 'visibility') {
             app.overlays[index].visible = app.overlays[index].visible === false;
         } else if (action === 'up' && index < app.overlays.length - 1) {
             var upper = app.overlays[index + 1]; app.overlays[index + 1] = app.overlays[index]; app.overlays[index] = upper;
@@ -1365,6 +1689,7 @@ import {
         var border = app.overlays.find(function (overlay) { return overlay.type === 'border'; });
         document.getElementById('border-style').value = border ? border.borderStyle : 'none';
         if (border) document.getElementById('border-color').value = border.color;
+        document.getElementById('border-remove-btn').hidden = !border;
         var selected = app.overlays.find(function (overlay) { return overlay.id === app.selectedOverlayId; });
         var inspector = document.getElementById('overlay-inspector');
         inspector.hidden = !selected || selected.type === 'border';
@@ -1419,7 +1744,7 @@ import {
             else app.toast('请选择 JPG、PNG、WebP、MP4、WebM 或 MOV 文件');
             return;
         }
-        app.stopFlowPlayback(true);
+        app.stopAllPlayback(true);
 
         var total = mediaFiles.length;
         if (app.deviceProfile.mobile && app.photos.length + total > app.deviceProfile.recommendedPhotoCount) {
@@ -1529,6 +1854,8 @@ import {
                         focusY: analysis.focusY,
                         focusSource: analysis.focusSource || 'saliency',
                         subjectScore: Number(analysis.subjectScore) || 0,
+                        faceBox: analysis.faceBox || null,
+                        personBox: analysis.personBox || null,
                         analysisVersion: 2,
                         aspectRatio: analysis.aspectRatio,
                         mediaType: layers.mediaType || 'image',
@@ -1613,7 +1940,7 @@ import {
     app.clearPhotos = function () {
         if (app.photos.length === 0) return;
         if (!window.confirm('确定清空全部 ' + app.photos.length + ' 张照片吗？此操作可以撤销。')) return;
-        app.stopFlowPlayback(true);
+        app.stopAllPlayback(true);
         app.recordHistory();
         app.photos.forEach(function (photo) { app.assetManager.releasePhoto(photo); });
         app.photos = [];
@@ -1656,7 +1983,7 @@ import {
 
     app.reorderPhoto = function (fromIndex, targetIndex) {
         if (!app.photos[fromIndex] || !app.photos[targetIndex]) return;
-        app.stopFlowPlayback(true);
+        app.stopAllPlayback(true);
         app.recordHistory();
         var moved = app.photos.splice(fromIndex, 1)[0];
         app.photos.splice(targetIndex, 0, moved);
@@ -1667,7 +1994,7 @@ import {
 
     app.toggleFeaturedPhoto = function (index) {
         if (!app.photos[index]) return;
-        app.stopFlowPlayback(true);
+        app.stopAllPlayback(true);
         app.recordHistory();
         app.photos[index].featured = !app.photos[index].featured;
         app.renderPhotoLibrary();
@@ -1677,7 +2004,7 @@ import {
 
     app.removePhoto = function (index) {
         if (!app.photos[index]) return;
-        app.stopFlowPlayback(true);
+        app.stopAllPlayback(true);
         app.recordHistory();
         var removed = app.photos.splice(index, 1)[0];
         app.assetManager.releasePhoto(removed);
@@ -1744,11 +2071,15 @@ import {
                 density: app.wall.density,
                 gap: app.wall.gap,
                 placementMode: app.wall.placementMode,
+                matrixColumns: app.wall.matrixColumns,
                 photoShape: app.wall.photoShape,
                 smartPlacement: app.wall.smartPlacement,
                 mixedSizes: app.wall.mixedSizes,
                 rotationRange: app.wall.rotationRange,
-                layoutSeed: app.wall.layoutSeed
+                layoutSeed: app.wall.layoutSeed,
+                playbackMode: app.playbackMode,
+                playbackOrder: app.playbackOrder,
+                customOrigin: app.customOrigin ? Object.assign({}, app.customOrigin) : null
             },
             photos: app.photos.map(function (photo, index) {
                 return {
@@ -1768,6 +2099,8 @@ import {
                     focusY: photo.focusY,
                     focusSource: photo.focusSource,
                     subjectScore: photo.subjectScore,
+                    faceBox: photo.faceBox || null,
+                    personBox: photo.personBox || null,
                     analysisVersion: Number(photo.analysisVersion) || 1,
                     aspectRatio: photo.aspectRatio,
                     mediaType: photo.mediaType || 'image',
@@ -1786,6 +2119,7 @@ import {
                 };
             }),
             overlays: app.overlays.map(function (overlay) { return Object.assign({}, overlay); }),
+            backgroundMusic: app.backgroundMusic ? Object.assign({}, app.backgroundMusic) : null,
             layout: app.wall.getLayoutSnapshot()
         };
     };
@@ -1798,7 +2132,10 @@ import {
         app.showLoading(true, '正在打包项目…');
         var project = app.serializeProject();
         Promise.resolve(app.autosave && app.autosave.createBackup('保存项目之前')).then(function () {
-            return createProjectContainer(project, app.photos, { appVersion: '1.0.0' });
+            return createProjectContainer(project, app.photos, {
+                appVersion: '1.0.0',
+                backgroundMusic: app.backgroundMusic
+            });
         }).then(function (blob) {
             var rawName = document.getElementById('export-name').value.trim() || '我的照片墙';
             var name = rawName.replace(/[<>:"/\\|?*\u0000-\u001F]/g, '-').replace(/[. ]+$/, '') || '我的照片墙';
@@ -1852,7 +2189,7 @@ import {
             app.toast('项目文件无效或超过 1 GB');
             return;
         }
-        app.stopFlowPlayback(true);
+        app.stopAllPlayback(true);
         app.showLoading(true, '正在打开项目…');
         file.arrayBuffer().then(function (buffer) {
             var bytes = new Uint8Array(buffer);
@@ -2085,11 +2422,20 @@ import {
                 density: Math.max(0.5, Math.min(1.5, Number(settings.density) || 1)),
                 gap: Math.max(0, Math.min(0.12, Number(settings.gap) || 0)),
                 placementMode: ['grid', 'brick', 'organic'].indexOf(settings.placementMode) >= 0 ? settings.placementMode : 'grid',
+                matrixColumns: [2, 3, 4, 5, 6, 8].indexOf(Number(settings.matrixColumns)) >= 0 ? Number(settings.matrixColumns) : 0,
                 photoShape: ['circle', 'square', 'diamond', 'hexagon', 'heart'].indexOf(settings.photoShape) >= 0 ? settings.photoShape : 'square',
                 smartPlacement: settings.smartPlacement !== false,
                 mixedSizes: settings.mixedSizes !== false,
                 rotationRange: Math.max(0, Math.min(24, Number(settings.rotationRange) || 0)),
                 layoutSeed: Number(settings.layoutSeed) || 1,
+                playbackMode: settings.playbackMode === 'reveal' ? 'reveal' : 'shuffle',
+                playbackOrder: PLAYBACK_ORDER_KEYS.indexOf(settings.playbackOrder) >= 0 ? settings.playbackOrder : 'center-out',
+                customOrigin: settings.customOrigin && Number.isFinite(Number(settings.customOrigin.normalizedX)) &&
+                    Number.isFinite(Number(settings.customOrigin.normalizedY)) ? {
+                        normalizedX: Math.max(0, Math.min(1, Number(settings.customOrigin.normalizedX))),
+                        normalizedY: Math.max(0, Math.min(1, Number(settings.customOrigin.normalizedY)))
+                    } : null,
+                backgroundMusic: project.backgroundMusic || null,
                 overlays: normalizeOverlays(project.overlays),
                 arrangement: [],
                 layout: project.layout
@@ -2110,11 +2456,16 @@ import {
             density: app.wall.density,
             gap: app.wall.gap,
             placementMode: app.wall.placementMode,
+            matrixColumns: app.wall.matrixColumns,
             photoShape: app.wall.photoShape,
             smartPlacement: app.wall.smartPlacement,
             mixedSizes: app.wall.mixedSizes,
             rotationRange: app.wall.rotationRange,
             layoutSeed: app.wall.layoutSeed,
+            playbackMode: app.playbackMode,
+            playbackOrder: app.playbackOrder,
+            customOrigin: app.customOrigin ? Object.assign({}, app.customOrigin) : null,
+            backgroundMusic: app.backgroundMusic ? Object.assign({}, app.backgroundMusic) : null,
             overlays: app.overlays.map(function (overlay) { return Object.assign({}, overlay); }),
             arrangement: app.wall.getArrangement(),
             layout: app.wall.getLayoutSnapshot()
@@ -2128,7 +2479,7 @@ import {
 
     app.restoreState = function (state) {
         if (!state) return;
-        app.stopFlowPlayback(false);
+        app.stopAllPlayback(false);
         clearTimeout(app.densityTimer);
         clearTimeout(app.overlapTimer);
         clearTimeout(app.rotationTimer);
@@ -2146,11 +2497,22 @@ import {
         app.wall.density = state.density;
         app.wall.gap = state.gap;
         app.wall.placementMode = state.placementMode;
+        app.wall.matrixColumns = [2, 3, 4, 5, 6, 8].indexOf(Number(state.matrixColumns)) >= 0 ? Number(state.matrixColumns) : 0;
         app.wall.photoShape = state.photoShape;
         app.wall.smartPlacement = state.smartPlacement;
         app.wall.mixedSizes = state.mixedSizes !== false;
         app.wall.rotationRange = Number(state.rotationRange) || 0;
         app.wall.layoutSeed = Number(state.layoutSeed) || 1;
+        app.playbackMode = state.playbackMode === 'reveal' ? 'reveal' : 'shuffle';
+        app.playbackOrder = PLAYBACK_ORDER_KEYS.indexOf(state.playbackOrder) >= 0 ? state.playbackOrder : 'center-out';
+        app.customOrigin = state.customOrigin && Number.isFinite(Number(state.customOrigin.normalizedX)) &&
+            Number.isFinite(Number(state.customOrigin.normalizedY)) ? {
+                normalizedX: Math.max(0, Math.min(1, Number(state.customOrigin.normalizedX))),
+                normalizedY: Math.max(0, Math.min(1, Number(state.customOrigin.normalizedY)))
+            } : null;
+        app.releaseMusicAudio();
+        app.backgroundMusic = normalizeBackgroundMusic(state.backgroundMusic);
+        if (app.backgroundMusic && app.backgroundMusic.originalBlob) app.attachMusicAudio();
         app.overlays = normalizeOverlays(state.overlays);
         if (!app.overlays.some(function (overlay) { return overlay.id === app.selectedOverlayId; })) {
             app.selectedOverlayId = null;
@@ -2164,6 +2526,12 @@ import {
         if (!app.wall.setLayoutSnapshot(state.layout)) app.wall.setArrangement(state.arrangement);
 
         app.syncLayoutControls();
+        document.getElementById('playback-mode').value = app.playbackMode;
+        document.getElementById('playback-order').value = app.playbackOrder;
+        document.getElementById('wall-canvas').classList.toggle('selecting-playback-origin',
+            app.playbackOrder === 'custom' && !app.customOrigin);
+        app.updateCustomOriginMarker();
+        app.syncMusicControls();
         app.updatePhotoCount();
         app.renderPhotoLibrary();
         app.renderLayers();
@@ -2173,17 +2541,17 @@ import {
     };
 
     app.undo = function () {
-        app.stopFlowPlayback(true);
+        app.stopAllPlayback(true);
         if (app.history.undo()) app.toast('已撤销');
     };
 
     app.redo = function () {
-        app.stopFlowPlayback(true);
+        app.stopAllPlayback(true);
         if (app.history.redo()) app.toast('已重做');
     };
 
     app.setPositionMode = function (enabled) {
-        if (enabled) app.stopFlowPlayback(true);
+        if (enabled) app.stopAllPlayback(true);
         app.localAdjustSnapshot = null;
         app.wall.setInteractionMode(enabled ? 'adjust' : 'swap');
         var button = document.getElementById('position-mode-btn');
@@ -2198,25 +2566,118 @@ import {
     app.flowTiming = function () {
         var speed = document.getElementById('flow-speed').value;
         return {
-            slow: { interval: 5200, transition: 1200 },
-            normal: { interval: 3200, transition: 800 },
-            fast: { interval: 1800, transition: 500 }
-        }[speed] || { interval: 3200, transition: 800 };
+            slow: { interval: 5200, transition: 1200, stagger: 200 },
+            normal: { interval: 3200, transition: 800, stagger: 120 },
+            fast: { interval: 1800, transition: 500, stagger: 70 }
+        }[speed] || { interval: 3200, transition: 800, stagger: 120 };
     };
 
-    app.runFlowCycle = function () {
-        if (!app.flowPlaying || app.photos.length < 2) return;
-        var timing = app.flowTiming();
-        var seed = app.wall.layoutSeed + 1;
-        if (app.wall.randomizeAssignments(seed, timing.transition)) app.flowCycleCount++;
-        app.scheduleNextFlowCycle();
+    app.getPlaybackOrigin = function () {
+        if (!app.customOrigin) return null;
+        return {
+            x: app.customOrigin.normalizedX * Math.max(1, app.wall.cssWidth),
+            y: app.customOrigin.normalizedY * Math.max(1, app.wall.cssHeight)
+        };
     };
 
-    app.scheduleNextFlowCycle = function () {
+    app.updateCustomOriginMarker = function () {
+        var marker = document.getElementById('playback-origin-marker');
+        if (!marker || !app.customOrigin || app.playbackOrder !== 'custom') {
+            if (marker) marker.classList.remove('visible');
+            return;
+        }
+        marker.style.left = (app.customOrigin.normalizedX * 100) + '%';
+        marker.style.top = (app.customOrigin.normalizedY * 100) + '%';
+        marker.classList.add('visible');
+    };
+
+    /* ================================================================ */
+    /* Unified playback controller (reveal + shuffle)                    */
+    /* ================================================================ */
+
+    app.startPlayback = function () {
+        if (app.playbackOrder === 'custom' && !app.customOrigin) {
+            document.getElementById('wall-canvas').classList.add('selecting-playback-origin');
+            app.toast('请先在照片墙上点击播放起点');
+            return;
+        }
+        var mode = app.playbackMode;
+        if (mode === 'reveal') {
+            app.startRevealPlayback();
+        } else {
+            app.startFlowPlayback();
+        }
+    };
+
+    app.stopAllPlayback = function (saveHistory) {
         clearTimeout(app.flowTimer);
-        if (!app.flowPlaying) return;
-        app.flowTimer = setTimeout(app.runFlowCycle, app.flowTiming().interval);
+        app.flowTimer = null;
+        if (app.revealRAF) cancelAnimationFrame(app.revealRAF);
+        app.revealRAF = null;
+        app.revealTimeline = null;
+        if (saveHistory && app.flowCycleCount && app.flowSnapshot) app.recordHistory(app.flowSnapshot);
+        app.flowPlaying = false;
+        app.flowSnapshot = null;
+        app.revealSnapshot = null;
+        app.flowCycleCount = 0;
+        app.stopMusicPlayback();
+        if (app.wall) app.wall.clearPlayback();
+        app.updateFlowControls();
     };
+
+    /* ---- Reveal mode ---- */
+
+    app.startRevealPlayback = function () {
+        if (!app.photos.length || !app.wall.layout.length) {
+            app.toast('至少需要一个素材才能播放');
+            return;
+        }
+        app.setPositionMode(false);
+        app.stopAllPlayback(false);
+        app.revealSnapshot = app.captureState();
+        var timing = app.flowTiming();
+        var origin = app.getPlaybackOrigin();
+        app.revealTimeline = createTimeline(app.wall.layout, app.playbackOrder, {
+            mode: 'reveal',
+            canvasWidth: app.wall.cssWidth,
+            canvasHeight: app.wall.cssHeight,
+            seed: app.wall.layoutSeed,
+            stagger: timing.stagger,
+            transition: timing.transition,
+            originX: origin ? origin.x : undefined,
+            originY: origin ? origin.y : undefined
+        });
+        app.revealStartTime = performance.now();
+        app.flowPlaying = true; /* reuse the flag for button state */
+        app.updateFlowControls();
+        app.startMusicPlayback(app.revealTimeline.duration, false);
+        app.runRevealFrame();
+    };
+
+    app.runRevealFrame = function () {
+        if (!app.revealTimeline || !app.flowPlaying) return;
+        var elapsed = performance.now() - app.revealStartTime;
+        app.updateMusicPlayback(elapsed, app.revealTimeline.duration);
+        if (app.revealTimeline.isComplete(elapsed)) {
+            /* Animation finished — show full wall. */
+            app.wall.clearReveal();
+            app.stopRevealPlayback(true);
+            return;
+        }
+        app.wall.setPlaybackFrame(app.revealTimeline.getFrame(elapsed));
+        app.revealRAF = requestAnimationFrame(app.runRevealFrame);
+    };
+
+    app.stopRevealPlayback = function (saveHistory) {
+        app.stopAllPlayback(saveHistory);
+    };
+
+    app.restartPlayback = function () {
+        app.stopAllPlayback(true);
+        app.startPlayback();
+    };
+
+    /* ---- Shuffle mode, driven by the same Timeline used for export ---- */
 
     app.startFlowPlayback = function () {
         if (app.photos.length < 2 || app.wall.layout.length < 2) {
@@ -2224,22 +2685,54 @@ import {
             return;
         }
         app.setPositionMode(false);
+        app.stopAllPlayback(false);
         app.flowSnapshot = app.captureState();
         app.flowCycleCount = 0;
+        var timing = app.flowTiming();
+        app.revealTimeline = createTimeline(app.wall.layout, app.playbackOrder, {
+            mode: 'shuffle',
+            canvasWidth: app.wall.cssWidth,
+            canvasHeight: app.wall.cssHeight,
+            seed: app.wall.layoutSeed,
+            interval: timing.interval,
+            transition: timing.transition,
+            cycles: 1
+        });
+        app.revealStartTime = performance.now();
         app.flowPlaying = true;
         app.updateFlowControls();
-        app.runFlowCycle();
+        app.startMusicPlayback(0, false);
+        app.runFlowTimelineFrame();
+    };
+
+    app.runFlowTimelineFrame = function () {
+        if (!app.flowPlaying || !app.revealTimeline || app.revealTimeline.mode !== 'shuffle') return;
+        var elapsed = performance.now() - app.revealStartTime;
+        app.updateMusicPlayback(elapsed, 0);
+        if (app.revealTimeline.isComplete(elapsed)) {
+            var finalFrame = app.revealTimeline.getFrame(app.revealTimeline.duration);
+            app.wall.clearPlayback();
+            app.wall.setArrangement(finalFrame.photoIndices);
+            app.wall.layoutSeed += 1;
+            app.flowCycleCount++;
+            var timing = app.flowTiming();
+            app.revealTimeline = createTimeline(app.wall.layout, app.playbackOrder, {
+                mode: 'shuffle',
+                canvasWidth: app.wall.cssWidth,
+                canvasHeight: app.wall.cssHeight,
+                seed: app.wall.layoutSeed,
+                interval: timing.interval,
+                transition: timing.transition,
+                cycles: 1
+            });
+            app.revealStartTime = performance.now();
+        }
+        app.wall.setPlaybackFrame(app.revealTimeline.getFrame(performance.now() - app.revealStartTime));
+        app.revealRAF = requestAnimationFrame(app.runFlowTimelineFrame);
     };
 
     app.stopFlowPlayback = function (saveHistory) {
-        clearTimeout(app.flowTimer);
-        app.flowTimer = null;
-        if (!app.flowPlaying) return;
-        app.flowPlaying = false;
-        if (saveHistory && app.flowCycleCount && app.flowSnapshot) app.recordHistory(app.flowSnapshot);
-        app.flowSnapshot = null;
-        app.flowCycleCount = 0;
-        app.updateFlowControls();
+        app.stopAllPlayback(saveHistory);
     };
 
     app.updateFlowControls = function () {
@@ -2248,12 +2741,14 @@ import {
         button.classList.toggle('active', app.flowPlaying);
         button.setAttribute('aria-pressed', String(app.flowPlaying));
         document.getElementById('flow-play-icon').textContent = app.flowPlaying ? '■' : '▶';
-        document.getElementById('flow-play-label').textContent = app.flowPlaying ? '停止流动' : '流动播放';
+        document.getElementById('flow-play-label').textContent = app.flowPlaying ?
+            (app.playbackMode === 'shuffle' ? '停止流动' : '停止播放') :
+            (app.playbackMode === 'shuffle' ? '流动播放' : '逐张播放');
     };
 
     app.updateActionState = function () {
         var hasPhotos = app.photos.length > 0;
-        if (app.flowPlaying && app.photos.length < 2) app.stopFlowPlayback(false);
+        if (app.flowPlaying && app.photos.length < 2) app.stopAllPlayback(false);
         var exportButton = document.getElementById('export-btn');
         var shuffleButton = document.getElementById('shuffle-btn');
         var undoButton = document.getElementById('undo-btn');
@@ -2261,13 +2756,26 @@ import {
         var positionButton = document.getElementById('position-mode-btn');
         var flowButton = document.getElementById('flow-play-btn');
         var flowSpeed = document.getElementById('flow-speed');
+        var playbackModeSelect = document.getElementById('playback-mode');
+        var playbackOrderSelect = document.getElementById('playback-order');
         if (exportButton) exportButton.disabled = !hasPhotos;
         if (shuffleButton) shuffleButton.disabled = !hasPhotos;
         if (undoButton) undoButton.disabled = !app.history || !app.history.canUndo();
         if (redoButton) redoButton.disabled = !app.history || !app.history.canRedo();
         if (positionButton) positionButton.disabled = !hasPhotos;
-        if (flowButton) flowButton.disabled = app.photos.length < 2;
+        if (flowButton) flowButton.disabled = !hasPhotos;
         if (flowSpeed) flowSpeed.disabled = app.photos.length < 2;
+        if (playbackModeSelect) playbackModeSelect.disabled = !hasPhotos;
+        if (playbackOrderSelect) {
+            playbackOrderSelect.disabled = !hasPhotos;
+            /* Only show order selector for reveal mode. */
+            var orderLabel = playbackOrderSelect.closest('.flow-speed-field');
+            if (orderLabel) orderLabel.style.display = app.playbackMode === 'reveal' ? '' : 'none';
+        }
+        if (playbackModeSelect) {
+            var modeLabel = playbackModeSelect.closest('.flow-speed-field');
+            if (modeLabel) modeLabel.style.display = app.photos.length >= 2 ? '' : 'none';
+        }
         var saveProjectButton = document.getElementById('save-project-btn');
         if (saveProjectButton) saveProjectButton.disabled = !hasPhotos;
     };
@@ -2301,7 +2809,7 @@ import {
     app.openPhotoEditor = function (index) {
         var photo = app.photos[index];
         if (!photo) return;
-        app.stopFlowPlayback(true);
+        app.stopAllPlayback(true);
         app.photoEditorIndex = index;
         app.photoEditorDraft = normalizePhotoTransform(photo);
         app.photoEditorReplacement = null;
@@ -2440,7 +2948,7 @@ import {
      * ------------------------------------------------------------------ */
 
     app.openLightbox = function (index) {
-        app.stopFlowPlayback(true);
+        app.stopAllPlayback(true);
         app.lightboxIndex = index;
         var lb = document.getElementById('lightbox');
         app.lightboxReturnFocus = document.activeElement === document.body ? document.getElementById('wall-canvas') : document.activeElement;
@@ -2602,7 +3110,7 @@ import {
             app.toast('请先上传照片');
             return;
         }
-        app.stopFlowPlayback(true);
+        app.stopAllPlayback(true);
         var dialog = document.getElementById('export-dialog');
         app.exportReturnFocus = document.activeElement;
         document.querySelector('.app').inert = true;
@@ -2652,14 +3160,19 @@ import {
         var format = app.getCheckedValue('export-format', 'png');
         var transparentRadio = document.querySelector('input[name="export-background"][value="transparent"]');
         var transparentOption = document.getElementById('transparent-background-option');
-        var disabled = format === 'jpeg';
+        var isVideo = format === 'webm' || format === 'mp4';
+        var disabled = format === 'jpeg' || isVideo;
         transparentRadio.disabled = disabled;
         transparentOption.classList.toggle('disabled', disabled);
         if (disabled && transparentRadio.checked) {
             document.querySelector('input[name="export-background"][value="#ffffff"]').checked = true;
-            app.toast('JPG 不支持透明背景，已切换为白色');
         }
         document.getElementById('print-export-field').hidden = format !== 'pdf';
+        /* Hide scale and background options for video export. */
+        var scaleField = document.getElementById('export-scale-field');
+        var bgField = document.getElementById('export-background-field');
+        if (scaleField) scaleField.hidden = isVideo;
+        if (bgField) bgField.hidden = isVideo;
         app.updateExportDimensions();
         app.scheduleExportPreview();
     };
@@ -2667,9 +3180,11 @@ import {
     app.updateExportDimensions = function () {
         var target = document.getElementById('export-dimensions');
         if (!target || !app.wall || !app.wall.cssWidth) return;
+        var format = app.getCheckedValue('export-format', 'png');
+        var isVideo = format === 'webm' || format === 'mp4';
         var scale = parseInt(app.getCheckedValue('export-scale', '2'), 10);
         var aspectRatio = app.getCheckedValue('export-aspect', 'auto');
-        if (app.getCheckedValue('export-format', 'png') === 'pdf') {
+        if (format === 'pdf') {
             var preset = getPrintPreset(document.getElementById('export-print-size').value);
             var dpi = parseInt(document.getElementById('export-print-dpi').value, 10);
             var bleed = document.getElementById('export-print-bleed').checked ? 3 : 0;
@@ -2682,11 +3197,28 @@ import {
             document.getElementById('export-print-quality').textContent = assessment.dpi + ' DPI · ' + assessment.label;
             return;
         }
-        var dimensions = app.wall.getExportDimensions(scale, aspectRatio);
+        var dimensions = app.wall.getExportDimensions(isVideo ? 1 : scale, aspectRatio);
         var width = dimensions.width;
         var height = dimensions.height;
-        var megapixels = (width * height / 1000000).toFixed(1);
-        target.textContent = width + ' × ' + height + ' px · ' + megapixels + ' MP';
+        if (isVideo) {
+            var timing = app.flowTiming();
+            var previewTimeline = createTimeline(app.wall.layout, app.playbackOrder, {
+                mode: app.playbackMode,
+                canvasWidth: app.wall.cssWidth,
+                canvasHeight: app.wall.cssHeight,
+                seed: app.wall.layoutSeed,
+                stagger: timing.stagger,
+                interval: timing.interval,
+                transition: timing.transition,
+                cycles: app.playbackMode === 'shuffle' ? 3 : 1
+            });
+            var durationSec = previewTimeline.duration / 1000;
+            var totalFrames = Math.ceil(durationSec * 30) + 1;
+            target.textContent = width + ' × ' + height + ' · 30fps · ' + durationSec.toFixed(1) + 's · ' + totalFrames + ' 帧';
+        } else {
+            var megapixels = (width * height / 1000000).toFixed(1);
+            target.textContent = width + ' × ' + height + ' px · ' + megapixels + ' MP';
+        }
     };
 
     app.getExportBackground = function () {
@@ -2746,6 +3278,11 @@ import {
             var aspectRatio = app.getCheckedValue('export-aspect', 'auto');
             var background = app.getExportBackground();
 
+            if ((format === 'webm' || format === 'mp4') && app.playbackOrder === 'custom' && !app.customOrigin) {
+                app.toast('请先关闭导出窗口，并在照片墙上点击播放起点');
+                return;
+            }
+
             var rawName = document.getElementById('export-name').value.trim() || '我的照片墙';
             var fileName = rawName.replace(/[<>:"/\\|?*\u0000-\u001F]/g, '-').replace(/[. ]+$/, '') || '我的照片墙';
             app.closeExportDialog();
@@ -2754,7 +3291,56 @@ import {
             var outputPromise;
             var extension;
             var mime;
-            if (format === 'pdf') {
+            if (format === 'webm' || format === 'mp4') {
+                /* ---- Video export ---- */
+                if (!pickVideoMimeType()) {
+                    app.showLoading(false);
+                    app.toast('当前浏览器不支持视频录制');
+                    return;
+                }
+                var videoAspect = app.getCheckedValue('export-aspect', 'auto');
+                var videoDims = app.wall.getExportDimensions(1, videoAspect);
+                /* Cap video resolution for performance. */
+                var maxVideoPixels = 1280 * 720 * 4;
+                var videoScale = 1;
+                while (videoDims.width * videoDims.height * videoScale * videoScale > maxVideoPixels && videoScale > 0.5) {
+                    videoScale -= 0.1;
+                }
+                videoScale = Math.round(videoScale * 10) / 10;
+                var fps = parseInt(document.getElementById('export-print-dpi') ? '30' : '30', 10);
+                var exportOrigin = app.getPlaybackOrigin();
+                var videoTimeline = createTimeline(app.wall.layout, app.playbackOrder, {
+                    mode: app.playbackMode,
+                    canvasWidth: app.wall.cssWidth,
+                    canvasHeight: app.wall.cssHeight,
+                    seed: app.wall.layoutSeed,
+                    stagger: app.flowTiming().stagger,
+                    interval: app.flowTiming().interval,
+                    transition: app.flowTiming().transition,
+                    cycles: app.playbackMode === 'shuffle' ? 3 : 1,
+                    originX: exportOrigin ? exportOrigin.x : undefined,
+                    originY: exportOrigin ? exportOrigin.y : undefined
+                });
+                extension = format;
+                mime = format === 'mp4' ? 'video/mp4' : 'video/webm';
+                outputPromise = recordTimelineCanvas(app.wall, videoTimeline, {
+                    width: videoDims.width,
+                    height: videoDims.height,
+                    fps: 30,
+                    format: format,
+                    scale: videoScale,
+                    aspectRatio: videoAspect,
+                    background: background,
+                    backgroundMusic: app.backgroundMusic,
+                    onStatus: function (msg) {
+                        app.showLoading(true, msg);
+                    },
+                    onProgress: function (frame, total) {
+                        var pct = Math.round(frame / total * 100);
+                        app.showLoading(true, '正在渲染视频… ' + pct + '% (' + frame + '/' + total + ' 帧)');
+                    }
+                });
+            } else if (format === 'pdf') {
                 var preset = getPrintPreset(document.getElementById('export-print-size').value);
                 var dpi = parseInt(document.getElementById('export-print-dpi').value, 10);
                 var bleedMm = document.getElementById('export-print-bleed').checked ? 3 : 0;
@@ -2801,11 +3387,15 @@ import {
                 return saveBlob(blob, {
                     title: '导出照片墙图片',
                     fileName: fileName + '.' + extension,
-                    filters: [{ name: extension.toUpperCase() + (mime === 'application/pdf' ? ' 文档' : ' 图片'), extensions: [extension] }]
+                    filters: [{ name: extension.toUpperCase() + (mime === 'application/pdf' ? ' 文档' : mime.startsWith('video/') ? ' 视频' : ' 图片'), extensions: [extension] }]
                 }).then(function (result) {
                     app.showLoading(false);
                     if (result.cancelled) app.toast('已取消导出');
-                    else app.toast((format === 'pdf' ? 'PDF' : '图片') + '已导出 · ' + Math.round(blob.size / 1024) + ' KB');
+                    else {
+                        var typeLabel = format === 'pdf' ? 'PDF' : mime.startsWith('video/') ? '视频' : '图片';
+                        var sizeLabel = blob.size > 1048576 ? (blob.size / 1048576).toFixed(1) + ' MB' : Math.round(blob.size / 1024) + ' KB';
+                        app.toast(typeLabel + '已导出 · ' + sizeLabel);
+                    }
                 });
             }).catch(function (error) {
                 app.showLoading(false);

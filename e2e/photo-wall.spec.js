@@ -24,6 +24,22 @@ function pngPhoto(index) {
     };
 }
 
+function wavMusic() {
+    var sampleRate = 8000;
+    var samples = sampleRate;
+    var dataSize = samples * 2;
+    var buffer = Buffer.alloc(44 + dataSize);
+    buffer.write('RIFF', 0); buffer.writeUInt32LE(36 + dataSize, 4); buffer.write('WAVE', 8);
+    buffer.write('fmt ', 12); buffer.writeUInt32LE(16, 16); buffer.writeUInt16LE(1, 20);
+    buffer.writeUInt16LE(1, 22); buffer.writeUInt32LE(sampleRate, 24);
+    buffer.writeUInt32LE(sampleRate * 2, 28); buffer.writeUInt16LE(2, 32); buffer.writeUInt16LE(16, 34);
+    buffer.write('data', 36); buffer.writeUInt32LE(dataSize, 40);
+    for (var i = 0; i < samples; i++) {
+        buffer.writeInt16LE(Math.round(Math.sin(2 * Math.PI * 440 * i / sampleRate) * 5000), 44 + i * 2);
+    }
+    return { name: 'background.wav', mimeType: 'audio/wav', buffer: buffer };
+}
+
 function crc32(buffer) {
     var crc = 0xffffffff;
     for (var i = 0; i < buffer.length; i++) {
@@ -197,6 +213,24 @@ test('offers slot-local positioning and speed-controlled flow playback', async f
     await expect(page.locator('#undo-btn')).toBeEnabled();
 });
 
+test('reveals tiles from a custom canvas origin with timeline playback', async function ({ page }) {
+    await page.locator('#file-input').setInputFiles([pngPhoto(40), pngPhoto(41), pngPhoto(42), pngPhoto(43)]);
+    await page.locator('#playback-mode').selectOption('reveal');
+    await expect(page.locator('#playback-order')).toBeVisible();
+    await page.locator('#playback-order').selectOption('custom');
+    await expect(page.locator('#wall-canvas')).toHaveClass(/selecting-playback-origin/);
+
+    await page.locator('#wall-canvas').click({ position: { x: 900, y: 500 } });
+    await expect(page.locator('#playback-origin-marker')).toHaveClass(/visible/);
+    await expect(page.locator('#wall-canvas')).not.toHaveClass(/selecting-playback-origin/);
+
+    await page.locator('#flow-play-btn').click();
+    await expect(page.locator('#flow-play-label')).toHaveText('停止播放');
+    await page.waitForTimeout(250);
+    await page.locator('#flow-play-btn').click();
+    await expect(page.locator('#flow-play-label')).toHaveText('逐张播放');
+});
+
 test('adds editable layers and generates a repeatable next layout option', async function ({ page }) {
     await page.locator('#file-input').setInputFiles([pngPhoto(1), pngPhoto(2), pngPhoto(3)]);
     await page.locator('#add-title-btn').click();
@@ -208,6 +242,45 @@ test('adds editable layers and generates a repeatable next layout option', async
     await expect(page.locator('.layer-item')).toHaveCount(2);
     await page.locator('#shuffle-btn').click();
     await expect(page.locator('.toast')).toContainText('已生成新方案');
+});
+
+test('deletes a selected sticker and removes the retained border', async function ({ page }) {
+    await page.locator('#file-input').setInputFiles([pngPhoto(1), pngPhoto(2)]);
+    await page.locator('[data-sticker="🎉"]').click();
+    await expect(page.locator('.layer-item')).toHaveCount(1);
+    await expect(page.locator('#overlay-delete-btn')).toBeVisible();
+    await page.locator('#overlay-delete-btn').click();
+    await expect(page.locator('.layer-item')).toHaveCount(0);
+    await expect(page.locator('.toast')).toContainText('贴纸已删除');
+
+    await page.locator('#border-style').selectOption('classic');
+    await expect(page.locator('.layer-item')).toHaveCount(1);
+    await expect(page.locator('#border-remove-btn')).toBeVisible();
+    await page.locator('#border-remove-btn').click();
+    await expect(page.locator('.layer-item')).toHaveCount(0);
+    await expect(page.locator('#border-style')).toHaveValue('none');
+});
+
+test('uploads background music and keeps its controls editable', async function ({ page }) {
+    await page.locator('#music-file-input').setInputFiles(wavMusic());
+    await expect(page.locator('#music-editor')).toBeVisible();
+    await expect(page.locator('#music-name')).toHaveText('background.wav');
+    await page.locator('#music-volume').fill('0.4');
+    await expect(page.locator('#music-volume-value')).toHaveText('40%');
+    await page.locator('#music-loop').uncheck();
+    await page.locator('#music-remove-btn').click();
+    await expect(page.locator('#music-editor')).toBeHidden();
+});
+
+test('uses an original built-in track and an exact matrix template', async function ({ page }) {
+    await page.locator('#file-input').setInputFiles([pngPhoto(21), pngPhoto(22), pngPhoto(23)]);
+    await page.locator('[data-music-track="warm-memory"]').click();
+    await expect(page.locator('#music-name')).toHaveText('warm-memory.wav', { timeout: 10000 });
+    await expect(page.locator('[data-music-track="warm-memory"]')).toHaveClass(/active/);
+
+    await page.locator('[data-preset="matrix-3"]').click();
+    await expect(page.locator('#matrix-columns')).toHaveValue('3');
+    await expect(page.locator('#canvas-status')).toContainText('9 个填充格位');
 });
 
 test('searches templates and saves a custom template', async function ({ page }) {
@@ -238,6 +311,44 @@ test('round-trips a ZIP v2 project with its content layers', async function ({ p
     await page.locator('#project-file-input').setInputFiles(projectPath);
     await expect(page.locator('#photo-count')).toHaveText('2');
     await expect(page.locator('.layer-item-name')).toContainText('项目标题');
+});
+
+test('exports the selected reveal timeline as a non-empty WebM video', async function ({ page }) {
+    await page.locator('#file-input').setInputFiles([pngPhoto(50), pngPhoto(51), pngPhoto(52)]);
+    await page.locator('#music-file-input').setInputFiles(wavMusic());
+    await expect(page.locator('#music-name')).toHaveText('background.wav');
+    await page.locator('#playback-mode').selectOption('reveal');
+    await page.locator('#flow-speed').selectOption('fast');
+    await page.locator('#export-btn').click();
+    await page.getByRole('radio', { name: /动态 WebM/ }).click({ force: true });
+    await expect(page.locator('#export-dimensions')).toContainText('30fps');
+
+    var downloadPromise = page.waitForEvent('download', { timeout: 30000 });
+    await page.locator('#export-confirm').click();
+    var download = await downloadPromise;
+    expect(download.suggestedFilename()).toMatch(/\.webm$/);
+    var video = await readFile(await download.path());
+    expect(video.byteLength).toBeGreaterThan(1000);
+});
+
+test('exports background music in an MP4 video', async function ({ page }) {
+    test.setTimeout(90000);
+    await page.locator('#file-input').setInputFiles([pngPhoto(53), pngPhoto(54)]);
+    await page.locator('#music-file-input').setInputFiles(wavMusic());
+    await page.locator('#playback-mode').selectOption('reveal');
+    await page.locator('#flow-speed').selectOption('fast');
+    await page.locator('#export-btn').click();
+    await page.getByRole('radio', { name: /MP4/ }).click({ force: true });
+
+    // ffmpeg.wasm has a 32 MB cold-start core, so first-run CI exports need
+    // more time than the normal UI interaction budget.
+    var downloadPromise = page.waitForEvent('download', { timeout: 90000 });
+    await page.locator('#export-confirm').click();
+    var download = await downloadPromise;
+    expect(download.suggestedFilename()).toMatch(/\.mp4$/);
+    var video = await readFile(await download.path());
+    expect(video.byteLength).toBeGreaterThan(1000);
+    expect(video.subarray(4, 8).toString()).toBe('ftyp');
 });
 
 test('exports a printable PDF document', async function ({ page }) {

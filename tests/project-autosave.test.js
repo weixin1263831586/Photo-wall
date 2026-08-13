@@ -64,3 +64,26 @@ test('manual backups retain blobs and rotate to the five newest snapshots', asyn
     assert.equal(restored.project.photos[0].originalBlob.size, blob.size);
     autosave.destroy();
 });
+
+test('autosave stores and restores background music separately from project metadata', async function () {
+    var photoBlob = new Blob(['photo'], { type: 'image/jpeg' });
+    var musicBlob = new Blob(['music'], { type: 'audio/mpeg' });
+    var autosave = createProjectAutosave({
+        indexedDB: new IDBFactory(),
+        databaseName: 'music-autosave-test',
+        capture: function () {
+            return {
+                project: {
+                    format: 'photo-wall-project', version: 2, photos: [],
+                    backgroundMusic: { name: 'song.mp3', volume: 0.5, originalBlob: musicBlob }
+                },
+                photos: [{ id: 'photo-1', name: 'one.jpg', originalBlob: photoBlob }]
+            };
+        }
+    });
+    await autosave.saveNow();
+    var restored = await autosave.loadLatest();
+    assert.equal(restored.project.backgroundMusic.name, 'song.mp3');
+    assert.equal(await restored.project.backgroundMusic.originalBlob.text(), 'music');
+    autosave.destroy();
+});

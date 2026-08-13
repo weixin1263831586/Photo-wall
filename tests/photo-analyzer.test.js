@@ -45,4 +45,6 @@ test('analyzePixels uses a connected skin-tone subject away from the centre', fu
     assert.equal(result.focusSource, 'subject');
     assert.ok(result.focusX > 0.68);
     assert.ok(result.focusY < 0.55);
+    assert.ok(result.faceBox && result.faceBox.x > 0.65);
+    assert.ok(result.personBox && result.personBox.height > result.faceBox.height);
 });

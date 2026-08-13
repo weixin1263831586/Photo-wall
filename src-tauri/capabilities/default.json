@@ -9,10 +9,13 @@
     "dialog:allow-save",
     "fs:allow-write-file",
     "fs:allow-read-file",
+    "fs:allow-remove",
+    "fs:scope-appcache",
     {
       "identifier": "opener:allow-open-path",
       "allow": [{ "path": "$APPCACHE/*" }]
     },
-    "log:default"
+    "log:default",
+    "native-video:default"
   ]
 }

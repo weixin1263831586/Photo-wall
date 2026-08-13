@@ -23,7 +23,7 @@ function unzipAsync(data) {
                 fileCount++;
                 totalBytes += Number(file.originalSize) || 0;
                 var safePath = file.name === 'manifest.json' || file.name === 'project.json' ||
-                    /^(photos|thumbnails)\/[a-zA-Z0-9._-]+$/.test(file.name);
+                    /^(photos|thumbnails|audio)\/[a-zA-Z0-9._-]+$/.test(file.name);
                 if (!safePath) throw new Error('Project contains an unsafe ZIP entry');
                 if (fileCount > MAX_FILES || totalBytes > MAX_UNCOMPRESSED_BYTES || file.originalSize > 220 * 1024 * 1024) {
                     throw new Error('Project expands beyond the safe limit');
@@ -49,6 +49,11 @@ function extensionForMime(mime) {
     if (mime === 'video/webm') return 'webm';
     if (mime === 'video/quicktime') return 'mov';
     if (mime === 'video/x-m4v') return 'm4v';
+    if (mime === 'audio/wav' || mime === 'audio/x-wav') return 'wav';
+    if (mime === 'audio/mp4' || mime === 'audio/x-m4a') return 'm4a';
+    if (mime === 'audio/aac') return 'aac';
+    if (mime === 'audio/ogg') return 'ogg';
+    if (mime === 'audio/mpeg') return 'mp3';
     return 'jpg';
 }
 
@@ -68,6 +73,12 @@ function projectMetadata(project) {
         delete metadata.img;
         return metadata;
     });
+    if (clean.backgroundMusic) {
+        clean.backgroundMusic = Object.assign({}, clean.backgroundMusic);
+        delete clean.backgroundMusic.originalBlob;
+        delete clean.backgroundMusic.blob;
+        delete clean.backgroundMusic.url;
+    }
     return clean;
 }
 
@@ -105,6 +116,14 @@ export async function createProjectContainer(project, photos, options) {
             thumbnailType: thumbnail && thumbnail.type
         });
     }
+    var manifestAudio = null;
+    var backgroundMusic = options.backgroundMusic;
+    var musicBlob = backgroundMusic && (backgroundMusic.originalBlob || backgroundMusic.blob);
+    if (musicBlob instanceof Blob) {
+        var audioPath = 'audio/background.' + extensionForMime(musicBlob.type || backgroundMusic.type);
+        files[audioPath] = [await blobBytes(musicBlob), { level: 0 }];
+        manifestAudio = { path: audioPath, type: musicBlob.type || backgroundMusic.type || 'audio/mpeg' };
+    }
     var cleanProject = projectMetadata(project);
     var manifest = {
         format: FORMAT,
@@ -113,7 +132,8 @@ export async function createProjectContainer(project, photos, options) {
         createdAt: new Date().toISOString(),
         project: 'project.json',
         photoCount: photos.length,
-        photos: manifestPhotos
+        photos: manifestPhotos,
+        audio: manifestAudio
     };
     files['manifest.json'] = [strToU8(JSON.stringify(manifest)), { level: 6 }];
     files['project.json'] = [strToU8(JSON.stringify(cleanProject)), { level: 6 }];
@@ -167,6 +187,15 @@ export async function openProjectContainer(source) {
             thumbnailBlob: thumbnailBlob
         });
     });
+    if (manifest.audio) {
+        if (!manifest.audio.path || !files[manifest.audio.path]) throw new Error('Project background music is missing');
+        project.backgroundMusic = Object.assign({}, project.backgroundMusic || {}, {
+            type: manifest.audio.type || 'audio/mpeg',
+            originalBlob: new Blob([files[manifest.audio.path]], { type: manifest.audio.type || 'audio/mpeg' })
+        });
+    } else {
+        project.backgroundMusic = null;
+    }
     return { manifest: manifest, project: migrateProject(project) };
 }
 
@@ -185,7 +214,11 @@ export function migrateProject(project) {
         smartPlacement: true,
         mixedSizes: true,
         rotationRange: 0,
-        layoutSeed: 1
+        matrixColumns: 0,
+        layoutSeed: 1,
+        playbackMode: 'shuffle',
+        playbackOrder: 'center-out',
+        customOrigin: null
     }, project.settings || {});
     migrated.photos = project.photos.map(function (photo) {
         return Object.assign({
@@ -201,7 +234,9 @@ export function migrateProject(project) {
             editOffsetY: 0,
             editRotation: 0,
             flipX: false,
-            flipY: false
+            flipY: false,
+            faceBox: null,
+            personBox: null
         }, photo);
     });
     migrated.overlays = Array.isArray(project.overlays) ? project.overlays : [];

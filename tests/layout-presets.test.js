@@ -48,3 +48,10 @@ test('a preset refuses to apply when its required shape is missing', function ()
         applyLayoutPreset(wall, getLayoutPreset('travel'), null);
     }, /Preset shape is unavailable/);
 });
+
+test('matrix presets retain their exact column count', function () {
+    var preset = getLayoutPreset('matrix-3');
+    assert.equal(preset.settings.matrixColumns, 3);
+    assert.equal(preset.settings.mixedSizes, false);
+    assert.equal(preset.settings.placementMode, 'grid');
+});

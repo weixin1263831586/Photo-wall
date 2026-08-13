@@ -8,7 +8,8 @@ import { Shapes } from './shapes.js';
 import { computeDistanceTransform, sampleDistance } from './mask/DistanceTransform.js';
 import { assignPhotosToCells } from './layout/SmartPlacement.js';
 import { createSeededRandom, mixSeed, normalizeSeed } from './layout/SeededRandom.js';
-import { drawPhotoCover } from './image/PhotoTransform.js';
+import { drawPhotoCover, photoImageDimensions } from './image/PhotoTransform.js';
+import { computeOptimalPlacement } from './image/AutoCropOptimizer.js';
 import { drawOverlays, getOverlayAt } from './overlay/OverlayRenderer.js';
 
 'use strict';
@@ -32,6 +33,7 @@ import { drawOverlays, getOverlayAt } from './overlay/OverlayRenderer.js';
         this.density = 1;
         this.gap = 0;
         this.placementMode = 'grid';
+        this.matrixColumns = 0;
         this.photoShape = 'square';
         this.smartPlacement = true;
         this.mixedSizes = true;
@@ -73,6 +75,8 @@ import { drawOverlays, getOverlayAt } from './overlay/OverlayRenderer.js';
         this._transitionPendingDuration = 0;
         this._transitionProgress = 1;
         this._transitionRAF = null;
+        this._playbackFrame = null;
+        this._autoCropCache = new Map();
         this._bindEvents();
     }
 
@@ -80,6 +84,7 @@ import { drawOverlays, getOverlayAt } from './overlay/OverlayRenderer.js';
         this._renderRevision++;
         this._cachedLayerRevision = -1;
         this._composeRevision = -1;
+        if (this._autoCropCache) this._autoCropCache.clear();
     };
 
     PhotoWall.prototype.resize = function () {
@@ -138,6 +143,16 @@ import { drawOverlays, getOverlayAt } from './overlay/OverlayRenderer.js';
     };
     PhotoWall.prototype.setPlacementMode = function (mode) {
         this.placementMode = mode;
+        if (mode !== 'grid') this.matrixColumns = 0;
+        if (this.shape) this.generateLayout();
+    };
+    PhotoWall.prototype.setMatrixColumns = function (columns) {
+        columns = Number(columns) || 0;
+        this.matrixColumns = [2, 3, 4, 5, 6, 8].indexOf(columns) >= 0 ? columns : 0;
+        if (this.matrixColumns) {
+            this.placementMode = 'grid';
+            this.mixedSizes = false;
+        }
         if (this.shape) this.generateLayout();
     };
     PhotoWall.prototype.setPhotoShape = function (shape) {
@@ -408,6 +423,41 @@ import { drawOverlays, getOverlayAt } from './overlay/OverlayRenderer.js';
         return cells;
     };
 
+    PhotoWall.prototype._buildMatrixCells = function (size) {
+        var b = this.maskData.bounds, cells = [];
+        var columns = Math.max(1, Number(size) || 1);
+        var rows = columns;
+        var cellW = b.width / columns;
+        var cellH = b.height / rows;
+        for (var row = 0; row < rows; row++) {
+            for (var col = 0; col < columns; col++) {
+                var x = b.x + col * cellW;
+                var y = b.y + row * cellH;
+                if (this._rectMaskArea(x, y, cellW, cellH) === 0) continue;
+                var fitted = this._fitBoundaryCell(x, y, cellW, cellH);
+                cells.push({
+                    x: fitted.x + fitted.width / 2,
+                    y: fitted.y + fitted.height / 2,
+                    baseX: fitted.x,
+                    baseY: fitted.y,
+                    width: fitted.width,
+                    height: fitted.height,
+                    size: Math.max(fitted.width, fitted.height),
+                    row: row,
+                    col: col,
+                    isLarge: false,
+                    isBoundary: fitted.isBoundary === true,
+                    maskCoverage: fitted.coverage,
+                    visibleFocusX: fitted.visibleFocusX,
+                    visibleFocusY: fitted.visibleFocusY,
+                    boundaryDistance: sampleDistance(this.maskData.distance, this.maskData.width, this.maskData.height,
+                        fitted.x + fitted.width / 2, fitted.y + fitted.height / 2)
+                });
+            }
+        }
+        return cells;
+    };
+
     PhotoWall.prototype._mergeLargeCells = function (cells, desiredLarge) {
         if (!this.mixedSizes || desiredLarge < 1 || cells.length < 4) return cells;
         var spanRows = this.placementMode === 'brick' ? 1 : 2;
@@ -520,6 +570,16 @@ import { drawOverlays, getOverlayAt } from './overlay/OverlayRenderer.js';
         }
         var b = this.maskData.bounds;
         var target = Math.max(1, Math.round(this.photos.length * this.density));
+        if (this.matrixColumns > 0) {
+            var matrixCells = this._buildMatrixCells(this.matrixColumns);
+            this.layout = this._assignPhotos(matrixCells, forceRandom);
+            this._invalidateRenderCache();
+            this._refreshOrderCache();
+            this.hoveredIndex = -1; this.draggingIndex = -1; this.dragOverIndex = -1;
+            if (this.onLayout) this.onLayout(this.layout.length, 0);
+            if (skipAnimation) this.render(); else this._animate();
+            return;
+        }
         var desiredLarge = this.mixedSizes && target >= 8 ? Math.max(1, Math.min(80, Math.round(target * 0.1))) : 0;
         var reductionPerLarge = this.placementMode === 'brick' ? 1 : 3;
         var baseTarget = target + desiredLarge * reductionPerLarge;
@@ -652,6 +712,14 @@ import { drawOverlays, getOverlayAt } from './overlay/OverlayRenderer.js';
         }
         if (!this.layout.length) return;
 
+        /* Timeline playback: bypass the normal static compose path. */
+        if (this._playbackFrame) {
+            this.renderPlaybackFrame(ctx, this._playbackFrame, {
+                sourceFrame: { x: 0, y: 0, width: w, height: h }
+            });
+            return;
+        }
+
         var layer = this._layerCanvas, lx = this._layerContext;
         var targetWidth = Math.round(w * this.dpr), targetHeight = Math.round(h * this.dpr);
         if (layer.width !== targetWidth || layer.height !== targetHeight) {
@@ -750,6 +818,120 @@ import { drawOverlays, getOverlayAt } from './overlay/OverlayRenderer.js';
         ctx.restore();
     };
 
+    /* ================================================================ */
+    /* Reveal-mode playback rendering                                    */
+    /* ================================================================ */
+
+    /**
+     * Set per-cell reveal opacities and re-render the editor canvas.
+     * Each value in the Float32Array maps to layout[i] (0 = hidden, 1 = shown).
+     */
+    PhotoWall.prototype.setPlaybackFrame = function (frame) {
+        this._playbackFrame = frame || null;
+        /* Bypass the layer cache during reveal animation. */
+        this._cachedLayerRevision = -1;
+        this.render();
+    };
+
+    PhotoWall.prototype.clearPlayback = function () {
+        this._playbackFrame = null;
+        this._cachedLayerRevision = -1;
+        this.render();
+    };
+
+    /* Compatibility wrappers for existing integrations. */
+    PhotoWall.prototype.setRevealOpacities = function (opacities, scales) {
+        this.setPlaybackFrame({ mode: 'reveal', opacities: opacities, scales: scales });
+    };
+
+    PhotoWall.prototype.clearReveal = function () {
+        this.clearPlayback();
+    };
+
+    /** Render a reveal or shuffle Timeline frame to the editor or exporter. */
+    PhotoWall.prototype.renderPlaybackFrame = function (ctx, frame, options) {
+        if (!this.maskData || !this.layout.length) return;
+        options = options || {};
+        frame = frame || { mode: 'reveal' };
+        var sourceFrame = options.sourceFrame || {
+            x: 0, y: 0,
+            width: Math.max(1, this.cssWidth),
+            height: Math.max(1, this.cssHeight)
+        };
+        var outputWidth = ctx.canvas.width;
+        var outputHeight = ctx.canvas.height;
+        var scaleX = outputWidth / Math.max(1, sourceFrame.width);
+        var scaleY = outputHeight / Math.max(1, sourceFrame.height);
+        ctx.save();
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.clearRect(0, 0, outputWidth, outputHeight);
+        ctx.setTransform(scaleX, 0, 0, scaleY, -sourceFrame.x * scaleX, -sourceFrame.y * scaleY);
+        ctx.globalCompositeOperation = 'source-over';
+        ctx.globalAlpha = 1;
+
+        if (this._renderOrder.length !== this.layout.length) this._refreshOrderCache();
+        var renderOrder = this._renderOrder;
+        for (var oi = 0; oi < renderOrder.length; oi++) {
+            var ci = renderOrder[oi];
+            var alpha = frame.opacities ? Math.max(0, Math.min(1, frame.opacities[ci] || 0)) : 1;
+            if (alpha <= 0) continue;
+            var cellScale = frame.scales ? Math.max(0.5, Math.min(1, frame.scales[ci] || 1)) : 1;
+            var item = this.layout[ci];
+            var previousIndex = frame.previousIndices && Number(frame.previousIndices[ci]);
+            var nextIndex = frame.photoIndices && Number(frame.photoIndices[ci]);
+            var progress = Math.max(0, Math.min(1, Number(frame.transitionProgress) || 0));
+            if (frame.mode === 'shuffle' && Number.isInteger(previousIndex) && Number.isInteger(nextIndex) && previousIndex !== nextIndex) {
+                var previousPhoto = this.photos[previousIndex];
+                var nextPhoto = this.photos[nextIndex];
+                if (previousPhoto && progress < 1) {
+                    ctx.save();
+                    ctx.globalAlpha = alpha * (1 - progress);
+                    this._drawPhoto(ctx, Object.assign({}, item, {
+                        photo: previousPhoto, photoIndex: previousIndex, photoId: previousPhoto.id
+                    }), false, cellScale, false);
+                    ctx.restore();
+                }
+                if (nextPhoto && progress > 0) {
+                    ctx.save();
+                    ctx.globalAlpha = alpha * progress;
+                    this._drawPhoto(ctx, Object.assign({}, item, {
+                        photo: nextPhoto, photoIndex: nextIndex, photoId: nextPhoto.id
+                    }), false, cellScale, false);
+                    ctx.restore();
+                }
+            } else {
+                var assignedPhoto = Number.isInteger(nextIndex) ? this.photos[nextIndex] : null;
+                var renderItem = assignedPhoto ? Object.assign({}, item, {
+                    photo: assignedPhoto, photoIndex: nextIndex, photoId: assignedPhoto.id
+                }) : item;
+                ctx.save();
+                ctx.globalAlpha = alpha;
+                this._drawPhoto(ctx, renderItem, false, cellScale, false);
+                ctx.restore();
+            }
+        }
+        ctx.globalCompositeOperation = 'destination-in';
+        ctx.drawImage(this.maskData.maskCanvas, 0, 0, this.cssWidth, this.cssHeight);
+        ctx.globalCompositeOperation = 'source-over';
+        drawOverlays(ctx, this.overlays, this.cssWidth, this.cssHeight, { bounds: this.getExportBounds() });
+        ctx.restore();
+
+        if (options.background && options.background !== 'transparent') {
+            ctx.save();
+            ctx.setTransform(1, 0, 0, 1, 0, 0);
+            ctx.globalCompositeOperation = 'destination-over';
+            ctx.fillStyle = options.background;
+            ctx.fillRect(0, 0, outputWidth, outputHeight);
+            ctx.restore();
+        }
+    };
+
+    PhotoWall.prototype.renderRevealFrame = function (ctx, opacities, width, height, scale, scales) {
+        this.renderPlaybackFrame(ctx, { mode: 'reveal', opacities: opacities, scales: scales }, {
+            sourceFrame: { x: 0, y: 0, width: width, height: height }
+        });
+    };
+
     PhotoWall.prototype._composeLayerAsync = function (revision) {
         if (!this.assetManager || this._composeRevision === revision) return this._composePromise;
         this._composeRevision = revision;
@@ -804,8 +986,11 @@ import { drawOverlays, getOverlayAt } from './overlay/OverlayRenderer.js';
 
     PhotoWall.prototype._drawPhoto = function (ctx, item, hovered, scale, dropTarget, imageOverride) {
         var gapScale = Math.max(0.4, 1 - this.gap);
-        var width = item.width * gapScale * scale, height = item.height * gapScale * scale;
+        var width = item.width * gapScale, height = item.height * gapScale;
         if (this.photoShape !== 'square') { width *= 1.16; height *= 1.16; }
+        var cropWidth = width, cropHeight = height;
+        width *= scale;
+        height *= scale;
         var img = imageOverride || (this.assetManager && this.assetManager.peekBitmap(item.photo, 'working')) || item.photo.img;
         if (!img) return;
         var x = item.x, y = item.y;
@@ -823,15 +1008,46 @@ import { drawOverlays, getOverlayAt } from './overlay/OverlayRenderer.js';
         var visibleFocusX = Number(item.visibleFocusX);
         var visibleFocusY = Number(item.visibleFocusY);
         var maskCoverage = Number(item.maskCoverage);
-        var placement = {
-            targetX: item.isBoundary && Number.isFinite(visibleFocusX) ? visibleFocusX : 0.5,
-            targetY: item.isBoundary && Number.isFinite(visibleFocusY) ? visibleFocusY : 0.5,
-            offsetX: localOffsetX,
-            offsetY: localOffsetY,
-            zoom: item.isBoundary ?
-                1.12 + Math.max(0, 0.75 - (Number.isFinite(maskCoverage) ? maskCoverage : 0.75)) * 0.4 :
-                (Math.abs(localOffsetX) + Math.abs(localOffsetY) > 0.01 ? 1.12 : 1)
-        };
+        var photo = item.photo || {};
+        var placement;
+        var hasManualSlotOffset = Math.abs(localOffsetX) + Math.abs(localOffsetY) > 0.01;
+        if (item.isBoundary && (photo.faceBox || photo.personBox) && this.maskData &&
+            !photo._autoCropDisabled && !hasManualSlotOffset) {
+            /* Subject-aware boundary placement: maximise visible face/person area. */
+            var imageDims = photoImageDimensions(img);
+            var cropCell = Object.assign({}, item, {
+                width: cropWidth,
+                height: cropHeight,
+                localOffsetX: localOffsetX,
+                localOffsetY: localOffsetY,
+                photoShape: this.photoShape
+            });
+            var cropCacheKey = [
+                this._maskCacheKey, item.slotId || (item.x + ':' + item.y), photo.id || item.photoIndex,
+                cropWidth.toFixed(2), cropHeight.toFixed(2), Number(item.rotation) || 0,
+                Number(photo.focusX) || 0.5, Number(photo.focusY) || 0.5,
+                Number(photo.editZoom) || 1, Number(photo.editRotation) || 0,
+                photo.flipX === true ? 1 : 0, photo.flipY === true ? 1 : 0
+            ].join('|');
+            placement = this._autoCropCache.get(cropCacheKey);
+            if (!placement) {
+                placement = computeOptimalPlacement(photo, cropCell, this.maskData, imageDims);
+                if (this._autoCropCache.size >= 4096) {
+                    this._autoCropCache.delete(this._autoCropCache.keys().next().value);
+                }
+                this._autoCropCache.set(cropCacheKey, placement);
+            }
+        } else {
+            placement = {
+                targetX: item.isBoundary && Number.isFinite(visibleFocusX) ? visibleFocusX : 0.5,
+                targetY: item.isBoundary && Number.isFinite(visibleFocusY) ? visibleFocusY : 0.5,
+                offsetX: localOffsetX,
+                offsetY: localOffsetY,
+                zoom: item.isBoundary ?
+                    1.12 + Math.max(0, 0.75 - (Number.isFinite(maskCoverage) ? maskCoverage : 0.75)) * 0.4 :
+                    (Math.abs(localOffsetX) + Math.abs(localOffsetY) > 0.01 ? 1.12 : 1)
+            };
+        }
         drawPhotoCover(ctx, img, width, height, item.photo, placement);
         if (hovered || dropTarget) {
             ctx.shadowColor = 'transparent'; ctx.lineWidth = 2;

@@ -24,7 +24,8 @@ function normalizeTemplate(template, index) {
             photoShape: ['circle', 'square', 'diamond', 'hexagon', 'heart'].includes(settings.photoShape) ? settings.photoShape : 'square',
             smartPlacement: settings.smartPlacement !== false,
             mixedSizes: settings.mixedSizes !== false,
-            rotationRange: Math.max(0, Math.min(24, Number(settings.rotationRange) || 0))
+            rotationRange: Math.max(0, Math.min(24, Number(settings.rotationRange) || 0)),
+            matrixColumns: [2, 3, 4, 5, 6, 8].includes(Number(settings.matrixColumns)) ? Number(settings.matrixColumns) : 0
         }
     };
 }

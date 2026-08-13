@@ -1,0 +1,242 @@
+/**
+ * PlaybackTimeline — converts an ordered cell sequence into a time-based
+ * animation timeline that can drive both the live preview and video export.
+ *
+ * Two modes:
+ *   'reveal'  — cells appear one-by-one, assembling the shape.
+ *   'shuffle' — all cells stay visible; photos swap at intervals (legacy flow).
+ */
+
+import { computePlaybackOrder } from './PlaybackOrder.js';
+import { createSeededRandom, normalizeSeed } from '../layout/SeededRandom.js';
+
+function clamp01(value) {
+    return Math.max(0, Math.min(1, Number(value) || 0));
+}
+
+function easeOutCubic(value) {
+    var t = clamp01(value);
+    return 1 - Math.pow(1 - t, 3);
+}
+
+function scalesFromOpacities(opacities) {
+    var scales = new Float32Array(opacities.length);
+    for (var i = 0; i < opacities.length; i++) scales[i] = 0.86 + opacities[i] * 0.14;
+    return scales;
+}
+
+/**
+ * Build a reveal-mode timeline.
+ *
+ * @param {Array}   layout    The PhotoWall layout array (cells with x, y, …).
+ * @param {string}  order     PlaybackOrders key.
+ * @param {object}  options   {
+ *   canvasWidth, canvasHeight, seed, originX, originY,
+ *   stagger   — ms per cell (auto-scaled if omitted),
+ *   transition— ms fade-in per cell (default 600),
+ *   mode      — 'reveal' | 'shuffle'
+ * }
+ */
+export function createTimeline(layout, order, options) {
+    layout = Array.isArray(layout) ? layout : [];
+    options = options || {};
+    var mode = options.mode || 'reveal';
+    var transition = Math.max(80, Number(options.transition) || 600);
+    var cellCount = layout.length;
+
+    var orderedIndices = computePlaybackOrder(layout, order, {
+        canvasWidth: options.canvasWidth,
+        canvasHeight: options.canvasHeight,
+        seed: options.seed,
+        originX: options.originX,
+        originY: options.originY
+    });
+
+    if (mode === 'shuffle') {
+        return createShuffleTimeline(layout, orderedIndices, Object.assign({}, options, { order: order }));
+    }
+
+    /* ---- Reveal mode ---- */
+
+    /* Auto-scale stagger so very large layouts don't take too long. */
+    var stagger;
+    if (options.stagger && Number.isFinite(options.stagger)) {
+        stagger = Math.max(20, Number(options.stagger));
+    } else {
+        /* Target a total reveal of ~6-10 seconds, clamped. */
+        var targetReveal = Math.min(10000, Math.max(3000, cellCount * 120));
+        stagger = Math.max(30, targetReveal / Math.max(1, cellCount));
+    }
+
+    var items = orderedIndices.map(function (cellIndex, sequencePosition) {
+        return {
+            cellIndex: cellIndex,
+            sequencePosition: sequencePosition,
+            startTime: sequencePosition * stagger,
+            transitionDuration: transition
+        };
+    });
+
+    var totalDuration = cellCount > 0
+        ? items[items.length - 1].startTime + transition
+        : 0;
+
+    return {
+        mode: 'reveal',
+        order: order,
+        duration: totalDuration,
+        cellCount: cellCount,
+        stagger: stagger,
+        transition: transition,
+        items: items,
+        orderedIndices: orderedIndices,
+
+        /**
+         * Returns a Float32Array of per-cell opacity values at the given time.
+         * Index i corresponds to layout[i].
+         */
+        getCellOpacities: function (time) {
+            var opacities = new Float32Array(cellCount);
+            for (var i = 0; i < items.length; i++) {
+                var item = items[i];
+                var elapsed = time - item.startTime;
+                if (elapsed <= 0) {
+                    opacities[item.cellIndex] = 0;
+                } else if (elapsed >= item.transitionDuration) {
+                    opacities[item.cellIndex] = 1;
+                } else {
+                    opacities[item.cellIndex] = easeOutCubic(elapsed / item.transitionDuration);
+                }
+            }
+            return opacities;
+        },
+
+        /** Scale accompanies the fade, giving each tile a restrained pop-in. */
+        getCellScales: function (time) {
+            var opacities = this.getCellOpacities(time);
+            return scalesFromOpacities(opacities);
+        },
+
+        getFrame: function (time) {
+            var opacities = this.getCellOpacities(time);
+            return {
+                mode: 'reveal',
+                opacities: opacities,
+                scales: scalesFromOpacities(opacities)
+            };
+        },
+
+        isComplete: function (time) {
+            return time >= totalDuration;
+        }
+    };
+}
+
+/**
+ * Shuffle timeline: all cells visible, photos rotate at intervals.
+ * This wraps the existing randomizeAssignments behaviour but exposes it
+ * through the same timeline interface for video export.
+ */
+function shuffleAssignment(assignment, seed) {
+    var result = assignment.slice();
+    var random = createSeededRandom(seed);
+    for (var index = result.length - 1; index > 0; index--) {
+        var target = Math.floor(random() * (index + 1));
+        var temporary = result[index];
+        result[index] = result[target];
+        result[target] = temporary;
+    }
+    if (result.length > 1 && result.every(function (value, index) { return value === assignment[index]; })) {
+        result.push(result.shift());
+    }
+    return result;
+}
+
+function createShuffleTimeline(layout, orderedIndices, options) {
+    options = options || {};
+    var interval = Math.max(500, Number(options.interval) || 3200);
+    var transition = Math.max(200, Number(options.transition) || 800);
+    var cycles = Math.max(1, Number(options.cycles) || 3);
+    var cellCount = layout.length;
+    var totalDuration = cycles * interval;
+    var baseSeed = normalizeSeed(options.seed);
+
+    /* Pre-compute which photo each cell shows at each cycle boundary. */
+    var cycleStates = [];
+    var currentAssignment = layout.map(function (item) {
+        return item.photoIndex;
+    });
+
+    for (var c = 0; c <= cycles; c++) {
+        cycleStates.push(currentAssignment.slice());
+        if (c < cycles) {
+            currentAssignment = shuffleAssignment(currentAssignment, baseSeed + c + 1);
+        }
+    }
+
+    return {
+        mode: 'shuffle',
+        order: options.order || 'shuffle',
+        duration: totalDuration,
+        cellCount: cellCount,
+        interval: interval,
+        transition: transition,
+        cycles: cycles,
+        cycleStates: cycleStates,
+
+        /**
+         * Returns per-cell opacity (always 1 for shuffle, since all cells
+         * remain visible — the transition is a crossfade handled at the
+         * renderer level).
+         */
+        getCellOpacities: function () {
+            var opacities = new Float32Array(cellCount);
+            for (var i = 0; i < cellCount; i++) opacities[i] = 1;
+            return opacities;
+        },
+
+        getCellScales: function () {
+            var scales = new Float32Array(cellCount);
+            for (var i = 0; i < cellCount; i++) scales[i] = 1;
+            return scales;
+        },
+
+        /**
+         * Returns the photo assignment at a given time, with crossfade progress
+         * for cells currently transitioning.
+         * @returns { photoIndices: number[], transitionProgress: 0..1 }
+         */
+        getAssignmentAt: function (time) {
+            time = Math.max(0, Math.min(totalDuration, Number(time) || 0));
+            var cycleIndex = Math.floor(time / interval);
+            if (cycleIndex >= cycles) cycleIndex = cycles - 1;
+
+            var prev = cycleStates[cycleIndex];
+            var next = cycleStates[cycleIndex + 1] || prev;
+            var elapsed = time - cycleIndex * interval;
+            var progress = easeOutCubic(elapsed / transition);
+
+            return {
+                photoIndices: next,
+                previousIndices: prev,
+                transitionProgress: progress < 1 ? progress : 1
+            };
+        },
+
+        getFrame: function (time) {
+            var assignment = this.getAssignmentAt(time);
+            return {
+                mode: 'shuffle',
+                opacities: this.getCellOpacities(time),
+                scales: this.getCellScales(time),
+                photoIndices: assignment.photoIndices,
+                previousIndices: assignment.previousIndices,
+                transitionProgress: assignment.transitionProgress
+            };
+        },
+
+        isComplete: function (time) {
+            return time >= totalDuration;
+        }
+    };
+}
