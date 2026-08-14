@@ -4,6 +4,30 @@ function clamp(value, min, max, fallback) {
     return Math.max(min, Math.min(max, value));
 }
 
+/** Adds a rounded rectangle to the current path, including pre-Chrome 99 WebViews. */
+export function addRoundedRectPath(context, x, y, width, height, radius) {
+    if (!context) return;
+    radius = Math.max(0, Math.min(Math.abs(width) / 2, Math.abs(height) / 2, Number(radius) || 0));
+    if (typeof context.roundRect === 'function') {
+        context.roundRect(x, y, width, height, radius);
+        return;
+    }
+    var left = Math.min(x, x + width);
+    var right = Math.max(x, x + width);
+    var top = Math.min(y, y + height);
+    var bottom = Math.max(y, y + height);
+    context.moveTo(left + radius, top);
+    context.lineTo(right - radius, top);
+    context.quadraticCurveTo(right, top, right, top + radius);
+    context.lineTo(right, bottom - radius);
+    context.quadraticCurveTo(right, bottom, right - radius, bottom);
+    context.lineTo(left + radius, bottom);
+    context.quadraticCurveTo(left, bottom, left, bottom - radius);
+    context.lineTo(left, top + radius);
+    context.quadraticCurveTo(left, top, left + radius, top);
+    context.closePath();
+}
+
 export function normalizePhotoTransform(photo) {
     photo = photo || {};
     return {

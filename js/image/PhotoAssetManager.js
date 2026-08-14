@@ -4,7 +4,9 @@ function bitmapSize(bitmap) {
 }
 
 function closeBitmap(bitmap) {
-    if (bitmap && typeof bitmap.close === 'function') bitmap.close();
+    if (!bitmap) return;
+    if (typeof bitmap.close === 'function') bitmap.close();
+    else if (typeof bitmap.__photoWallRelease === 'function') bitmap.__photoWallRelease();
 }
 
 /** Explicitly bounded decoded-image cache. Evicted ImageBitmaps are closed. */
@@ -156,15 +158,35 @@ function fallbackDecode(blob, urlAPI, ImageCtor) {
     return new Promise(function (resolve, reject) {
         var url = urlAPI.createObjectURL(blob);
         var image = new ImageCtor();
-        image.onload = function () {
+        var released = false;
+
+        function release() {
+            if (released) return;
+            released = true;
+            image.onload = null;
+            image.onerror = null;
+            try {
+                if (typeof image.removeAttribute === 'function') image.removeAttribute('src');
+                else image.src = '';
+            } catch (ignore) {}
             urlAPI.revokeObjectURL(url);
+        }
+        image.onload = function () {
+            image.onload = null;
+            image.onerror = null;
+            image.__photoWallRelease = release;
             resolve(image);
         };
         image.onerror = function () {
-            urlAPI.revokeObjectURL(url);
+            release();
             reject(new Error('Image decode failed'));
         };
-        image.src = url;
+        try {
+            image.src = url;
+        } catch (error) {
+            release();
+            reject(error);
+        }
     });
 }
 
@@ -183,6 +205,9 @@ export function createPhotoAssetManager(options) {
         if (typeof createBitmap === 'function') {
             return Promise.resolve(createBitmap(blob, { imageOrientation: 'from-image' })).catch(function () {
                 return createBitmap(blob);
+            }).catch(function () {
+                if (!urlAPI || !ImageCtor) throw new Error('Image decode failed');
+                return fallbackDecode(blob, urlAPI, ImageCtor);
             });
         }
         if (!urlAPI || !ImageCtor) return Promise.reject(new Error('No image decoder is available'));

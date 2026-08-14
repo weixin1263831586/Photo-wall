@@ -98,7 +98,15 @@ export function assignPhotosToCells(photos, cells, options) {
     });
     var cellOrder = cells.map(function (_, index) { return index; }).sort(function (a, b) {
         if (cells[a].isLarge !== cells[b].isLarge) return cells[a].isLarge ? -1 : 1;
-        return (Number(cells[b].boundaryDistance) || 0) - (Number(cells[a].boundaryDistance) || 0);
+        var distanceDelta = (Number(cells[b].boundaryDistance) || 0) - (Number(cells[a].boundaryDistance) || 0);
+        if (Math.abs(distanceDelta) > 0.001) return distanceDelta;
+        // Give unique photos to the most visible slots first. Repeated
+        // assignments can safely occupy small contour fragments afterwards.
+        var visibleA = Number(cells[a].visibleArea) ||
+            (Number(cells[a].maskCoverage) || 0) * Math.max(1, cells[a].width * cells[a].height);
+        var visibleB = Number(cells[b].visibleArea) ||
+            (Number(cells[b].maskCoverage) || 0) * Math.max(1, cells[b].width * cells[b].height);
+        return visibleB - visibleA;
     });
 
     cellOrder.forEach(function (cellIndex) {

@@ -30,6 +30,7 @@ class TranscodeArgs {
     var duration: Double = 0.0
     var volume: Double = 0.7
     var startTime: Double = 0.0
+    var endTime: Double = 0.0
     var loopAudio: Boolean = true
     var fadeIn: Double = 0.0
     var fadeOut: Double = 0.0
@@ -79,6 +80,7 @@ class ExamplePlugin(private val activity: Activity) : Plugin(activity) {
                     .setClippingConfiguration(
                         MediaItem.ClippingConfiguration.Builder()
                             .setStartPositionMs((args.startTime.coerceAtLeast(0.0) * 1000).toLong())
+                            .setEndPositionMs((args.endTime.coerceAtLeast(args.startTime + 0.05) * 1000).toLong())
                             .build()
                     )
                     .build()

@@ -94,6 +94,7 @@ async function runTranscode(blob, options) {
     var inputName = 'input-' + id + '.' + extensionFor(blob, options.name);
     var outputName = 'output-' + id + '.' + outputFormat;
     var audioName = musicBlob instanceof Blob ? 'audio-' + id + '.' + audioExtension(musicBlob, music.name) : '';
+    var segmentName = musicBlob instanceof Blob ? 'audio-segment-' + id + '.wav' : '';
     progressListener = function (event) {
         if (!options.onStatus || !Number.isFinite(event.progress)) return;
         var progress = Math.max(0, Math.min(1, event.progress));
@@ -105,8 +106,16 @@ async function runTranscode(blob, options) {
         var args = ['-i', inputName];
         if (audioName) {
             await ffmpeg.writeFile(audioName, await engine.fetchFile(musicBlob));
+            var musicDuration = Math.max(0, Number(music.duration) || 0);
+            var musicStart = clamp(music.startTime, 0, musicDuration, 0);
+            var musicEnd = clamp(music.endTime, Math.min(musicDuration, musicStart + 0.05), musicDuration, musicDuration);
+            var trimCode = await ffmpeg.exec([
+                '-ss', musicStart.toFixed(3), '-to', musicEnd.toFixed(3), '-i', audioName,
+                '-vn', '-c:a', 'pcm_s16le', segmentName
+            ], 60000);
+            if (trimCode !== 0) throw new Error('背景音乐选段失败（代码 ' + trimCode + '）');
             if (music.loop !== false) args.push('-stream_loop', '-1');
-            args.push('-ss', clamp(music.startTime, 0, Math.max(0, Number(music.duration) || 0), 0).toFixed(3), '-i', audioName);
+            args.push('-i', segmentName);
             args.push('-map', '0:v:0', '-map', '1:a:0', '-af', audioFilter(music, duration), '-t', duration.toFixed(3));
         } else {
             args.push('-map', '0:v:0', '-map', '0:a?');
@@ -115,7 +124,7 @@ async function runTranscode(blob, options) {
             args.push('-c:v', 'copy', '-c:a', 'libopus', '-b:a', '160k', outputName);
         } else {
             args.push(
-                '-vf', 'scale=1280:1280:force_original_aspect_ratio=decrease',
+                '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2',
                 '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '27',
                 '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k',
                 '-movflags', '+faststart', outputName
@@ -133,6 +142,7 @@ async function runTranscode(blob, options) {
         progressListener = function () {};
         try { await ffmpeg.deleteFile(inputName); } catch (ignore) {}
         if (audioName) try { await ffmpeg.deleteFile(audioName); } catch (ignore) {}
+        if (segmentName) try { await ffmpeg.deleteFile(segmentName); } catch (ignore) {}
         try { await ffmpeg.deleteFile(outputName); } catch (ignore) {}
     }
 }

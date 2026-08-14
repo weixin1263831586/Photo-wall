@@ -24,6 +24,47 @@ function pngPhoto(index) {
     };
 }
 
+function solidPng(name, width, height, colour) {
+    var scanline = Buffer.alloc((width * 4 + 1) * height);
+    for (var y = 0; y < height; y++) {
+        var row = y * (width * 4 + 1);
+        for (var x = 0; x < width; x++) {
+            var offset = row + 1 + x * 4;
+            scanline[offset] = colour[0];
+            scanline[offset + 1] = colour[1];
+            scanline[offset + 2] = colour[2];
+            scanline[offset + 3] = 255;
+        }
+    }
+    return { name: name, mimeType: 'image/png', buffer: createPng(width, height, scanline) };
+}
+
+async function recordedWebm(page, name, width, height, colour) {
+    var bytes = await page.evaluate(async function (settings) {
+        var canvas = document.createElement('canvas');
+        canvas.width = settings.width;
+        canvas.height = settings.height;
+        var context = canvas.getContext('2d');
+        context.fillStyle = settings.colour;
+        context.fillRect(0, 0, canvas.width, canvas.height);
+        var stream = canvas.captureStream(12);
+        var recorder = new MediaRecorder(stream, { mimeType: 'video/webm;codecs=vp8' });
+        var chunks = [];
+        recorder.ondataavailable = function (event) { if (event.data.size) chunks.push(event.data); };
+        var stopped = new Promise(function (resolve) { recorder.onstop = resolve; });
+        recorder.start(100);
+        for (var frame = 0; frame < 10; frame++) {
+            context.fillRect(0, 0, canvas.width, canvas.height);
+            await new Promise(function (resolve) { setTimeout(resolve, 50); });
+        }
+        recorder.stop();
+        await stopped;
+        stream.getTracks().forEach(function (track) { track.stop(); });
+        return Array.from(new Uint8Array(await new Blob(chunks, { type: 'video/webm' }).arrayBuffer()));
+    }, { width: width, height: height, colour: colour });
+    return { name: name, mimeType: 'video/webm', buffer: Buffer.from(bytes) };
+}
+
 function wavMusic() {
     var sampleRate = 8000;
     var samples = sampleRate;
@@ -93,6 +134,72 @@ test('uploads photos, marks a featured photo and toggles mixed sizing', async fu
     await expect(page.locator('#mixed-size-toggle')).not.toBeChecked();
     await page.locator('#undo-btn').click();
     await expect(page.locator('#mixed-size-toggle')).toBeChecked();
+});
+
+test('mobile mixed photo and video import keeps every source visible without control overlap', async function ({ page }) {
+    test.setTimeout(45000);
+    await page.setViewportSize({ width: 393, height: 873 });
+    var video = await recordedWebm(page, 'magenta-video.webm', 96, 160, 'rgb(220,45,190)');
+    await page.locator('#file-input').setInputFiles([
+        solidPng('red-wide.png', 120, 60, [230, 45, 60]),
+        solidPng('green-tall.png', 60, 120, [35, 210, 100]),
+        solidPng('blue-square.png', 90, 90, [50, 90, 235]),
+        solidPng('yellow-wide.png', 160, 60, [235, 190, 25]),
+        video
+    ]);
+
+    await expect(page.locator('.photo-card')).toHaveCount(5);
+    await expect(page.locator('.photo-card.is-video')).toHaveCount(1);
+    await expect.poll(function () {
+        return page.locator('.photo-card img').evaluateAll(function (images) {
+            return images.every(function (image) { return image.naturalWidth > 0 && image.naturalHeight > 0; });
+        });
+    }).toBe(true);
+
+    async function allSourcesAreVisible() {
+        return page.evaluate(function () {
+            var canvas = document.getElementById('wall-canvas');
+            var pixels = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data;
+            var colours = [0, 0, 0, 0, 0];
+            for (var offset = 0; offset < pixels.length; offset += 16) {
+                var red = pixels[offset], green = pixels[offset + 1], blue = pixels[offset + 2], alpha = pixels[offset + 3];
+                if (alpha < 32) continue;
+                if (red > 160 && green < 110 && blue < 120) colours[0]++;
+                if (green > 150 && red < 120 && blue < 150) colours[1]++;
+                if (blue > 160 && red < 130 && green < 150) colours[2]++;
+                if (red > 160 && green > 130 && blue < 100) colours[3]++;
+                if ((red > 150 && blue > 130 && green < 120) ||
+                    (red < 35 && green < 35 && blue < 35)) colours[4]++;
+            }
+            return colours.every(function (count) { return count > 50; });
+        });
+    }
+    await expect.poll(allSourcesAreVisible).toBe(true);
+    for (var mode of ['brick', 'organic', 'grid']) {
+        await page.evaluate(function (value) {
+            document.querySelector('.mode-btn[data-mode="' + value + '"]').click();
+        }, mode);
+        await expect.poll(allSourcesAreVisible).toBe(true);
+    }
+
+    var mobileLayout = await page.evaluate(function () {
+        var motion = document.getElementById('canvas-motion-controls').getBoundingClientRect();
+        var toggle = document.getElementById('sidebar-toggle').getBoundingClientRect();
+        return {
+            noHorizontalOverflow: document.documentElement.scrollWidth === innerWidth,
+            controlsDoNotOverlap: motion.right <= toggle.left,
+            toolbarHeight: document.querySelector('.workspace-bar').getBoundingClientRect().height
+        };
+    });
+    expect(mobileLayout.noHorizontalOverflow).toBe(true);
+    expect(mobileLayout.controlsDoNotOverlap).toBe(true);
+    expect(mobileLayout.toolbarHeight).toBeLessThanOrEqual(110);
+
+    await page.locator('#sidebar-toggle').click();
+    await expect(page.locator('.app')).toHaveClass(/sidebar-open/);
+    await page.locator('.photo-card.is-video').click();
+    await expect(page.locator('#lightbox-video')).toBeVisible();
+    await expect(page.locator('#lightbox-video')).toHaveAttribute('src', /^blob:/);
 });
 
 test('opens the export dialog and updates common aspect ratio', async function ({ page }) {

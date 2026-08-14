@@ -167,6 +167,32 @@ test('random: different seeds usually produce different orders', function () {
     assert.notDeepEqual(order1, order2);
 });
 
+test('capture time orders are stable and keep missing dates last', function () {
+    var cells = [
+        { x: 0, y: 0, photoIndex: 0 },
+        { x: 10, y: 0, photoIndex: 1 },
+        { x: 20, y: 0, photoIndex: 2 }
+    ];
+    var photos = [
+        { captureTime: '2024-03-01T00:00:00.000Z' },
+        { captureTime: null },
+        { captureTime: '2022-03-01T00:00:00.000Z' }
+    ];
+    assert.deepEqual(computePlaybackOrder(cells, PlaybackOrders.CAPTURE_ASC, { photos: photos }), [2, 0, 1]);
+    assert.deepEqual(computePlaybackOrder(cells, PlaybackOrders.CAPTURE_DESC, { photos: photos }), [0, 2, 1]);
+});
+
+test('featured photos play before regular photos', function () {
+    var cells = [
+        { x: 50, y: 50, photo: { featured: false } },
+        { x: 90, y: 90, photo: { featured: true } },
+        { x: 10, y: 10, photo: { featured: true } }
+    ];
+    var order = computePlaybackOrder(cells, PlaybackOrders.FEATURED_FIRST, { canvasWidth: 100, canvasHeight: 100 });
+    assert.deepEqual(order.slice(0, 2).sort(), [1, 2]);
+    assert.equal(order[2], 0);
+});
+
 /* ------------------------------------------------------------------ */
 /* Custom origin                                                       */
 /* ------------------------------------------------------------------ */

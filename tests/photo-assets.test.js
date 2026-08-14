@@ -53,3 +53,38 @@ test('bitmap LRU closes a decode that completes after its photo is removed', asy
     assert.equal(bitmap.closed, true);
     assert.equal(cache.stats().entries, 0);
 });
+
+test('asset manager falls back to a DOM image after bitmap decoding fails', async function () {
+    var bitmapDecodes = 0, revoked = [];
+    var urlAPI = {
+        createObjectURL: function () { return 'blob:fallback'; },
+        revokeObjectURL: function (url) { revoked.push(url); }
+    };
+    function FakeImage() {
+        this.width = 12;
+        this.height = 8;
+        this.removeAttribute = function () {};
+        Object.defineProperty(this, 'src', {
+            set: function (value) { if (value && this.onload) this.onload(); }
+        });
+    }
+    var manager = (await import('../js/image/PhotoAssetManager.js')).createPhotoAssetManager({
+        URL: urlAPI,
+        Image: FakeImage,
+        createImageBitmap: function () {
+            bitmapDecodes++;
+            return Promise.reject(new Error('bitmap decode failed'));
+        }
+    });
+    var decoded = await manager.getBitmap({
+        id: 'fallback-photo',
+        assetRevision: 1,
+        workingBlob: new Blob(['image'], { type: 'image/png' })
+    }, 'working');
+
+    assert.equal(decoded.width, 12);
+    assert.equal(bitmapDecodes, 2);
+    assert.deepEqual(revoked, []);
+    manager.destroy();
+    assert.deepEqual(revoked, ['blob:fallback']);
+});

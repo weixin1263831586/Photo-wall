@@ -151,3 +151,31 @@ test('zoom is computed for boundary cells', function () {
     // Expected: 1.12 + max(0, 0.75 - 0.4) * 0.4 = 1.12 + 0.14 = 1.26
     assert.ok(result.zoom > 1.1 && result.zoom < 1.5);
 });
+
+test('multi-person photo keeps a group box in subject-aware scoring', function () {
+    var cell = { x: 100, y: 100, isBoundary: true, maskCoverage: 0.7, width: 160, height: 100 };
+    var faces = [
+        { x: 0.12, y: 0.2, width: 0.16, height: 0.2 },
+        { x: 0.68, y: 0.22, width: 0.16, height: 0.2 }
+    ];
+    var result = computeOptimalPlacement({
+        faceBox: faces[0], faceBoxes: faces,
+        faceGroupBox: { x: 0.12, y: 0.2, width: 0.72, height: 0.22 },
+        personBox: { x: 0.08, y: 0.2, width: 0.8, height: 0.65 },
+        subjectConfidence: 0.9
+    }, cell, fullMask(240, 200), { width: 800, height: 500 });
+    assert.notEqual(result.strategy, 'fallback');
+    assert.ok(result.confidence > 0.5);
+    assert.equal(result.reason, 'subject-visible');
+});
+
+test('low-confidence heuristic subject safely falls back', function () {
+    var cell = { x: 100, y: 100, isBoundary: true, maskCoverage: 0.5, visibleFocusX: 0.7, visibleFocusY: 0.4, width: 100, height: 100 };
+    var result = computeOptimalPlacement({
+        faceBox: { x: 0.4, y: 0.3, width: 0.2, height: 0.2 },
+        subjectConfidence: 0.2
+    }, cell, fullMask(200, 200), { width: 400, height: 400 });
+    assert.equal(result.strategy, 'fallback');
+    assert.equal(result.reason, 'low-confidence');
+    assert.equal(result.targetX, 0.7);
+});

@@ -45,3 +45,16 @@ test('a featured photo is not duplicated while unused photos remain', function (
     assert.equal(new Set(assignment).size, photos.length);
     assert.equal(assignment.filter(function (index) { return index === 0; }).length, 1);
 });
+
+test('unique photos take the largest visible contour slots before repeats', function () {
+    var photos = [photo({ id: 'a' }), photo({ id: 'b', hue: 120 })];
+    var cells = [
+        { x: 10, y: 10, width: 20, height: 20, boundaryDistance: 0, maskCoverage: 0.1, visibleArea: 40 },
+        { x: 50, y: 10, width: 40, height: 40, boundaryDistance: 0, maskCoverage: 0.8, visibleArea: 1280 },
+        { x: 90, y: 10, width: 35, height: 35, boundaryDistance: 0, maskCoverage: 0.7, visibleArea: 857.5 }
+    ];
+    var assignment = assignPhotosToCells(photos, cells, { width: 100, height: 40, seed: 7 });
+
+    assert.equal(new Set([assignment[1], assignment[2]]).size, 2);
+    assert.ok(assignment[0] === assignment[1] || assignment[0] === assignment[2]);
+});

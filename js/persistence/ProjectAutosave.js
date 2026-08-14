@@ -12,7 +12,7 @@ const PHOTO_METADATA_FIELDS = [
     'aspectRatio', 'featured', 'editZoom', 'editOffsetX', 'editOffsetY',
     'editRotation', 'flipX', 'flipY', 'originalWidth', 'originalHeight',
     'mediaType', 'videoMime', 'duration', 'posterFallback', 'focusSource', 'subjectScore', 'analysisVersion',
-    'faceBox', 'personBox'
+    'faceBox', 'faceBoxes', 'faceGroupBox', 'faceCount', 'personBox', 'subjectConfidence', 'captureTime'
 ];
 
 function requestResult(request) {

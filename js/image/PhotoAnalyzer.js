@@ -143,7 +143,11 @@ export function analyzePixels(data, width, height, naturalWidth, naturalHeight) 
         focusY: detectedFocusY,
         focusSource: hasSubject ? 'subject' : 'saliency',
         subjectScore: hasSubject ? Math.min(1, bestSkin.count / count * 4) : 0,
+        subjectConfidence: hasSubject ? Math.min(0.62, 0.24 + bestSkin.count / count * 5) : 0,
         faceBox: faceBox,
+        faceBoxes: faceBox ? [faceBox] : [],
+        faceGroupBox: faceBox,
+        faceCount: faceBox ? 1 : 0,
         personBox: personBox,
         aspectRatio: Math.max(1, naturalWidth || width) / Math.max(1, naturalHeight || height)
     };

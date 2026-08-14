@@ -236,6 +236,10 @@ export function migrateProject(project) {
             flipX: false,
             flipY: false,
             faceBox: null,
+            faceBoxes: [],
+            faceGroupBox: null,
+            faceCount: 0,
+            subjectConfidence: 0,
             personBox: null
         }, photo);
     });

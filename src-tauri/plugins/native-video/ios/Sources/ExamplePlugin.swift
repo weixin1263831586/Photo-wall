@@ -11,6 +11,7 @@ class TranscodeArgs: Decodable {
   let duration: Double
   let volume: Double
   let startTime: Double
+  let endTime: Double
   let loopAudio: Bool
   let fadeIn: Double
   let fadeOut: Double
@@ -87,7 +88,10 @@ class ExamplePlugin: Plugin {
           preferredTrackID: kCMPersistentTrackID_Invalid
          ) {
         let start = CMTime(seconds: max(0, args.startTime), preferredTimescale: 600)
-        let available = CMTimeMaximum(.zero, CMTimeSubtract(audioAsset.duration, start))
+        let requestedEnd = args.endTime > args.startTime ?
+          CMTime(seconds: args.endTime, preferredTimescale: 600) : audioAsset.duration
+        let end = CMTimeMinimum(audioAsset.duration, requestedEnd)
+        let available = CMTimeMaximum(.zero, CMTimeSubtract(end, start))
         var cursor = CMTime.zero
         repeat {
           let remaining = CMTimeSubtract(videoDuration, cursor)

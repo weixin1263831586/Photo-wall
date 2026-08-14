@@ -10,6 +10,11 @@ test('dominant face becomes the crop focus', function () {
     assert.equal(focus.focusX, 0.75);
     assert.equal(focus.focusY, 70 / 120);
     assert.equal(focus.focusSource, 'face');
+    assert.equal(focus.faceCount, 2);
+    assert.equal(focus.faceBoxes.length, 2);
+    assert.ok(focus.faceGroupBox.x < focus.faceBox.x);
+    assert.ok(focus.faceGroupBox.width > focus.faceBox.width);
+    assert.ok(focus.subjectConfidence >= 0.68);
 });
 
 test('subject focus safely falls back to saliency', async function () {

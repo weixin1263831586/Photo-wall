@@ -28,6 +28,16 @@ function clampBox(box) {
     return w > 0 && h > 0 ? { x: x, y: y, width: w, height: h } : null;
 }
 
+function unionBoxes(boxes) {
+    boxes = (Array.isArray(boxes) ? boxes : []).map(clampBox).filter(Boolean);
+    if (!boxes.length) return null;
+    var minX = Math.min.apply(null, boxes.map(function (box) { return box.x; }));
+    var minY = Math.min.apply(null, boxes.map(function (box) { return box.y; }));
+    var maxX = Math.max.apply(null, boxes.map(function (box) { return box.x + box.width; }));
+    var maxY = Math.max.apply(null, boxes.map(function (box) { return box.y + box.height; }));
+    return clampBox({ x: minX, y: minY, width: maxX - minX, height: maxY - minY });
+}
+
 /**
  * Derive an approximate person / upper-body box from a face box.
  * Expands downward (torso) and slightly outward (shoulders).
@@ -157,15 +167,26 @@ function simulateLayout(imageWidth, imageHeight, cell, photo, targetX, targetY, 
  * Score a candidate placement by how much of the subject box lands inside
  * visible mask pixels.
  */
-function scoreCandidate(layout, photo, cell, faceBox, personBox, maskData, strategy, targetX, targetY) {
+function scoreCandidate(layout, photo, cell, faceBox, groupBox, personBox, maskData, strategy, targetX, targetY) {
     var weights = strategy === 'face' ? { face: 5, person: 1.25 } :
         strategy === 'person' ? { face: 3, person: 3.5 } : { face: 4, person: 2.5 };
-    var faceScore = weights.face * visibleBoxRatio(layout, photo, cell, faceBox, maskData);
-    var personScore = weights.person * visibleBoxRatio(layout, photo, cell, personBox, maskData);
+    var faceVisible = visibleBoxRatio(layout, photo, cell, faceBox, maskData);
+    var groupVisible = visibleBoxRatio(layout, photo, cell, groupBox, maskData);
+    var personVisible = visibleBoxRatio(layout, photo, cell, personBox, maskData);
+    var faceScore = weights.face * faceVisible;
+    var groupScore = (strategy === 'face' ? 0.7 : 2.2) * groupVisible;
+    var personScore = weights.person * personVisible;
     var visibleX = Number.isFinite(Number(cell.visibleFocusX)) ? Number(cell.visibleFocusX) : 0.5;
     var visibleY = Number.isFinite(Number(cell.visibleFocusY)) ? Number(cell.visibleFocusY) : 0.5;
     var extremePlacementPenalty = Math.hypot(targetX - visibleX, targetY - visibleY) * 0.08;
-    return faceScore + personScore - extremePlacementPenalty;
+    var headRoomPenalty = Math.abs(targetY - Math.max(0, visibleY - 0.08)) * 0.12;
+    var faceCutPenalty = faceVisible < 0.72 ? (0.72 - faceVisible) * 4 : 0;
+    return {
+        score: faceScore + groupScore + personScore - extremePlacementPenalty - headRoomPenalty - faceCutPenalty,
+        faceVisible: faceVisible,
+        groupVisible: groupVisible,
+        personVisible: personVisible
+    };
 }
 
 /**
@@ -184,7 +205,9 @@ export function computeOptimalPlacement(photo, cell, maskData, imageDims) {
     cell = cell || {};
     imageDims = imageDims || { width: 1, height: 1 };
 
-    var faceBox = clampBox(photo.faceBox);
+    var faceBoxes = (Array.isArray(photo.faceBoxes) ? photo.faceBoxes : []).map(clampBox).filter(Boolean);
+    var faceBox = clampBox(photo.faceBox) || faceBoxes[0] || null;
+    var groupBox = clampBox(photo.faceGroupBox) || unionBoxes(faceBoxes) || faceBox;
     var personBox = clampBox(photo.personBox) || (faceBox ? derivePersonBox(faceBox) : null);
     var coverage = Number(cell.maskCoverage);
     if (!Number.isFinite(coverage)) coverage = 0.75;
@@ -209,7 +232,25 @@ export function computeOptimalPlacement(photo, cell, maskData, imageDims) {
             offsetY: 0,
             zoom: cell.isBoundary ? zoom : 1,
             score: 0,
-            strategy: 'fallback'
+            strategy: 'fallback',
+            confidence: 0,
+            reason: 'no-subject'
+        };
+    }
+
+    var sourceConfidence = Number(photo.subjectConfidence);
+    if (!Number.isFinite(sourceConfidence)) sourceConfidence = photo.focusSource === 'subject' ? 0.46 : 0.72;
+    if (sourceConfidence < 0.35) {
+        return {
+            targetX: cell.isBoundary && Number.isFinite(Number(cell.visibleFocusX)) ? Number(cell.visibleFocusX) : 0.5,
+            targetY: cell.isBoundary && Number.isFinite(Number(cell.visibleFocusY)) ? Number(cell.visibleFocusY) : 0.5,
+            offsetX: 0,
+            offsetY: 0,
+            zoom: cell.isBoundary ? zoom : 1,
+            score: 0,
+            strategy: 'fallback',
+            confidence: sourceConfidence,
+            reason: 'low-confidence'
         };
     }
 
@@ -220,9 +261,9 @@ export function computeOptimalPlacement(photo, cell, maskData, imageDims) {
     for (var i = 0; i < candidates.length; i++) {
         var c = candidates[i];
         var layout = simulateLayout(imageDims.width, imageDims.height, cell, photo, c.tx, c.ty, zoom);
-        var score = scoreCandidate(layout, photo, cell, faceBox, personBox, maskData, strategy, c.tx, c.ty);
-        if (!best || score > best.score) {
-            best = { targetX: c.tx, targetY: c.ty, score: score };
+        var score = scoreCandidate(layout, photo, cell, faceBox, groupBox, personBox, maskData, strategy, c.tx, c.ty);
+        if (!best || score.score > best.score) {
+            best = Object.assign({ targetX: c.tx, targetY: c.ty }, score);
         }
     }
 
@@ -230,12 +271,16 @@ export function computeOptimalPlacement(photo, cell, maskData, imageDims) {
     var vfx = Number(cell.visibleFocusX);
     var vfy = Number(cell.visibleFocusY);
     if (Number.isFinite(vfx) && Number.isFinite(vfy)) {
-        var centroidLayout = simulateLayout(imageDims.width, imageDims.height, cell, photo, vfx, vfy, zoom);
-        var centroidScore = scoreCandidate(centroidLayout, photo, cell, faceBox, personBox, maskData, strategy, vfx, vfy);
-        if (!best || centroidScore > best.score) {
-            best = { targetX: vfx, targetY: vfy, score: centroidScore };
+        var biasedY = Math.max(0, vfy - 0.08);
+        var centroidLayout = simulateLayout(imageDims.width, imageDims.height, cell, photo, vfx, biasedY, zoom);
+        var centroidScore = scoreCandidate(centroidLayout, photo, cell, faceBox, groupBox, personBox, maskData, strategy, vfx, biasedY);
+        if (!best || centroidScore.score > best.score) {
+            best = Object.assign({ targetX: vfx, targetY: biasedY }, centroidScore);
         }
     }
+
+    var visibility = strategy === 'face' ? best.faceVisible : Math.max(best.groupVisible, best.personVisible);
+    var confidence = clamp(sourceConfidence * (0.55 + visibility * 0.45), 0, 1, 0);
 
     return {
         targetX: best.targetX,
@@ -244,6 +289,8 @@ export function computeOptimalPlacement(photo, cell, maskData, imageDims) {
         offsetY: 0,
         zoom: zoom,
         score: best.score,
-        strategy: strategy
+        strategy: strategy,
+        confidence: confidence,
+        reason: confidence < 0.45 ? 'limited-visibility' : 'subject-visible'
     };
 }

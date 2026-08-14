@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { musicVolumeAt, normalizeBackgroundMusic } from '../js/audio/BackgroundMusic.js';
+import { musicSegmentDuration, musicVolumeAt, normalizeBackgroundMusic } from '../js/audio/BackgroundMusic.js';
 
 test('background music settings are normalized safely', function () {
     var music = normalizeBackgroundMusic({
@@ -12,6 +12,14 @@ test('background music settings are normalized safely', function () {
     assert.equal(music.fadeIn, 0);
     assert.equal(music.fadeOut, 10);
     assert.equal(music.loop, false);
+    assert.equal(music.endTime, 20);
+});
+
+test('music selection clamps to a valid start/end segment', function () {
+    var music = normalizeBackgroundMusic({ duration: 30, startTime: 8, endTime: 18 });
+    assert.equal(music.startTime, 8);
+    assert.equal(music.endTime, 18);
+    assert.equal(musicSegmentDuration(music), 10);
 });
 
 test('background music volume follows fade-in and fade-out', function () {

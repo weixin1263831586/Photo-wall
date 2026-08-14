@@ -9,6 +9,7 @@ pub struct TranscodeRequest {
     pub duration: f64,
     pub volume: f64,
     pub start_time: f64,
+    pub end_time: f64,
     pub loop_audio: bool,
     pub fade_in: f64,
     pub fade_out: f64,

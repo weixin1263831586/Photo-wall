@@ -9,13 +9,15 @@ import { createTemplateLibrary } from './layout/TemplateLibrary.js';
 import { analyzePhoto } from './image/PhotoAnalyzer.js';
 import { createPhotoAssetManager } from './image/PhotoAssetManager.js';
 import { refineSubjectFocus } from './image/SubjectFocus.js';
-import { applyPhotoTransform, drawPhotoCover, normalizePhotoTransform } from './image/PhotoTransform.js';
+import { readCaptureTime } from './image/ExifMetadata.js';
+import { addRoundedRectPath, applyPhotoTransform, drawPhotoCover, normalizePhotoTransform } from './image/PhotoTransform.js';
 import { createOverlay, normalizeOverlays } from './overlay/OverlayRenderer.js';
-import { createTimeline } from './playback/PlaybackTimeline.js';
+import { createPlaybackController } from './controllers/PlaybackController.js';
+import { installMusicController } from './controllers/MusicController.js';
 import { PLAYBACK_ORDER_KEYS, PlaybackOrderLabels } from './playback/PlaybackOrder.js';
 import { recordTimelineCanvas, pickVideoMimeType } from './video/VideoRecorder.js';
-import { musicVolumeAt, normalizeBackgroundMusic } from './audio/BackgroundMusic.js';
-import { BUILT_IN_MUSIC, createBuiltInMusicFile } from './audio/BuiltInMusic.js';
+import { resolveVideoExportDimensions } from './video/VideoExportPresets.js';
+import { normalizeBackgroundMusic } from './audio/BackgroundMusic.js';
 import { createPhotoAnalysisWorkerClient } from './image/PhotoAnalysisWorkerClient.js';
 import { createPhotoLibrary } from './ui/PhotoLibrary.js';
 import { createHistoryManager } from './history/HistoryManager.js';
@@ -67,6 +69,7 @@ import {
         flowCycleCount: 0,
         playbackMode: 'shuffle',
         playbackOrder: 'center-out',
+        playbackTransition: 'zoom',
         revealTimeline: null,
         revealRAF: null,
         revealStartTime: 0,
@@ -112,6 +115,9 @@ import {
         supportedImageTypes: ['image/jpeg', 'image/png', 'image/webp'],
         supportedVideoTypes: ['video/mp4', 'video/webm', 'video/quicktime', 'video/x-m4v']
     };
+
+    app.playbackController = createPlaybackController(app);
+    installMusicController(app);
 
     /* ------------------------------------------------------------------ *
      *  Init
@@ -210,9 +216,27 @@ import {
         app.wall.setOverlays(app.overlays);
 
         app.wall.setShape('china');
-        requestAnimationFrame(function () {
-            app.wall.resize();
+
+        /* Ensure the canvas picks up its real dimensions on first paint.
+         * requestAnimationFrame can fire before the flexbox parent settles,
+         * leaving the canvas at its 300×150 default. A ResizeObserver plus a
+         * deferred fallback guarantees a resize once layout is ready. */
+        var stage = document.getElementById('canvas-stage');
+        app._canvasResizeObserver = new ResizeObserver(function () {
+            clearTimeout(app.resizeTimer);
+            app.resizeTimer = setTimeout(function () {
+                app.wall.resize();
+                app.updateCustomOriginMarker();
+            }, 80);
         });
+        app._canvasResizeObserver.observe(stage);
+        requestAnimationFrame(function () { app.wall.resize(); });
+        setTimeout(function () {
+            if (!app.wall.cssWidth || app.wall.cssWidth <= 100) {
+                app.wall.resize();
+                app.updateCustomOriginMarker();
+            }
+        }, 200);
 
         app.bindUI();
         app.renderBuiltInMusic();
@@ -281,6 +305,63 @@ import {
     };
 
     /* ------------------------------------------------------------------ *
+     *  Mobile sidebar (bottom-sheet drawer)
+     * ------------------------------------------------------------------ */
+
+    app.setupMobileSidebar = function () {
+        var toggleBtn = document.getElementById('sidebar-toggle');
+        var backdrop = document.getElementById('sidebar-backdrop');
+        if (!toggleBtn || !backdrop) return;
+
+        var motionControls = document.getElementById('canvas-motion-controls');
+        var workspaceBar = document.querySelector('.workspace-bar');
+        var canvasStage = document.getElementById('canvas-stage');
+
+        function isMobileLayout() {
+            return window.matchMedia('(max-width: 768px)').matches;
+        }
+
+        function syncToggleVisibility() {
+            toggleBtn.hidden = !isMobileLayout();
+            if (!isMobileLayout()) closeSidebar();
+            relocateMotionControls();
+        }
+
+        function relocateMotionControls() {
+            if (!motionControls || !workspaceBar || !canvasStage) return;
+            /* On mobile the controls overlay the bottom of the canvas;
+             * on desktop they sit inside the top toolbar. */
+            var target = isMobileLayout() ? canvasStage : workspaceBar;
+            if (motionControls.parentElement !== target) {
+                target.appendChild(motionControls);
+            }
+        }
+
+        function openSidebar() {
+            backdrop.hidden = false;
+            document.querySelector('.app').classList.add('sidebar-open');
+        }
+
+        function closeSidebar() {
+            document.querySelector('.app').classList.remove('sidebar-open');
+            backdrop.hidden = true;
+        }
+
+        toggleBtn.addEventListener('click', function () {
+            if (document.querySelector('.app').classList.contains('sidebar-open')) {
+                closeSidebar();
+            } else {
+                openSidebar();
+            }
+        });
+
+        backdrop.addEventListener('click', closeSidebar);
+
+        syncToggleVisibility();
+        window.addEventListener('resize', syncToggleVisibility);
+    };
+
+    /* ------------------------------------------------------------------ *
      *  UI Binding
      * ------------------------------------------------------------------ */
 
@@ -288,6 +369,10 @@ import {
         document.querySelector('.sidebar').addEventListener('pointerdown', function (event) {
             if (app.flowPlaying && event.target.closest('button, input, select, textarea')) app.stopAllPlayback(true);
         });
+
+        // ---- Mobile sidebar toggle ----
+        app.setupMobileSidebar();
+
         // ---- Product presets ----
         document.getElementById('preset-buttons').addEventListener('click', function (e) {
             var deleteButton = e.target.closest('.preset-delete');
@@ -350,7 +435,7 @@ import {
         });
         document.getElementById('music-remove-btn').addEventListener('click', app.removeBackgroundMusic);
         document.getElementById('music-preview-btn').addEventListener('click', app.toggleMusicPreview);
-        var musicSettingIds = ['music-volume', 'music-start', 'music-fade-in', 'music-fade-out', 'music-loop'];
+        var musicSettingIds = ['music-volume', 'music-start', 'music-end', 'music-fade-in', 'music-fade-out', 'music-loop'];
         musicSettingIds.forEach(function (id) {
             document.getElementById(id).addEventListener('input', app.updateBackgroundMusicSettings);
             document.getElementById(id).addEventListener('change', app.updateBackgroundMusicSettings);
@@ -653,6 +738,11 @@ import {
                 app.startPlayback();
             }
         });
+        document.getElementById('playback-transition').addEventListener('change', function () {
+            app.playbackTransition = this.value;
+            if (app.autosave) app.autosave.schedule();
+            if (app.flowPlaying || app.revealTimeline) app.restartPlayback();
+        });
         document.getElementById('wall-canvas').addEventListener('pointerdown', function (event) {
             if (app.playbackOrder !== 'custom' || app.flowPlaying) return;
             var rect = this.getBoundingClientRect();
@@ -672,6 +762,11 @@ import {
             app.clearPhotos();
         });
         document.getElementById('export-btn').addEventListener('click', function () {
+            app.openExportDialog();
+        });
+        document.getElementById('export-video-btn').addEventListener('click', function () {
+            var mp4Radio = document.querySelector('input[name="export-format"][value="mp4"]');
+            if (mp4Radio) mp4Radio.checked = true;
             app.openExportDialog();
         });
         document.getElementById('undo-btn').addEventListener('click', app.undo);
@@ -699,6 +794,7 @@ import {
         ['export-print-size', 'export-print-dpi', 'export-print-bleed'].forEach(function (id) {
             document.getElementById(id).addEventListener('change', app.updateExportOptions);
         });
+        document.getElementById('export-video-preset').addEventListener('change', app.updateExportOptions);
         document.querySelectorAll('input[name="export-background"]').forEach(function (input) {
             input.addEventListener('change', app.scheduleExportPreview);
         });
@@ -1254,12 +1350,13 @@ import {
             return matchesCategory && (!query || haystack.indexOf(query) >= 0);
         });
         container.innerHTML = templates.map(function (preset) {
-            var palette = preset.palette || ['#403b68', '#9d8cff'];
-            var background = preset.thumbnail ? 'url(&quot;' + app.escapeHTML(preset.thumbnail) + '&quot;)' :
-                'linear-gradient(135deg,' + palette[0] + ',' + palette[1] + ')';
-            return '<div class="preset-card"><button class="preset-btn" type="button" data-preset="' + preset.id +
+            var hasThumb = Boolean(preset.thumbnail);
+            var thumb = hasThumb ? '<span class="preset-thumb" aria-hidden="true" style="background-image:url(&quot;' +
+                app.escapeHTML(preset.thumbnail) + '&quot;)"></span>' : '';
+            return '<div class="preset-card"><button class="preset-btn' + (hasThumb ? ' has-thumb' : '') +
+                '" type="button" data-preset="' + preset.id +
                 '" aria-pressed="false" title="应用' + app.escapeHTML(preset.name) + '模板">' +
-                '<span class="preset-thumb" aria-hidden="true" style="background-image:' + background + '"></span>' +
+                thumb +
                 '<span class="preset-icon" aria-hidden="true">' + app.escapeHTML(preset.icon) + '</span>' +
                 '<span class="preset-copy"><strong>' + app.escapeHTML(preset.name) + '</strong><small>' +
                 app.escapeHTML(preset.description) + '</small></span></button>' +
@@ -1376,192 +1473,6 @@ import {
         if (!id || !app.templateLibrary.remove(id)) return;
         app.renderLayoutPresets();
         app.toast('自定义模板已删除');
-    };
-
-    app.formatMediaTime = function (seconds) {
-        seconds = Math.max(0, Number(seconds) || 0);
-        var minutes = Math.floor(seconds / 60);
-        return minutes + ':' + String(Math.floor(seconds % 60)).padStart(2, '0');
-    };
-
-    app.renderBuiltInMusic = function () {
-        var library = document.getElementById('music-library');
-        if (!library) return;
-        library.innerHTML = BUILT_IN_MUSIC.map(function (track) {
-            return '<button class="music-library-item" type="button" data-music-track="' +
-                app.escapeHTML(track.id) + '" style="--music-color:' + app.escapeHTML(track.color) + '">' +
-                '<span class="music-library-color" aria-hidden="true"></span><span class="music-library-copy"><strong>' +
-                app.escapeHTML(track.name) + '</strong><small>' + app.escapeHTML(track.mood) + '</small></span></button>';
-        }).join('');
-    };
-
-    app.useBuiltInMusic = function (id) {
-        var button = document.querySelector('[data-music-track="' + id + '"]');
-        if (button) button.classList.add('active');
-        app.showLoading(true, '正在生成内置配乐…');
-        createBuiltInMusicFile(id).then(function (file) {
-            app.showLoading(false);
-            app.loadBackgroundMusic(file);
-        }).catch(function (error) {
-            app.showLoading(false);
-            if (button) button.classList.remove('active');
-            console.error(error);
-            app.toast('内置配乐生成失败');
-        });
-    };
-
-    app.releaseMusicAudio = function () {
-        if (app.musicAudio) {
-            app.musicAudio.pause();
-            app.musicAudio.removeAttribute('src');
-            app.musicAudio.load();
-        }
-        app.musicAudio = null;
-        app.musicStandalonePreview = false;
-        if (app.musicObjectURL) URL.revokeObjectURL(app.musicObjectURL);
-        app.musicObjectURL = '';
-    };
-
-    app.attachMusicAudio = function () {
-        app.releaseMusicAudio();
-        if (!app.backgroundMusic || !(app.backgroundMusic.originalBlob instanceof Blob)) return;
-        app.musicObjectURL = URL.createObjectURL(app.backgroundMusic.originalBlob);
-        app.musicAudio = new Audio(app.musicObjectURL);
-        app.musicAudio.preload = 'auto';
-        app.musicAudio.addEventListener('ended', function () {
-            if (!app.backgroundMusic || app.backgroundMusic.loop || app.flowPlaying) return;
-            app.musicStandalonePreview = false;
-            app.syncMusicControls();
-        });
-    };
-
-    app.loadBackgroundMusic = function (file) {
-        var valid = /^audio\//i.test(file.type) || /\.(mp3|wav|m4a|aac|ogg)$/i.test(file.name || '');
-        if (!valid || file.size > 80 * 1024 * 1024) {
-            app.toast(valid ? '音乐文件不能超过 80 MB' : '请选择 MP3、WAV、M4A、AAC 或 OGG 音乐');
-            return;
-        }
-        app.recordHistory();
-        var probeURL = URL.createObjectURL(file);
-        var probe = new Audio(probeURL);
-        probe.preload = 'metadata';
-        var settled = false;
-        function finish() {
-            if (settled) return;
-            settled = true;
-            URL.revokeObjectURL(probeURL);
-        }
-        probe.addEventListener('loadedmetadata', function () {
-            var duration = Number.isFinite(probe.duration) ? probe.duration : 0;
-            finish();
-            app.backgroundMusic = normalizeBackgroundMusic({
-                name: file.name,
-                type: file.type || 'audio/mpeg',
-                duration: duration,
-                volume: 0.7,
-                startTime: 0,
-                loop: true,
-                fadeIn: 1,
-                fadeOut: 1,
-                originalBlob: file
-            });
-            app.attachMusicAudio();
-            app.syncMusicControls();
-            if (app.autosave) app.autosave.schedule();
-            app.toast('背景音乐已添加');
-        }, { once: true });
-        probe.addEventListener('error', function () {
-            finish();
-            app.toast('音乐无法读取，请尝试其他格式');
-        }, { once: true });
-    };
-
-    app.removeBackgroundMusic = function () {
-        if (!app.backgroundMusic) return;
-        app.recordHistory();
-        app.stopMusicPlayback();
-        app.releaseMusicAudio();
-        app.backgroundMusic = null;
-        app.syncMusicControls();
-        if (app.autosave) app.autosave.schedule();
-        app.toast('背景音乐已移除');
-    };
-
-    app.updateBackgroundMusicSettings = function () {
-        if (!app.backgroundMusic) return;
-        app.backgroundMusic = normalizeBackgroundMusic(Object.assign({}, app.backgroundMusic, {
-            volume: document.getElementById('music-volume').value,
-            startTime: document.getElementById('music-start').value,
-            fadeIn: document.getElementById('music-fade-in').value,
-            fadeOut: document.getElementById('music-fade-out').value,
-            loop: document.getElementById('music-loop').checked
-        }));
-        if (app.musicAudio) {
-            app.musicAudio.loop = app.backgroundMusic.loop;
-            app.musicAudio.volume = app.backgroundMusic.volume;
-            if (document.activeElement === document.getElementById('music-start')) {
-                app.musicAudio.currentTime = app.backgroundMusic.startTime;
-            }
-        }
-        app.syncMusicControls();
-        if (app.autosave) app.autosave.schedule();
-    };
-
-    app.syncMusicControls = function () {
-        var music = app.backgroundMusic;
-        document.getElementById('music-editor').hidden = !music;
-        document.getElementById('music-remove-btn').hidden = !music;
-        document.getElementById('music-upload-btn').textContent = music ? '更换音乐' : '＋ 上传本地音乐';
-        if (!music) {
-            document.querySelectorAll('[data-music-track]').forEach(function (button) { button.classList.remove('active'); });
-            return;
-        }
-        document.getElementById('music-name').textContent = music.name;
-        document.getElementById('music-duration').textContent = app.formatMediaTime(music.duration);
-        document.getElementById('music-volume').value = music.volume;
-        document.getElementById('music-volume-value').textContent = Math.round(music.volume * 100) + '%';
-        var start = document.getElementById('music-start');
-        start.max = Math.max(0, music.duration - 0.05);
-        start.value = music.startTime;
-        document.getElementById('music-start-value').textContent = app.formatMediaTime(music.startTime);
-        document.getElementById('music-fade-in').value = music.fadeIn;
-        document.getElementById('music-fade-out').value = music.fadeOut;
-        document.getElementById('music-loop').checked = music.loop;
-        document.getElementById('music-preview-btn').textContent = app.musicStandalonePreview ? '■ 停止试听' : '▶ 试听';
-        document.querySelectorAll('[data-music-track]').forEach(function (button) {
-            button.classList.toggle('active', music.name === button.getAttribute('data-music-track') + '.wav');
-        });
-    };
-
-    app.startMusicPlayback = function (timelineDurationMs, standalone) {
-        if (!app.backgroundMusic || !app.musicAudio) return;
-        var music = app.backgroundMusic;
-        try { app.musicAudio.currentTime = Math.min(music.startTime, Math.max(0, music.duration - 0.05)); } catch (ignore) {}
-        app.musicAudio.loop = music.loop;
-        app.musicAudio.volume = standalone ? music.volume : musicVolumeAt(music, 0, timelineDurationMs / 1000);
-        app.musicStandalonePreview = standalone === true;
-        app.musicPlaybackStartedAt = performance.now();
-        app.musicAudio.play().catch(function () { app.toast('浏览器阻止了音乐播放，请再次点击播放'); });
-        app.syncMusicControls();
-    };
-
-    app.stopMusicPlayback = function () {
-        if (app.musicAudio) app.musicAudio.pause();
-        app.musicStandalonePreview = false;
-        app.musicPlaybackStartedAt = 0;
-        app.syncMusicControls();
-    };
-
-    app.updateMusicPlayback = function (elapsedMs, totalMs) {
-        if (!app.musicAudio || !app.backgroundMusic || app.musicStandalonePreview) return;
-        var elapsed = app.musicPlaybackStartedAt ? performance.now() - app.musicPlaybackStartedAt : elapsedMs;
-        app.musicAudio.volume = musicVolumeAt(app.backgroundMusic, elapsed / 1000, totalMs / 1000);
-    };
-
-    app.toggleMusicPreview = function () {
-        if (!app.backgroundMusic) return;
-        if (app.musicStandalonePreview && app.musicAudio && !app.musicAudio.paused) app.stopMusicPlayback();
-        else app.startMusicPlayback(0, true);
     };
 
     app.reindexOverlays = function () {
@@ -1834,7 +1745,8 @@ import {
 
             function createPhoto(loadedImage, source) {
                 if (settled) return;
-                app.analyzeLoadedPhoto(loadedImage, fileBlob).then(function (analysis) {
+                Promise.all([app.analyzeLoadedPhoto(loadedImage, fileBlob), readCaptureTime(file)]).then(function (results) {
+                    var analysis = results[0];
                     var photo = {
                         id: app.createId('photo'),
                         img: loadedImage,
@@ -1854,8 +1766,13 @@ import {
                         focusY: analysis.focusY,
                         focusSource: analysis.focusSource || 'saliency',
                         subjectScore: Number(analysis.subjectScore) || 0,
+                        subjectConfidence: Number(analysis.subjectConfidence) || 0,
                         faceBox: analysis.faceBox || null,
+                        faceBoxes: analysis.faceBoxes || (analysis.faceBox ? [analysis.faceBox] : []),
+                        faceGroupBox: analysis.faceGroupBox || analysis.faceBox || null,
+                        faceCount: Number(analysis.faceCount) || 0,
                         personBox: analysis.personBox || null,
+                        captureTime: results[1] || null,
                         analysisVersion: 2,
                         aspectRatio: analysis.aspectRatio,
                         mediaType: layers.mediaType || 'image',
@@ -2079,6 +1996,7 @@ import {
                 layoutSeed: app.wall.layoutSeed,
                 playbackMode: app.playbackMode,
                 playbackOrder: app.playbackOrder,
+                playbackTransition: app.playbackTransition,
                 customOrigin: app.customOrigin ? Object.assign({}, app.customOrigin) : null
             },
             photos: app.photos.map(function (photo, index) {
@@ -2099,8 +2017,13 @@ import {
                     focusY: photo.focusY,
                     focusSource: photo.focusSource,
                     subjectScore: photo.subjectScore,
+                    subjectConfidence: photo.subjectConfidence,
                     faceBox: photo.faceBox || null,
+                    faceBoxes: photo.faceBoxes || [],
+                    faceGroupBox: photo.faceGroupBox || null,
+                    faceCount: Number(photo.faceCount) || 0,
                     personBox: photo.personBox || null,
+                    captureTime: photo.captureTime || null,
                     analysisVersion: Number(photo.analysisVersion) || 1,
                     aspectRatio: photo.aspectRatio,
                     mediaType: photo.mediaType || 'image',
@@ -2430,6 +2353,7 @@ import {
                 layoutSeed: Number(settings.layoutSeed) || 1,
                 playbackMode: settings.playbackMode === 'reveal' ? 'reveal' : 'shuffle',
                 playbackOrder: PLAYBACK_ORDER_KEYS.indexOf(settings.playbackOrder) >= 0 ? settings.playbackOrder : 'center-out',
+                playbackTransition: ['fade', 'zoom', 'slide', 'ken-burns'].indexOf(settings.playbackTransition) >= 0 ? settings.playbackTransition : 'zoom',
                 customOrigin: settings.customOrigin && Number.isFinite(Number(settings.customOrigin.normalizedX)) &&
                     Number.isFinite(Number(settings.customOrigin.normalizedY)) ? {
                         normalizedX: Math.max(0, Math.min(1, Number(settings.customOrigin.normalizedX))),
@@ -2464,6 +2388,7 @@ import {
             layoutSeed: app.wall.layoutSeed,
             playbackMode: app.playbackMode,
             playbackOrder: app.playbackOrder,
+            playbackTransition: app.playbackTransition,
             customOrigin: app.customOrigin ? Object.assign({}, app.customOrigin) : null,
             backgroundMusic: app.backgroundMusic ? Object.assign({}, app.backgroundMusic) : null,
             overlays: app.overlays.map(function (overlay) { return Object.assign({}, overlay); }),
@@ -2505,6 +2430,7 @@ import {
         app.wall.layoutSeed = Number(state.layoutSeed) || 1;
         app.playbackMode = state.playbackMode === 'reveal' ? 'reveal' : 'shuffle';
         app.playbackOrder = PLAYBACK_ORDER_KEYS.indexOf(state.playbackOrder) >= 0 ? state.playbackOrder : 'center-out';
+        app.playbackTransition = ['fade', 'zoom', 'slide', 'ken-burns'].indexOf(state.playbackTransition) >= 0 ? state.playbackTransition : 'zoom';
         app.customOrigin = state.customOrigin && Number.isFinite(Number(state.customOrigin.normalizedX)) &&
             Number.isFinite(Number(state.customOrigin.normalizedY)) ? {
                 normalizedX: Math.max(0, Math.min(1, Number(state.customOrigin.normalizedX))),
@@ -2528,6 +2454,7 @@ import {
         app.syncLayoutControls();
         document.getElementById('playback-mode').value = app.playbackMode;
         document.getElementById('playback-order').value = app.playbackOrder;
+        document.getElementById('playback-transition').value = app.playbackTransition;
         document.getElementById('wall-canvas').classList.toggle('selecting-playback-origin',
             app.playbackOrder === 'custom' && !app.customOrigin);
         app.updateCustomOriginMarker();
@@ -2635,18 +2562,7 @@ import {
         app.setPositionMode(false);
         app.stopAllPlayback(false);
         app.revealSnapshot = app.captureState();
-        var timing = app.flowTiming();
-        var origin = app.getPlaybackOrigin();
-        app.revealTimeline = createTimeline(app.wall.layout, app.playbackOrder, {
-            mode: 'reveal',
-            canvasWidth: app.wall.cssWidth,
-            canvasHeight: app.wall.cssHeight,
-            seed: app.wall.layoutSeed,
-            stagger: timing.stagger,
-            transition: timing.transition,
-            originX: origin ? origin.x : undefined,
-            originY: origin ? origin.y : undefined
-        });
+        app.revealTimeline = app.playbackController.createTimeline('reveal');
         app.revealStartTime = performance.now();
         app.flowPlaying = true; /* reuse the flag for button state */
         app.updateFlowControls();
@@ -2688,16 +2604,7 @@ import {
         app.stopAllPlayback(false);
         app.flowSnapshot = app.captureState();
         app.flowCycleCount = 0;
-        var timing = app.flowTiming();
-        app.revealTimeline = createTimeline(app.wall.layout, app.playbackOrder, {
-            mode: 'shuffle',
-            canvasWidth: app.wall.cssWidth,
-            canvasHeight: app.wall.cssHeight,
-            seed: app.wall.layoutSeed,
-            interval: timing.interval,
-            transition: timing.transition,
-            cycles: 1
-        });
+        app.revealTimeline = app.playbackController.createTimeline('shuffle', { cycles: 1 });
         app.revealStartTime = performance.now();
         app.flowPlaying = true;
         app.updateFlowControls();
@@ -2715,16 +2622,7 @@ import {
             app.wall.setArrangement(finalFrame.photoIndices);
             app.wall.layoutSeed += 1;
             app.flowCycleCount++;
-            var timing = app.flowTiming();
-            app.revealTimeline = createTimeline(app.wall.layout, app.playbackOrder, {
-                mode: 'shuffle',
-                canvasWidth: app.wall.cssWidth,
-                canvasHeight: app.wall.cssHeight,
-                seed: app.wall.layoutSeed,
-                interval: timing.interval,
-                transition: timing.transition,
-                cycles: 1
-            });
+            app.revealTimeline = app.playbackController.createTimeline('shuffle', { cycles: 1 });
             app.revealStartTime = performance.now();
         }
         app.wall.setPlaybackFrame(app.revealTimeline.getFrame(performance.now() - app.revealStartTime));
@@ -2750,6 +2648,7 @@ import {
         var hasPhotos = app.photos.length > 0;
         if (app.flowPlaying && app.photos.length < 2) app.stopAllPlayback(false);
         var exportButton = document.getElementById('export-btn');
+        var exportVideoButton = document.getElementById('export-video-btn');
         var shuffleButton = document.getElementById('shuffle-btn');
         var undoButton = document.getElementById('undo-btn');
         var redoButton = document.getElementById('redo-btn');
@@ -2758,7 +2657,9 @@ import {
         var flowSpeed = document.getElementById('flow-speed');
         var playbackModeSelect = document.getElementById('playback-mode');
         var playbackOrderSelect = document.getElementById('playback-order');
+        var playbackTransitionSelect = document.getElementById('playback-transition');
         if (exportButton) exportButton.disabled = !hasPhotos;
+        if (exportVideoButton) exportVideoButton.disabled = !hasPhotos;
         if (shuffleButton) shuffleButton.disabled = !hasPhotos;
         if (undoButton) undoButton.disabled = !app.history || !app.history.canUndo();
         if (redoButton) redoButton.disabled = !app.history || !app.history.canRedo();
@@ -2766,6 +2667,7 @@ import {
         if (flowButton) flowButton.disabled = !hasPhotos;
         if (flowSpeed) flowSpeed.disabled = app.photos.length < 2;
         if (playbackModeSelect) playbackModeSelect.disabled = !hasPhotos;
+        if (playbackTransitionSelect) playbackTransitionSelect.disabled = !hasPhotos;
         if (playbackOrderSelect) {
             playbackOrderSelect.disabled = !hasPhotos;
             /* Only show order selector for reveal mode. */
@@ -2870,7 +2772,7 @@ import {
             context.fillStyle = '#09090e';
             context.fillRect(-width / 2, -height / 2, width, height);
             context.beginPath();
-            context.roundRect(-width / 2, -height / 2, width, height, 18);
+            addRoundedRectPath(context, -width / 2, -height / 2, width, height, 18);
             context.clip();
             var previewPhoto = Object.assign({}, photo);
             applyPhotoTransform(previewPhoto, app.photoEditorDraft);
@@ -3168,6 +3070,7 @@ import {
             document.querySelector('input[name="export-background"][value="#ffffff"]').checked = true;
         }
         document.getElementById('print-export-field').hidden = format !== 'pdf';
+        document.getElementById('video-export-field').hidden = !isVideo;
         /* Hide scale and background options for video export. */
         var scaleField = document.getElementById('export-scale-field');
         var bgField = document.getElementById('export-background-field');
@@ -3198,18 +3101,15 @@ import {
             return;
         }
         var dimensions = app.wall.getExportDimensions(isVideo ? 1 : scale, aspectRatio);
+        if (isVideo) {
+            dimensions = resolveVideoExportDimensions(document.getElementById('export-video-preset').value, {
+                width: dimensions.width, height: dimensions.height, aspectRatio: aspectRatio
+            });
+        }
         var width = dimensions.width;
         var height = dimensions.height;
         if (isVideo) {
-            var timing = app.flowTiming();
-            var previewTimeline = createTimeline(app.wall.layout, app.playbackOrder, {
-                mode: app.playbackMode,
-                canvasWidth: app.wall.cssWidth,
-                canvasHeight: app.wall.cssHeight,
-                seed: app.wall.layoutSeed,
-                stagger: timing.stagger,
-                interval: timing.interval,
-                transition: timing.transition,
+            var previewTimeline = app.playbackController.createTimeline(app.playbackMode, {
                 cycles: app.playbackMode === 'shuffle' ? 3 : 1
             });
             var durationSec = previewTimeline.duration / 1000;
@@ -3298,8 +3198,12 @@ import {
                     app.toast('当前浏览器不支持视频录制');
                     return;
                 }
-                var videoAspect = app.getCheckedValue('export-aspect', 'auto');
-                var videoDims = app.wall.getExportDimensions(1, videoAspect);
+                var selectedVideoAspect = app.getCheckedValue('export-aspect', 'auto');
+                var sourceVideoDims = app.wall.getExportDimensions(1, selectedVideoAspect);
+                var videoDims = resolveVideoExportDimensions(document.getElementById('export-video-preset').value, {
+                    width: sourceVideoDims.width, height: sourceVideoDims.height, aspectRatio: selectedVideoAspect
+                });
+                var videoAspect = videoDims.aspectRatio;
                 /* Cap video resolution for performance. */
                 var maxVideoPixels = 1280 * 720 * 4;
                 var videoScale = 1;
@@ -3308,18 +3212,8 @@ import {
                 }
                 videoScale = Math.round(videoScale * 10) / 10;
                 var fps = parseInt(document.getElementById('export-print-dpi') ? '30' : '30', 10);
-                var exportOrigin = app.getPlaybackOrigin();
-                var videoTimeline = createTimeline(app.wall.layout, app.playbackOrder, {
-                    mode: app.playbackMode,
-                    canvasWidth: app.wall.cssWidth,
-                    canvasHeight: app.wall.cssHeight,
-                    seed: app.wall.layoutSeed,
-                    stagger: app.flowTiming().stagger,
-                    interval: app.flowTiming().interval,
-                    transition: app.flowTiming().transition,
-                    cycles: app.playbackMode === 'shuffle' ? 3 : 1,
-                    originX: exportOrigin ? exportOrigin.x : undefined,
-                    originY: exportOrigin ? exportOrigin.y : undefined
+                var videoTimeline = app.playbackController.createTimeline(app.playbackMode, {
+                    cycles: app.playbackMode === 'shuffle' ? 3 : 1
                 });
                 extension = format;
                 mime = format === 'mp4' ? 'video/mp4' : 'video/webm';

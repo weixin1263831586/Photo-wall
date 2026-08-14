@@ -106,6 +106,16 @@ fn transcode_windows(payload: TranscodeRequest) -> crate::Result<TranscodeRespon
                 Duration: (payload.start_time.max(0.0) * 10_000_000.0) as i64,
             })
             .map_err(|error| crate::Error::Message(error.to_string()))?;
+        if payload.end_time > payload.start_time {
+            let original = track
+                .OriginalDuration()
+                .map_err(|error| crate::Error::Message(error.to_string()))?
+                .Duration;
+            let trim_end = (original - (payload.end_time * 10_000_000.0) as i64).max(0);
+            track
+                .SetTrimTimeFromEnd(TimeSpan { Duration: trim_end })
+                .map_err(|error| crate::Error::Message(error.to_string()))?;
+        }
         let tracks = composition
             .BackgroundAudioTracks()
             .map_err(|error| crate::Error::Message(error.to_string()))?;

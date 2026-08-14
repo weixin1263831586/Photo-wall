@@ -25,12 +25,15 @@ export var PlaybackOrders = {
     BOTTOM_TOP: 'bottom-top',
     SPIRAL: 'spiral',
     RANDOM: 'random',
+    CAPTURE_ASC: 'capture-asc',
+    CAPTURE_DESC: 'capture-desc',
+    FEATURED_FIRST: 'featured-first',
     CUSTOM: 'custom'
 };
 
 export var PlaybackOrderLabels = {
     'center-out': '从中心扩散',
-    'center-deep': '从形状深处',
+    'center-deep': '轮廓中心扩散',
     'outside-in': '从边缘到中心',
     'top-left': '左上角',
     'top-right': '右上角',
@@ -42,6 +45,9 @@ export var PlaybackOrderLabels = {
     'bottom-top': '从下到上',
     'spiral': '螺旋扩散',
     'random': '随机',
+    'capture-asc': '按拍摄时间（从早到晚）',
+    'capture-desc': '按拍摄时间（从晚到早）',
+    'featured-first': '重点照片优先',
     'custom': '点击选择起点'
 };
 
@@ -124,6 +130,15 @@ export function computePlaybackOrder(cells, mode, options) {
         case PlaybackOrders.RANDOM:
             return shuffleSeeded(indices, seed);
 
+        case PlaybackOrders.CAPTURE_ASC:
+            return sortByCaptureTime(indices, cells, options, false);
+
+        case PlaybackOrders.CAPTURE_DESC:
+            return sortByCaptureTime(indices, cells, options, true);
+
+        case PlaybackOrders.FEATURED_FIRST:
+            return sortFeaturedFirst(indices, cells, options, canvasW / 2, canvasH / 2);
+
         /* ---- Custom origin (user-clicked point) ---- */
         default:
             if (Number.isFinite(options.originX) && Number.isFinite(options.originY)) {
@@ -131,6 +146,41 @@ export function computePlaybackOrder(cells, mode, options) {
             }
             return sortByDistance(indices, cells, canvasW / 2, canvasH / 2);
     }
+}
+
+function photoForCell(cell, options) {
+    if (cell && cell.photo) return cell.photo;
+    var photos = options && Array.isArray(options.photos) ? options.photos : [];
+    var photoIndex = Number(cell && cell.photoIndex);
+    return Number.isInteger(photoIndex) ? photos[photoIndex] || null : null;
+}
+
+function captureTimestamp(cell, options) {
+    var photo = photoForCell(cell, options);
+    var timestamp = photo && Date.parse(photo.captureTime || '');
+    return Number.isFinite(timestamp) ? timestamp : null;
+}
+
+function sortByCaptureTime(indices, cells, options, descending) {
+    return indices.sort(function (a, b) {
+        var ta = captureTimestamp(cells[a], options);
+        var tb = captureTimestamp(cells[b], options);
+        if (ta === null && tb === null) return a - b;
+        if (ta === null) return 1;
+        if (tb === null) return -1;
+        return (descending ? tb - ta : ta - tb) || a - b;
+    });
+}
+
+function sortFeaturedFirst(indices, cells, options, cx, cy) {
+    return indices.sort(function (a, b) {
+        var featuredA = photoForCell(cells[a], options)?.featured === true ? 0 : 1;
+        var featuredB = photoForCell(cells[b], options)?.featured === true ? 0 : 1;
+        if (featuredA !== featuredB) return featuredA - featuredB;
+        var da = Math.hypot(num(cells[a].x, 0) - cx, num(cells[a].y, 0) - cy);
+        var db = Math.hypot(num(cells[b].x, 0) - cx, num(cells[b].y, 0) - cy);
+        return da - db || a - b;
+    });
 }
 
 function sortByDistance(indices, cells, ox, oy) {

@@ -19,9 +19,11 @@ function easeOutCubic(value) {
     return 1 - Math.pow(1 - t, 3);
 }
 
-function scalesFromOpacities(opacities) {
+function scalesFromOpacities(opacities, style) {
     var scales = new Float32Array(opacities.length);
-    for (var i = 0; i < opacities.length; i++) scales[i] = 0.86 + opacities[i] * 0.14;
+    for (var i = 0; i < opacities.length; i++) {
+        scales[i] = style === 'zoom' || style === 'ken-burns' ? 0.86 + opacities[i] * 0.14 : 1;
+    }
     return scales;
 }
 
@@ -42,6 +44,8 @@ export function createTimeline(layout, order, options) {
     options = options || {};
     var mode = options.mode || 'reveal';
     var transition = Math.max(80, Number(options.transition) || 600);
+    var transitionStyle = ['fade', 'zoom', 'slide', 'ken-burns'].indexOf(options.transitionStyle) >= 0 ?
+        options.transitionStyle : 'zoom';
     var cellCount = layout.length;
 
     var orderedIndices = computePlaybackOrder(layout, order, {
@@ -49,7 +53,8 @@ export function createTimeline(layout, order, options) {
         canvasHeight: options.canvasHeight,
         seed: options.seed,
         originX: options.originX,
-        originY: options.originY
+        originY: options.originY,
+        photos: options.photos
     });
 
     if (mode === 'shuffle') {
@@ -88,6 +93,7 @@ export function createTimeline(layout, order, options) {
         cellCount: cellCount,
         stagger: stagger,
         transition: transition,
+        transitionStyle: transitionStyle,
         items: items,
         orderedIndices: orderedIndices,
 
@@ -114,15 +120,37 @@ export function createTimeline(layout, order, options) {
         /** Scale accompanies the fade, giving each tile a restrained pop-in. */
         getCellScales: function (time) {
             var opacities = this.getCellOpacities(time);
-            return scalesFromOpacities(opacities);
+            return scalesFromOpacities(opacities, transitionStyle);
         },
 
         getFrame: function (time) {
             var opacities = this.getCellOpacities(time);
+            var offsetsX = new Float32Array(cellCount);
+            var offsetsY = new Float32Array(cellCount);
+            var photoZooms = new Float32Array(cellCount);
+            for (var i = 0; i < items.length; i++) {
+                var item = items[i];
+                var progress = opacities[item.cellIndex];
+                photoZooms[item.cellIndex] = transitionStyle === 'ken-burns' ? 1 + progress * 0.08 : 1;
+                if (transitionStyle !== 'slide') continue;
+                var cell = layout[item.cellIndex] || {};
+                var originX = Number.isFinite(Number(options.originX)) ? Number(options.originX) : Number(options.canvasWidth) / 2;
+                var originY = Number.isFinite(Number(options.originY)) ? Number(options.originY) : Number(options.canvasHeight) / 2;
+                var dx = Number(cell.x) - originX;
+                var dy = Number(cell.y) - originY;
+                var distance = Math.max(1, Math.hypot(dx, dy));
+                var amount = Math.min(32, Math.max(12, Math.min(Number(cell.width) || 48, Number(cell.height) || 48) * 0.28));
+                offsetsX[item.cellIndex] = -(dx / distance) * amount * (1 - progress);
+                offsetsY[item.cellIndex] = -(dy / distance) * amount * (1 - progress);
+            }
             return {
                 mode: 'reveal',
                 opacities: opacities,
-                scales: scalesFromOpacities(opacities)
+                scales: scalesFromOpacities(opacities, transitionStyle),
+                offsetsX: offsetsX,
+                offsetsY: offsetsY,
+                photoZooms: photoZooms,
+                transitionStyle: transitionStyle
             };
         },
 

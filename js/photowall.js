@@ -8,7 +8,7 @@ import { Shapes } from './shapes.js';
 import { computeDistanceTransform, sampleDistance } from './mask/DistanceTransform.js';
 import { assignPhotosToCells } from './layout/SmartPlacement.js';
 import { createSeededRandom, mixSeed, normalizeSeed } from './layout/SeededRandom.js';
-import { drawPhotoCover, photoImageDimensions } from './image/PhotoTransform.js';
+import { addRoundedRectPath, drawPhotoCover, photoImageDimensions } from './image/PhotoTransform.js';
 import { computeOptimalPlacement } from './image/AutoCropOptimizer.js';
 import { drawOverlays, getOverlayAt } from './overlay/OverlayRenderer.js';
 
@@ -324,11 +324,11 @@ import { drawOverlays, getOverlayAt } from './overlay/OverlayRenderer.js';
         } : { x: 0.5, y: 0.5 };
     };
 
-    PhotoWall.prototype._fitBoundaryCell = function (x, y, width, height) {
+    PhotoWall.prototype._fitBoundaryCell = function (x, y, width, height, allowGrowth) {
         var cellArea = Math.max(1, width * height);
         var visible = this._rectMaskArea(x, y, width, height);
         var coverage = visible / cellArea;
-        if (coverage >= 0.62) {
+        if (coverage >= 0.62 || allowGrowth === false) {
             var directCentroid = this._visibleMaskCentroid(x, y, width, height);
             return {
                 x: x, y: y, width: width, height: height, coverage: coverage,
@@ -392,7 +392,11 @@ import { drawOverlays, getOverlayAt } from './overlay/OverlayRenderer.js';
             for (var col = 0; col < cols + extra; col++) {
                 var x = b.x + col * cellW + shift, y = b.y + row * cellH;
                 if (this._rectMaskArea(x, y, cellW, cellH) === 0) continue;
-                var fitted = this._fitBoundaryCell(x, y, cellW, cellH);
+                // Every automatic mode keeps the original grid ownership for
+                // boundary cells. Organic mode gets its looser feel from the
+                // interior jitter; expanding contour cells here can cover a
+                // neighbouring source completely on sparse mobile layouts.
+                var fitted = this._fitBoundaryCell(x, y, cellW, cellH, false);
                 var jitterX = 0, jitterY = 0;
                 if (this.placementMode === 'organic' && !fitted.isBoundary) {
                     var seed = mixSeed(this.layoutSeed,
@@ -413,6 +417,7 @@ import { drawOverlays, getOverlayAt } from './overlay/OverlayRenderer.js';
                     isLarge: false,
                     isBoundary: fitted.isBoundary === true,
                     maskCoverage: fitted.coverage,
+                    visibleArea: fitted.coverage * fitted.width * fitted.height,
                     visibleFocusX: fitted.visibleFocusX,
                     visibleFocusY: fitted.visibleFocusY,
                     boundaryDistance: sampleDistance(this.maskData.distance, this.maskData.width, this.maskData.height,
@@ -434,7 +439,8 @@ import { drawOverlays, getOverlayAt } from './overlay/OverlayRenderer.js';
                 var x = b.x + col * cellW;
                 var y = b.y + row * cellH;
                 if (this._rectMaskArea(x, y, cellW, cellH) === 0) continue;
-                var fitted = this._fitBoundaryCell(x, y, cellW, cellH);
+                // Matrix cells must stay inside their exact row/column bounds.
+                var fitted = this._fitBoundaryCell(x, y, cellW, cellH, false);
                 cells.push({
                     x: fitted.x + fitted.width / 2,
                     y: fitted.y + fitted.height / 2,
@@ -448,6 +454,7 @@ import { drawOverlays, getOverlayAt } from './overlay/OverlayRenderer.js';
                     isLarge: false,
                     isBoundary: fitted.isBoundary === true,
                     maskCoverage: fitted.coverage,
+                    visibleArea: fitted.coverage * fitted.width * fitted.height,
                     visibleFocusX: fitted.visibleFocusX,
                     visibleFocusY: fitted.visibleFocusY,
                     boundaryDistance: sampleDistance(this.maskData.distance, this.maskData.width, this.maskData.height,
@@ -498,6 +505,7 @@ import { drawOverlays, getOverlayAt } from './overlay/OverlayRenderer.js';
                 height: height,
                 row: cell.row,
                 col: cell.col,
+                coverage: coverage,
                 boundaryDistance: sampleDistance(this.maskData.distance, this.maskData.width, this.maskData.height,
                     left + width / 2, top + height / 2),
                 score: coverage * 1.2 +
@@ -526,6 +534,8 @@ import { drawOverlays, getOverlayAt } from './overlay/OverlayRenderer.js';
                 isLarge: true,
                 spanRows: spanRows,
                 spanCols: spanCols,
+                maskCoverage: candidate.coverage,
+                visibleArea: candidate.coverage * candidate.width * candidate.height,
                 boundaryDistance: candidate.boundaryDistance
             });
         }
@@ -588,9 +598,22 @@ import { drawOverlays, getOverlayAt } from './overlay/OverlayRenderer.js';
         var low = Math.max(8, estimated * 0.5);
         var high = Math.max(low + 1, estimated * 2);
         var bestSize = estimated, bestCount = this._countCells(estimated), bestDelta = Math.abs(bestCount - baseTarget);
+        var coveringSize = bestCount >= baseTarget ? bestSize : null;
+        var coveringCount = bestCount >= baseTarget ? bestCount : Infinity;
+        function rememberCoveringCandidate(size, count) {
+            if (count < baseTarget) return;
+            if (coveringSize === null || count < coveringCount || (count === coveringCount && size > coveringSize)) {
+                coveringSize = size;
+                coveringCount = count;
+            }
+        }
+        var lowCount = this._countCells(low);
+        rememberCoveringCandidate(low, lowCount);
+        rememberCoveringCandidate(high, this._countCells(high));
         for (var search = 0; search < 9; search++) {
             var candidateSize = (low + high) / 2;
             var candidateCount = this._countCells(candidateSize);
+            rememberCoveringCandidate(candidateSize, candidateCount);
             var delta = Math.abs(candidateCount - baseTarget);
             if (delta < bestDelta || (delta === bestDelta && candidateCount >= baseTarget && bestCount < baseTarget)) {
                 bestSize = candidateSize;
@@ -600,6 +623,10 @@ import { drawOverlays, getOverlayAt } from './overlay/OverlayRenderer.js';
             if (candidateCount > baseTarget) low = candidateSize;
             else high = candidateSize;
         }
+        // Automatic layouts should never silently omit an imported asset.
+        // When cell-count steps skip over the exact target, prefer the small
+        // overshoot so every source receives at least one slot.
+        if (bestCount < baseTarget && coveringSize !== null) bestSize = coveringSize;
         var best = this._buildCells(Math.max(8, bestSize));
         best = this._mergeLargeCells(best, desiredLarge);
         this.layout = this._assignPhotos(best, forceRandom);
@@ -877,6 +904,16 @@ import { drawOverlays, getOverlayAt } from './overlay/OverlayRenderer.js';
             if (alpha <= 0) continue;
             var cellScale = frame.scales ? Math.max(0.5, Math.min(1, frame.scales[ci] || 1)) : 1;
             var item = this.layout[ci];
+            var playbackX = frame.offsetsX ? Number(frame.offsetsX[ci]) || 0 : 0;
+            var playbackY = frame.offsetsY ? Number(frame.offsetsY[ci]) || 0 : 0;
+            var playbackZoom = frame.photoZooms ? Number(frame.photoZooms[ci]) || 1 : 1;
+            if (playbackX || playbackY || playbackZoom !== 1) {
+                item = Object.assign({}, item, {
+                    x: item.x + playbackX,
+                    y: item.y + playbackY,
+                    playbackZoom: playbackZoom
+                });
+            }
             var previousIndex = frame.previousIndices && Number(frame.previousIndices[ci]);
             var nextIndex = frame.photoIndices && Number(frame.photoIndices[ci]);
             var progress = Math.max(0, Math.min(1, Number(frame.transitionProgress) || 0));
@@ -951,12 +988,20 @@ import { drawOverlays, getOverlayAt } from './overlay/OverlayRenderer.js';
             for (var orderIndex = 0; orderIndex < self._renderOrder.length; orderIndex++) {
                 if (revision !== self._renderRevision) return false;
                 var item = self.layout[self._renderOrder[orderIndex]];
+                var source = null;
                 try {
-                    var bitmap = await self.assetManager.getBitmap(item.photo, 'working');
-                    if (revision !== self._renderRevision) return false;
-                    self._drawPhoto(context, item, false, 1, false, bitmap);
-                } catch (error) {
-                    console.warn('照片工作图解码失败:', error);
+                    source = await self.assetManager.getBitmap(item.photo, 'working');
+                } catch (decodeError) {
+                    console.warn('照片工作图解码失败:', decodeError);
+                    source = item.photo && item.photo.img;
+                }
+                if (revision !== self._renderRevision) return false;
+                if (source) {
+                    try {
+                        self._drawPhoto(context, item, false, 1, false, source);
+                    } catch (drawError) {
+                        console.warn('照片绘制失败:', drawError);
+                    }
                 }
             }
             context.globalCompositeOperation = 'destination-in';
@@ -1048,6 +1093,9 @@ import { drawOverlays, getOverlayAt } from './overlay/OverlayRenderer.js';
                     (Math.abs(localOffsetX) + Math.abs(localOffsetY) > 0.01 ? 1.12 : 1)
             };
         }
+        if (Number(item.playbackZoom) > 0 && Number(item.playbackZoom) !== 1) {
+            placement = Object.assign({}, placement, { zoom: placement.zoom * Number(item.playbackZoom) });
+        }
         drawPhotoCover(ctx, img, width, height, item.photo, placement);
         if (hovered || dropTarget) {
             ctx.shadowColor = 'transparent'; ctx.lineWidth = 2;
@@ -1082,7 +1130,7 @@ import { drawOverlays, getOverlayAt } from './overlay/OverlayRenderer.js';
             ctx.closePath();
         } else {
             var radius = Math.min(12, width * .1, height * .1);
-            ctx.roundRect(x - rx, y - ry, width, height, radius);
+            addRoundedRectPath(ctx, x - rx, y - ry, width, height, radius);
         }
     };
 
@@ -1115,7 +1163,7 @@ import { drawOverlays, getOverlayAt } from './overlay/OverlayRenderer.js';
 
     PhotoWall.prototype.getExportFrame = function (aspectRatio) {
         var bounds = this.getExportBounds();
-        var ratios = { '3:4': 3 / 4, '4:3': 4 / 3, '9:16': 9 / 16, '16:9': 16 / 9 };
+        var ratios = { '1:1': 1, '3:4': 3 / 4, '4:3': 4 / 3, '9:16': 9 / 16, '16:9': 16 / 9 };
         var targetRatio = ratios[aspectRatio];
         if (!targetRatio) return bounds;
 
@@ -1140,7 +1188,7 @@ import { drawOverlays, getOverlayAt } from './overlay/OverlayRenderer.js';
     PhotoWall.prototype.getExportDimensions = function (scale, aspectRatio) {
         scale = Math.max(0.1, Math.min(3, Number(scale) || 2));
         var bounds = this.getExportFrame(aspectRatio);
-        var ratioUnits = { '3:4': [3, 4], '4:3': [4, 3], '9:16': [9, 16], '16:9': [16, 9] }[aspectRatio];
+        var ratioUnits = { '1:1': [1, 1], '3:4': [3, 4], '4:3': [4, 3], '9:16': [9, 16], '16:9': [16, 9] }[aspectRatio];
         if (ratioUnits) {
             var unit = Math.ceil(Math.max(
                 bounds.width * scale / ratioUnits[0],

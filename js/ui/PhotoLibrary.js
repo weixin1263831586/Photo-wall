@@ -60,6 +60,10 @@ export function createPhotoLibrary(options) {
             card.classList.remove('dragging', 'drag-over');
             card.querySelector('.photo-order').textContent = index + 1;
             var image = card.querySelector('img');
+            // A transformed mobile bottom sheet is considered off-screen by
+            // some older WebViews, so native lazy loading can leave its first
+            // thumbnails blank even after the sheet opens.
+            image.loading = index < 24 ? 'eager' : 'lazy';
             var thumbnailSource = photo.thumbnailSrc || photo.src;
             if (image.src !== thumbnailSource) image.src = thumbnailSource;
             image.alt = photo.name || '';

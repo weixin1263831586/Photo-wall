@@ -71,6 +71,7 @@ export async function transcodeVideoForPlatform(blob, options) {
                 duration: Math.max(0, Number(options.duration) || 0),
                 volume: music ? music.volume : 0.7,
                 startTime: music ? music.startTime : 0,
+                endTime: music ? music.endTime : 0,
                 loopAudio: music ? music.loop !== false : false,
                 fadeIn: music ? music.fadeIn : 0,
                 fadeOut: music ? music.fadeOut : 0

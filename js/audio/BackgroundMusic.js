@@ -6,17 +6,25 @@ function clamp(value, min, max, fallback) {
 export function normalizeBackgroundMusic(music) {
     if (!music) return null;
     var duration = Math.max(0, Number(music.duration) || 0);
+    var startTime = clamp(music.startTime, 0, Math.max(0, duration - 0.05), 0);
+    var endTime = clamp(music.endTime, Math.min(duration, startTime + 0.05), duration, duration);
     return {
         name: String(music.name || '背景音乐').slice(0, 180),
         type: String(music.type || 'audio/mpeg').slice(0, 80),
         duration: duration,
         volume: clamp(music.volume, 0, 1, 0.7),
-        startTime: clamp(music.startTime, 0, Math.max(0, duration - 0.05), 0),
+        startTime: startTime,
+        endTime: endTime,
         loop: music.loop !== false,
         fadeIn: clamp(music.fadeIn, 0, 10, 1),
         fadeOut: clamp(music.fadeOut, 0, 10, 1),
         originalBlob: music.originalBlob instanceof Blob ? music.originalBlob : null
     };
+}
+
+export function musicSegmentDuration(music) {
+    music = normalizeBackgroundMusic(music);
+    return music ? Math.max(0, music.endTime - music.startTime) : 0;
 }
 
 export function musicVolumeAt(music, elapsedSeconds, totalSeconds) {

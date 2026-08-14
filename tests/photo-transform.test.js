@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { applyPhotoTransform, normalizePhotoTransform, photoCoverLayout } from '../js/image/PhotoTransform.js';
+import { addRoundedRectPath, applyPhotoTransform, normalizePhotoTransform, photoCoverLayout } from '../js/image/PhotoTransform.js';
 
 test('photo transform clamps unsafe editor values', function () {
     assert.deepEqual(normalizePhotoTransform({
@@ -59,4 +59,18 @@ test('photo transform writes normalized edit state to a photo', function () {
     assert.equal(photo.editZoom, 1.5);
     assert.equal(photo.editRotation, 45);
     assert.equal(photo.flipY, true);
+});
+
+test('rounded rectangle path falls back for older Android WebViews', function () {
+    var calls = [];
+    var context = {};
+    ['moveTo', 'lineTo', 'quadraticCurveTo', 'closePath'].forEach(function (method) {
+        context[method] = function () { calls.push([method].concat(Array.from(arguments))); };
+    });
+
+    addRoundedRectPath(context, 10, 20, 100, 60, 12);
+
+    assert.deepEqual(calls[0], ['moveTo', 22, 20]);
+    assert.equal(calls.filter(function (call) { return call[0] === 'quadraticCurveTo'; }).length, 4);
+    assert.deepEqual(calls[calls.length - 1], ['closePath']);
 });

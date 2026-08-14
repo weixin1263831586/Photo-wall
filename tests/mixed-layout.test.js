@@ -63,6 +63,34 @@ test('a thin boundary cell grows toward visible mask pixels', function () {
     assert.ok(fitted.visibleFocusX > 0.5);
 });
 
+test('exact grid boundary cells do not grow over their neighbours', function () {
+    var wall = createWall(4, false);
+    var width = 100, height = 100, stride = width + 1;
+    var integral = new Uint32Array((width + 1) * (height + 1));
+    var mask = new Uint8Array(width * height);
+    for (var y = 1; y <= height; y++) {
+        var rowSum = 0;
+        for (var x = 1; x <= width; x++) {
+            if (x >= 45) { rowSum++; mask[(y - 1) * width + x - 1] = 1; }
+            integral[y * stride + x] = integral[(y - 1) * stride + x] + rowSum;
+        }
+    }
+    wall.maskData = {
+        width: width, height: height, integral: integral, mask: mask,
+        distance: new Float32Array(width * height),
+        bounds: { x: 0, y: 0, width: width, height: height }
+    };
+
+    var cells = wall._buildMatrixCells(2);
+    assert.ok(cells.length >= 2);
+    cells.forEach(function (cell) {
+        assert.equal(cell.width, 50);
+        assert.equal(cell.height, 50);
+        assert.equal(cell.baseX % 50, 0);
+        assert.equal(cell.baseY % 50, 0);
+    });
+});
+
 test('export ratios expand from tight bounds in both orientations', function () {
     var wall = Object.create(PhotoWall.prototype);
     wall.getExportBounds = function () { return { x: 20, y: 30, width: 300, height: 500 }; };

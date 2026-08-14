@@ -62,3 +62,34 @@ test('custom playback origin is honoured by reveal timeline', function () {
     });
     assert.equal(timeline.orderedIndices[0], 2);
 });
+
+test('fade, slide and Ken Burns frames expose distinct motion data', function () {
+    var base = { canvasWidth: 100, canvasHeight: 100, stagger: 100, transition: 400 };
+    var fade = createTimeline(layout(), 'center-out', Object.assign({}, base, { transitionStyle: 'fade' })).getFrame(200);
+    assert.ok(Array.from(fade.scales).every(function (scale) { return scale === 1; }));
+
+    var slide = createTimeline(layout(), 'center-out', Object.assign({}, base, { transitionStyle: 'slide' })).getFrame(50);
+    assert.ok(Array.from(slide.offsetsX).some(function (offset) { return offset !== 0; }) ||
+        Array.from(slide.offsetsY).some(function (offset) { return offset !== 0; }));
+
+    var kenBurnsTimeline = createTimeline(layout(), 'center-out', Object.assign({}, base, { transitionStyle: 'ken-burns' }));
+    var kenBurns = kenBurnsTimeline.getFrame(200);
+    assert.ok(Array.from(kenBurns.photoZooms).some(function (zoom) { return zoom > 1; }));
+});
+
+test('timeline survives project JSON roundtrip deterministically', function () {
+    var project = JSON.parse(JSON.stringify({
+        order: 'capture-asc', seed: 73,
+        photos: [
+            { captureTime: '2024-02-01T00:00:00.000Z' },
+            { captureTime: '2023-02-01T00:00:00.000Z' },
+            { captureTime: '2025-02-01T00:00:00.000Z' }
+        ]
+    }));
+    var options = { canvasWidth: 100, canvasHeight: 100, seed: project.seed, photos: project.photos, transitionStyle: 'slide' };
+    var preview = createTimeline(layout(), project.order, options);
+    var exported = createTimeline(layout(), project.order, JSON.parse(JSON.stringify(options)));
+    assert.deepEqual(preview.orderedIndices, exported.orderedIndices);
+    assert.deepEqual(Array.from(preview.getFrame(500).opacities), Array.from(exported.getFrame(500).opacities));
+    assert.deepEqual(Array.from(preview.getFrame(500).offsetsX), Array.from(exported.getFrame(500).offsetsX));
+});
