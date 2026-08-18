@@ -38,7 +38,10 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
         .invoke_handler(tauri::generate_handler![
             commands::capabilities,
             commands::transcode,
-            commands::open_file
+            commands::open_file,
+            commands::extract_poster,
+            commands::transcode_frames,
+            commands::cancel_export
         ])
         .setup(|app, api| {
             #[cfg(mobile)]

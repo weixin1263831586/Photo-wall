@@ -4,7 +4,7 @@
  *
  * Two modes:
  *   'reveal'  — cells appear one-by-one, assembling the shape.
- *   'shuffle' — all cells stay visible; photos swap at intervals (legacy flow).
+ *   'shuffle' — all cells stay visible; photos swap in the selected order.
  */
 
 import { computePlaybackOrder } from './PlaybackOrder.js';
@@ -140,15 +140,12 @@ export function createTimeline(layout, order, options) {
                 var progress = opacities[item.cellIndex];
                 var cell = layout[item.cellIndex] || {};
                 if (transitionStyle === 'ken-burns') {
-                    /* Slow zoom-in from 1.0 to 1.08 combined with a gentle pan
-                       towards the photo's subject focus point. */
                     photoZooms[item.cellIndex] = 1 + progress * 0.08;
-                    var photo = photoForCell ? photoForCell(cell, options) : null;
+                    var photo = photoForCell(cell, options);
                     var focusX = photo ? Number(photo.focusX) : 0.5;
                     var focusY = photo ? Number(photo.focusY) : 0.5;
                     if (!Number.isFinite(focusX)) focusX = 0.5;
                     if (!Number.isFinite(focusY)) focusY = 0.5;
-                    /* Pan starts slightly off-center and drifts towards the subject. */
                     var panFromX = (0.5 - focusX) * 0.5;
                     var panFromY = (0.5 - focusY) * 0.5;
                     var cellW = Number(cell.width) || 48;
@@ -183,11 +180,7 @@ export function createTimeline(layout, order, options) {
     };
 }
 
-/**
- * Shuffle timeline: all cells visible, photos rotate at intervals.
- * This wraps the existing randomizeAssignments behaviour but exposes it
- * through the same timeline interface for video export.
- */
+/** Shuffle one assignment deterministically without mutating the source. */
 function shuffleAssignment(assignment, seed) {
     var result = assignment.slice();
     var random = createSeededRandom(seed);
@@ -203,26 +196,48 @@ function shuffleAssignment(assignment, seed) {
     return result;
 }
 
+/**
+ * Shuffle timeline. Every cycle has one target assignment, but each cell
+ * starts its crossfade according to `orderedIndices`. Large walls compress the
+ * stagger automatically so a whole cycle still fits inside the configured
+ * interval.
+ */
 function createShuffleTimeline(layout, orderedIndices, options) {
     options = options || {};
     var interval = Math.max(500, Number(options.interval) || 3200);
-    var transition = Math.max(200, Number(options.transition) || 800);
+    var transition = Math.min(interval, Math.max(200, Number(options.transition) || 800));
     var cycles = Math.max(1, Number(options.cycles) || 3);
     var cellCount = layout.length;
     var totalDuration = cycles * interval;
     var baseSeed = normalizeSeed(options.seed);
+    var requestedStagger = Math.max(0, Number(options.stagger) || 120);
+    var maxStagger = cellCount > 1 ? Math.max(0, interval - transition) / (cellCount - 1) : 0;
+    var stagger = Math.min(requestedStagger, maxStagger || requestedStagger);
+    var orderPosition = new Int32Array(cellCount);
+    orderedIndices.forEach(function (cellIndex, position) {
+        if (cellIndex >= 0 && cellIndex < cellCount) orderPosition[cellIndex] = position;
+    });
 
-    /* Pre-compute which photo each cell shows at each cycle boundary. */
     var cycleStates = [];
     var currentAssignment = layout.map(function (item) {
         return item.photoIndex;
     });
 
-    for (var c = 0; c <= cycles; c++) {
+    for (var cycle = 0; cycle <= cycles; cycle++) {
         cycleStates.push(currentAssignment.slice());
-        if (c < cycles) {
-            currentAssignment = shuffleAssignment(currentAssignment, baseSeed + c + 1);
+        if (cycle < cycles) {
+            currentAssignment = shuffleAssignment(currentAssignment, baseSeed + cycle + 1);
         }
+    }
+
+    function cycleAt(time) {
+        time = Math.max(0, Math.min(totalDuration, Number(time) || 0));
+        var cycleIndex = Math.floor(time / interval);
+        if (cycleIndex >= cycles) cycleIndex = cycles - 1;
+        return {
+            index: cycleIndex,
+            elapsed: time - cycleIndex * interval
+        };
     }
 
     return {
@@ -232,14 +247,11 @@ function createShuffleTimeline(layout, orderedIndices, options) {
         cellCount: cellCount,
         interval: interval,
         transition: transition,
+        stagger: stagger,
         cycles: cycles,
         cycleStates: cycleStates,
+        orderedIndices: orderedIndices.slice(),
 
-        /**
-         * Returns per-cell opacity (always 1 for shuffle, since all cells
-         * remain visible — the transition is a crossfade handled at the
-         * renderer level).
-         */
         getCellOpacities: function () {
             var opacities = new Float32Array(cellCount);
             for (var i = 0; i < cellCount; i++) opacities[i] = 1;
@@ -253,24 +265,25 @@ function createShuffleTimeline(layout, orderedIndices, options) {
         },
 
         /**
-         * Returns the photo assignment at a given time, with crossfade progress
-         * for cells currently transitioning.
-         * @returns { photoIndices: number[], transitionProgress: 0..1 }
+         * Returns the target assignment plus one crossfade progress per cell.
+         * `transitionProgress` is retained for old renderers and represents the
+         * earliest cell; new renderers should use `transitionProgresses`.
          */
         getAssignmentAt: function (time) {
-            time = Math.max(0, Math.min(totalDuration, Number(time) || 0));
-            var cycleIndex = Math.floor(time / interval);
-            if (cycleIndex >= cycles) cycleIndex = cycles - 1;
-
-            var prev = cycleStates[cycleIndex];
-            var next = cycleStates[cycleIndex + 1] || prev;
-            var elapsed = time - cycleIndex * interval;
-            var progress = easeOutCubic(elapsed / transition);
-
+            var point = cycleAt(time);
+            var previous = cycleStates[point.index];
+            var next = cycleStates[point.index + 1] || previous;
+            var progresses = new Float32Array(cellCount);
+            for (var cell = 0; cell < cellCount; cell++) {
+                var start = orderPosition[cell] * stagger;
+                progresses[cell] = easeOutCubic((point.elapsed - start) / transition);
+            }
+            var legacyProgress = cellCount ? progresses[orderedIndices[0] || 0] : 1;
             return {
                 photoIndices: next,
-                previousIndices: prev,
-                transitionProgress: progress < 1 ? progress : 1
+                previousIndices: previous,
+                transitionProgresses: progresses,
+                transitionProgress: legacyProgress
             };
         },
 
@@ -282,6 +295,7 @@ function createShuffleTimeline(layout, orderedIndices, options) {
                 scales: this.getCellScales(time),
                 photoIndices: assignment.photoIndices,
                 previousIndices: assignment.previousIndices,
+                transitionProgresses: assignment.transitionProgresses,
                 transitionProgress: assignment.transitionProgress
             };
         },
