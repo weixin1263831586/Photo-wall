@@ -17,6 +17,28 @@ test('dominant face becomes the crop focus', function () {
     assert.ok(focus.subjectConfidence >= 0.68);
 });
 
+test('face boxes are clamped to the source image bounds', function () {
+    var focus = dominantFaceFocus([
+        { boundingBox: { x: 180, y: 90, width: 60, height: 50 } }
+    ], 200, 120);
+    assert.ok(focus);
+    assert.equal(focus.faceBox.x, 0.9);
+    assert.equal(focus.faceBox.y, 0.75);
+    assert.equal(focus.faceBox.width, 0.1);
+    assert.equal(focus.faceBox.height, 0.25);
+    assert.ok(focus.faceBox.x + focus.faceBox.width <= 1);
+    assert.ok(focus.faceBox.y + focus.faceBox.height <= 1);
+    assert.ok(focus.personBox.x + focus.personBox.width <= 1);
+    assert.ok(focus.personBox.y + focus.personBox.height <= 1);
+});
+
+test('fully out-of-frame face boxes are ignored', function () {
+    var focus = dominantFaceFocus([
+        { boundingBox: { x: 250, y: 150, width: 40, height: 40 } }
+    ], 200, 120);
+    assert.equal(focus, null);
+});
+
 test('subject focus safely falls back to saliency', async function () {
     var result = await refineSubjectFocus({ width: 100, height: 100 }, { focusX: 0.4, focusY: 0.6 }, null);
     assert.equal(result.focusX, 0.4);
