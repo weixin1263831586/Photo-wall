@@ -1,7 +1,9 @@
 import { createTimeline } from '../playback/PlaybackTimeline.js';
+import { scheduleRuntimeOptimization } from './RuntimeOptimizationController.js';
 
 /** Centralises timeline construction so preview, live playback and export cannot drift. */
 export function createPlaybackController(app) {
+    scheduleRuntimeOptimization(app);
     return {
         createTimeline: function (mode, overrides) {
             overrides = overrides || {};
