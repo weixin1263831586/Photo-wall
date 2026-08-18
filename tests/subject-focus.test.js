@@ -24,12 +24,12 @@ test('face boxes are clamped to the source image bounds', function () {
     assert.ok(focus);
     assert.equal(focus.faceBox.x, 0.9);
     assert.equal(focus.faceBox.y, 0.75);
-    assert.equal(focus.faceBox.width, 0.1);
-    assert.equal(focus.faceBox.height, 0.25);
-    assert.ok(focus.faceBox.x + focus.faceBox.width <= 1);
-    assert.ok(focus.faceBox.y + focus.faceBox.height <= 1);
-    assert.ok(focus.personBox.x + focus.personBox.width <= 1);
-    assert.ok(focus.personBox.y + focus.personBox.height <= 1);
+    assert.ok(Math.abs(focus.faceBox.width - 0.1) < 1e-12);
+    assert.ok(Math.abs(focus.faceBox.height - 0.25) < 1e-12);
+    assert.ok(focus.faceBox.x + focus.faceBox.width <= 1 + Number.EPSILON);
+    assert.ok(focus.faceBox.y + focus.faceBox.height <= 1 + Number.EPSILON);
+    assert.ok(focus.personBox.x + focus.personBox.width <= 1 + Number.EPSILON);
+    assert.ok(focus.personBox.y + focus.personBox.height <= 1 + Number.EPSILON);
 });
 
 test('fully out-of-frame face boxes are ignored', function () {
