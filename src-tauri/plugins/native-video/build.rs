@@ -4,6 +4,7 @@ const COMMANDS: &[&str] = &[
     "open_file",
     "extract_poster",
     "transcode_frames",
+    "cancel_export",
 ];
 
 fn main() {
