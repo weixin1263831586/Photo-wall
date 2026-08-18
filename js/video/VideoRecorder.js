@@ -29,7 +29,8 @@ export function setVideoExportAbortSignal(signal) {
 }
 
 function currentSignal(options) {
-    return (options && options.signal) || activeAbortSignal || null;
+    var earlySignal = typeof window !== 'undefined' ? window.__PHOTO_WALL_EXPORT_ABORT_SIGNAL__ : null;
+    return (options && options.signal) || activeAbortSignal || earlySignal || null;
 }
 
 function abortError() {
@@ -64,9 +65,7 @@ export function pickVideoMimeType(format) {
     }) || '';
 }
 
-/**
- * Record a timeline-driven animation from a PhotoWall instance.
- */
+/** Record a timeline-driven animation from a PhotoWall instance. */
 export async function recordTimelineCanvas(wall, timeline, options) {
     options = options || {};
     var cssWidth = Math.round(options.width || wall.cssWidth || 1080);
@@ -300,5 +299,9 @@ export async function recordTimelineCanvas(wall, timeline, options) {
             cancelled: Boolean(signal && signal.aborted)
         });
         if (signal && signal === activeAbortSignal) activeAbortSignal = null;
+        if (typeof window !== 'undefined' && signal && signal === window.__PHOTO_WALL_EXPORT_ABORT_SIGNAL__) {
+            window.__PHOTO_WALL_EXPORT_ABORT_SIGNAL__ = null;
+            window.__PHOTO_WALL_EXPORT_ABORT_CONTROLLER__ = null;
+        }
     }
 }
