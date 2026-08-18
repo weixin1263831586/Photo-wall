@@ -28,7 +28,7 @@ import {
     migrateProject,
     openProjectContainer
 } from './persistence/ProjectContainer.js';
-import { isNativeApp, openBlobWithSystem, saveBlob } from './platform/NativeFileService.js';
+import { isNativeApp, openBlobWithSystem, saveBlob, cleanupPlayCache } from './platform/NativeFileService.js';
 import { checkAndInstallUpdate, installCrashCapture } from './platform/RuntimeServices.js';
 import { createDeviceProfile, getImportDimension } from './platform/DeviceProfile.js';
 import {
@@ -73,7 +73,6 @@ import {
         revealTimeline: null,
         revealRAF: null,
         revealStartTime: 0,
-        revealSnapshot: null,
         customOrigin: null,
         backgroundMusic: null,
         musicObjectURL: '',
@@ -104,8 +103,6 @@ import {
         assetManager: null,
         templateLibrary: null,
         deviceProfile: null,
-        photoObjectURLs: new Set(),
-        photoObjectURLCleanupTimer: null,
         maxPhotos: 1000,
         maxFileSize: 40 * 1024 * 1024,
         maxVideoFileSize: 200 * 1024 * 1024,
@@ -116,6 +113,8 @@ import {
         supportedVideoTypes: ['video/mp4', 'video/webm', 'video/quicktime', 'video/x-m4v']
     };
 
+    app._fileLoadToken = 0;
+
     app.playbackController = createPlaybackController(app);
     installMusicController(app);
 
@@ -125,6 +124,8 @@ import {
 
     app.init = function () {
         app.detachCrashCapture = installCrashCapture();
+        /* Best-effort cleanup of stale system-player cache files. */
+        cleanupPlayCache();
         var canvas = document.getElementById('wall-canvas');
         app.deviceProfile = createDeviceProfile({
             viewportWidth: window.innerWidth,
@@ -146,7 +147,6 @@ import {
             maxDevicePixelRatio: app.deviceProfile.maxEditorDpr,
             assetManager: app.assetManager
         });
-        document.documentElement.classList.toggle('native-app', isNativeApp());
         document.documentElement.classList.toggle('mobile-device', app.deviceProfile.mobile);
         app.photoAnalyzerWorker = createPhotoAnalysisWorkerClient({
             timeout: app.photoLoadTimeout,
@@ -158,7 +158,6 @@ import {
             restore: function (state) { app.restoreState(state); },
             onChange: function () {
                 app.updateActionState();
-                app.scheduleObjectURLCleanup();
             }
         });
         app.autosave = createProjectAutosave({
@@ -225,6 +224,9 @@ import {
         app._canvasResizeObserver = new ResizeObserver(function () {
             clearTimeout(app.resizeTimer);
             app.resizeTimer = setTimeout(function () {
+                /* A rebuild during playback would leave the running timeline
+                   driving a brand-new layout (mismatched cell indices). */
+                if (app.flowPlaying || app.revealTimeline) app.stopAllPlayback(true);
                 app.wall.resize();
                 app.updateCustomOriginMarker();
             }, 80);
@@ -256,6 +258,7 @@ import {
         window.addEventListener('resize', function () {
             clearTimeout(app.resizeTimer);
             app.resizeTimer = setTimeout(function () {
+                if (app.flowPlaying || app.revealTimeline) app.stopAllPlayback(true);
                 app.wall.resize();
                 app.updateCustomOriginMarker();
             }, 200);
@@ -266,9 +269,6 @@ import {
             if (app.photoAnalyzerWorker) app.photoAnalyzerWorker.terminate();
             if (app.assetManager) app.assetManager.destroy();
             if (app.detachCrashCapture) app.detachCrashCapture();
-            clearTimeout(app.photoObjectURLCleanupTimer);
-            app.photoObjectURLs.forEach(function (url) { URL.revokeObjectURL(url); });
-            app.photoObjectURLs.clear();
             app.releaseMusicAudio();
         });
         document.addEventListener('visibilitychange', function () {
@@ -316,7 +316,9 @@ import {
         var motionControls = document.getElementById('canvas-motion-controls');
         var workspaceBar = document.querySelector('.workspace-bar');
         var canvasStage = document.getElementById('canvas-stage');
+        var motionHomeMarker = document.createComment('canvas-motion-controls home');
 
+        /* Keep the JS breakpoint in sync with the CSS mobile layout query. */
         function isMobileLayout() {
             return window.matchMedia('(max-width: 768px)').matches;
         }
@@ -330,10 +332,15 @@ import {
         function relocateMotionControls() {
             if (!motionControls || !workspaceBar || !canvasStage) return;
             /* On mobile the controls overlay the bottom of the canvas;
-             * on desktop they sit inside the top toolbar. */
-            var target = isMobileLayout() ? canvasStage : workspaceBar;
-            if (motionControls.parentElement !== target) {
-                target.appendChild(motionControls);
+             * on desktop they sit inside the top toolbar at their original
+             * DOM position (before .workspace-actions). */
+            if (isMobileLayout()) {
+                if (motionControls.parentElement !== canvasStage) {
+                    motionHomeMarker.parentNode || workspaceBar.insertBefore(motionHomeMarker, motionControls);
+                    canvasStage.appendChild(motionControls);
+                }
+            } else if (motionControls.parentElement !== workspaceBar) {
+                workspaceBar.insertBefore(motionControls, motionHomeMarker);
             }
         }
 
@@ -551,6 +558,12 @@ import {
 
         var dropZone = document.getElementById('drop-zone');
         dropZone.addEventListener('click', function () { fileInput.click(); });
+        dropZone.addEventListener('keydown', function (e) {
+            if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                fileInput.click();
+            }
+        });
         dropZone.addEventListener('dragover', function (e) {
             e.preventDefault();
             dropZone.classList.add('drag-over');
@@ -762,9 +775,16 @@ import {
             app.clearPhotos();
         });
         document.getElementById('export-btn').addEventListener('click', function () {
+            /* Reset to image category when opened via the general export button. */
+            var imageCategory = document.querySelector('input[name="export-category"][value="image"]');
+            if (imageCategory) imageCategory.checked = true;
+            var pngRadio = document.querySelector('input[name="export-format"][value="png"]');
+            if (pngRadio) pngRadio.checked = true;
             app.openExportDialog();
         });
         document.getElementById('export-video-btn').addEventListener('click', function () {
+            var videoCategory = document.querySelector('input[name="export-category"][value="video"]');
+            if (videoCategory) videoCategory.checked = true;
             var mp4Radio = document.querySelector('input[name="export-format"][value="mp4"]');
             if (mp4Radio) mp4Radio.checked = true;
             app.openExportDialog();
@@ -790,6 +810,9 @@ import {
         });
         document.querySelectorAll('input[name="export-format"], input[name="export-scale"], input[name="export-aspect"]').forEach(function (input) {
             input.addEventListener('change', app.updateExportOptions);
+        });
+        document.querySelectorAll('input[name="export-category"]').forEach(function (input) {
+            input.addEventListener('change', app.onExportCategoryChange);
         });
         ['export-print-size', 'export-print-dpi', 'export-print-bleed'].forEach(function (id) {
             document.getElementById(id).addEventListener('change', app.updateExportOptions);
@@ -890,6 +913,13 @@ import {
         document.addEventListener('keydown', function (e) {
             var targetTag = e.target && e.target.tagName;
             var isTyping = targetTag === 'INPUT' || targetTag === 'TEXTAREA' || targetTag === 'SELECT';
+            /* Modals and the lightbox snapshot app state on open; letting a
+               global Ctrl+Z through would undo underneath them and desync
+               photo indices (e.g. the single-photo editor confirming onto
+               the wrong photo). */
+            var modalOpen = document.querySelector('.app').inert === true;
+            if (modalOpen && (e.ctrlKey || e.metaKey) &&
+                (e.key.toLowerCase() === 'z' || e.key.toLowerCase() === 'y')) return;
             if ((e.ctrlKey || e.metaKey) && !isTyping && e.key.toLowerCase() === 's') {
                 e.preventDefault();
                 app.saveProject();
@@ -1631,19 +1661,21 @@ import {
     };
 
     app.handleFiles = function (files) {
+        var loadToken = ++app._fileLoadToken;
         var incoming = Array.prototype.slice.call(files);
         var existingSignatures = new Set(app.photos.map(function (photo) { return photo.signature; }).filter(Boolean));
         var skippedLarge = 0, skippedDuplicate = 0;
-        var mediaFiles = incoming.filter(function (file) {
+        var mediaFiles = [];
+        incoming.forEach(function (file) {
             var video = app.isVideoFile(file);
             var supportedType = app.supportedImageTypes.indexOf(file.type) >= 0 || video;
             var supportedExtension = /\.(jpe?g|png|webp|mp4|webm|mov|m4v)$/i.test(file.name);
-            if (!supportedType && !supportedExtension) return false;
-            if (file.size > (video ? app.maxVideoFileSize : app.maxFileSize)) { skippedLarge++; return false; }
+            if (!supportedType && !supportedExtension) return;
+            if (file.size > (video ? app.maxVideoFileSize : app.maxFileSize)) { skippedLarge++; return; }
             var signature = [file.name, file.size, file.lastModified].join(':');
-            if (existingSignatures.has(signature)) { skippedDuplicate++; return false; }
+            if (existingSignatures.has(signature)) { skippedDuplicate++; return; }
             existingSignatures.add(signature);
-            return true;
+            mediaFiles.push(file);
         });
         var remaining = Math.max(0, app.maxPhotos - app.photos.length);
         var skippedLimit = Math.max(0, mediaFiles.length - remaining);
@@ -1664,8 +1696,10 @@ import {
         var importDimension = app.getPhotoImportDimension(app.photos.length + total);
         app.showLoading(true, '正在读取 0/' + total + ' 个素材…');
         app.loadPhotoBatch(mediaFiles, function (completed) {
+            if (loadToken !== app._fileLoadToken) return;
             app.showLoading(true, '正在读取 ' + completed + '/' + total + ' 个素材…');
         }, importDimension).then(function (loadedPhotos) {
+            if (loadToken !== app._fileLoadToken) return;
             var valid = loadedPhotos.filter(Boolean);
             if (valid.length) app.recordHistory();
             Array.prototype.push.apply(app.photos, valid);
@@ -1679,6 +1713,7 @@ import {
             app.toast('已添加 ' + valid.length + ' 个素材' + (skipped ? ' · 跳过 ' + skipped + ' 个' : '') +
                 (fallbackVideos ? ' · ' + fallbackVideos + ' 个视频需使用设备解码播放' : ''));
         }).catch(function (err) {
+            if (loadToken !== app._fileLoadToken) return;
             console.error('批量读取素材失败:', err);
             app.showLoading(false);
             app.toast('素材读取失败，请重试');
@@ -1725,10 +1760,7 @@ import {
                     img.onerror = null;
                     img.src = '';
                 }
-                if (objectURL) {
-                    app.photoObjectURLs.delete(objectURL);
-                    URL.revokeObjectURL(objectURL);
-                }
+                if (objectURL) URL.revokeObjectURL(objectURL);
                 reject(new Error('load timed out'));
             }, app.photoLoadTimeout);
 
@@ -1789,7 +1821,6 @@ import {
                     finish(resolve, photo);
                 }).catch(function (err) {
                     if (objectURL) {
-                        app.photoObjectURLs.delete(objectURL);
                         URL.revokeObjectURL(objectURL);
                         objectURL = '';
                     }
@@ -1875,27 +1906,6 @@ import {
 
     app.renderPhotoLibrary = function () {
         if (app.photoLibrary) app.photoLibrary.render(app.photos);
-    };
-
-    app.scheduleObjectURLCleanup = function () {
-        clearTimeout(app.photoObjectURLCleanupTimer);
-        app.photoObjectURLCleanupTimer = setTimeout(function () {
-            var retained = new Set();
-            function retainPhotos(state) {
-                if (!state || !Array.isArray(state.photos)) return;
-                state.photos.forEach(function (photo) {
-                    if (photo && typeof photo.src === 'string' && photo.src.startsWith('blob:')) retained.add(photo.src);
-                });
-            }
-            retainPhotos({ photos: app.photos });
-            if (app.history && typeof app.history.visitStates === 'function') app.history.visitStates(retainPhotos);
-            app.photoObjectURLs.forEach(function (url) {
-                if (retained.has(url)) return;
-                URL.revokeObjectURL(url);
-                app.photoObjectURLs.delete(url);
-            });
-            app.photoObjectURLCleanupTimer = null;
-        }, 0);
     };
 
     app.reorderPhoto = function (fromIndex, targetIndex) {
@@ -2183,14 +2193,13 @@ import {
                     reject(new Error('project photo load timed out'));
                 }, app.photoLoadTimeout);
 
-                function finish(callback, value, retainURL) {
+                function finish(callback, value) {
                     if (settled) return;
                     settled = true;
                     clearTimeout(timeout);
                     img.onload = null;
                     img.onerror = null;
-                    if (retainURL) app.photoObjectURLs.add(objectURL);
-                    else URL.revokeObjectURL(objectURL);
+                    URL.revokeObjectURL(objectURL);
                     callback(value);
                 }
 
@@ -2239,7 +2248,7 @@ import {
                         };
                         app.assetManager.hydratePhoto(photo, layers);
                         URL.revokeObjectURL(objectURL);
-                        finish(resolve, photo, false);
+                        finish(resolve, photo);
                     } catch (error) {
                         finish(reject, error);
                     }
@@ -2262,6 +2271,12 @@ import {
             if (index >= savedPhotos.length) return Promise.resolve();
             return app.loadProjectPhoto(savedPhotos[index], maxDimension).then(function (photo) {
                 results[index] = photo;
+                completed++;
+                if (onProgress) onProgress(completed, savedPhotos.length);
+                return runWorker();
+            }).catch(function (err) {
+                console.error('项目照片恢复失败:', savedPhotos[index] && savedPhotos[index].name, err);
+                results[index] = null;
                 completed++;
                 if (onProgress) onProgress(completed, savedPhotos.length);
                 return runWorker();
@@ -2319,6 +2334,9 @@ import {
 
     app.restoreProject = function (project, options) {
         options = options || {};
+        /* Invalidate any in-flight import so its batch callback doesn't
+           append old photos into the freshly restored project. */
+        app._fileLoadToken++;
         var totalPhotos = project.photos.length;
         app.showLoading(true, '正在恢复 0/' + totalPhotos + ' 张照片…');
         return Promise.all([
@@ -2330,6 +2348,12 @@ import {
             var photos = results[0];
             var shapeKey = results[1];
             var settings = project.settings || {};
+            /* Per-photo failures load as null; skip them instead of crashing
+               on the id pass below so one broken JPEG doesn't kill the whole
+               project restore. */
+            var skippedPhotos = project.photos.length - photos.filter(Boolean).length;
+            photos = photos.filter(Boolean);
+            if (!photos.length) throw new Error('no photos could be restored');
             var usedIds = new Set();
             photos.forEach(function (photo) {
                 if (!photo.id || usedIds.has(photo.id)) photo.id = app.createId('photo');
@@ -2365,7 +2389,8 @@ import {
                 layout: project.layout
             });
             app.showLoading(false);
-            app.toast(options.successMessage || '项目已恢复 · ' + photos.length + ' 张照片');
+            app.toast(options.successMessage || ('项目已恢复 · ' + photos.length + ' 张照片' +
+                (skippedPhotos ? ' · 跳过 ' + skippedPhotos + ' 张无法读取的照片' : '')));
         });
     };
 
@@ -2375,7 +2400,11 @@ import {
 
     app.captureState = function () {
         return {
-            photos: app.photos.map(function (photo) { return Object.assign({}, photo); }),
+            photos: app.photos.map(function (photo) {
+                var copy = Object.assign({}, photo);
+                copy.img = null;
+                return copy;
+            }),
             shapeKey: app.currentShapeKey,
             density: app.wall.density,
             gap: app.wall.gap,
@@ -2536,7 +2565,40 @@ import {
         }
     };
 
+    /**
+     * Playback frames draw every visible cell synchronously, but the bitmap
+     * LRU only holds a fraction of a large wall's photos. Warm the cache by
+     * the render order before starting so late frames don't drop to blank
+     * cells, and keep prefetching while the animation runs.
+     */
+    app._playbackPreloaderToken = 0;
+
+    app.startPlaybackBitmapPreload = function (layout) {
+        var manager = app.assetManager;
+        var wall = app.wall;
+        if (!manager || !wall || !layout.length) return;
+        if (wall._renderOrder.length !== layout.length) wall._refreshOrderCache();
+        var order = wall._renderOrder.slice();
+        var token = ++app._playbackPreloaderToken;
+        var cursor = 0;
+        function next() {
+            if (token !== app._playbackPreloaderToken || cursor >= order.length) return;
+            var item = layout[order[cursor++]];
+            var photo = item && item.photo;
+            if (!photo) { next(); return; }
+            manager.getBitmap(photo, 'working').catch(function () {}).then(function () {
+                if (token === app._playbackPreloaderToken) next();
+            });
+        }
+        next();
+    };
+
+    app.stopPlaybackBitmapPreload = function () {
+        app._playbackPreloaderToken++;
+    };
+
     app.stopAllPlayback = function (saveHistory) {
+        app.stopPlaybackBitmapPreload();
         clearTimeout(app.flowTimer);
         app.flowTimer = null;
         if (app.revealRAF) cancelAnimationFrame(app.revealRAF);
@@ -2545,7 +2607,6 @@ import {
         if (saveHistory && app.flowCycleCount && app.flowSnapshot) app.recordHistory(app.flowSnapshot);
         app.flowPlaying = false;
         app.flowSnapshot = null;
-        app.revealSnapshot = null;
         app.flowCycleCount = 0;
         app.stopMusicPlayback();
         if (app.wall) app.wall.clearPlayback();
@@ -2561,7 +2622,7 @@ import {
         }
         app.setPositionMode(false);
         app.stopAllPlayback(false);
-        app.revealSnapshot = app.captureState();
+        app.startPlaybackBitmapPreload(app.wall.layout);
         app.revealTimeline = app.playbackController.createTimeline('reveal');
         app.revealStartTime = performance.now();
         app.flowPlaying = true; /* reuse the flag for button state */
@@ -2604,6 +2665,7 @@ import {
         app.stopAllPlayback(false);
         app.flowSnapshot = app.captureState();
         app.flowCycleCount = 0;
+        app.startPlaybackBitmapPreload(app.wall.layout);
         app.revealTimeline = app.playbackController.createTimeline('shuffle', { cycles: 1 });
         app.revealStartTime = performance.now();
         app.flowPlaying = true;
@@ -2624,6 +2686,7 @@ import {
             app.flowCycleCount++;
             app.revealTimeline = app.playbackController.createTimeline('shuffle', { cycles: 1 });
             app.revealStartTime = performance.now();
+            app.startPlaybackBitmapPreload(app.wall.layout);
         }
         app.wall.setPlaybackFrame(app.revealTimeline.getFrame(performance.now() - app.revealStartTime));
         app.revealRAF = requestAnimationFrame(app.runFlowTimelineFrame);
@@ -3018,6 +3081,7 @@ import {
         document.querySelector('.app').inert = true;
         dialog.classList.add('active');
         dialog.setAttribute('aria-hidden', 'false');
+        app.syncExportCategoryFields();
         app.updateExportOptions();
         setTimeout(function () {
             var nameInput = document.getElementById('export-name');
@@ -3056,6 +3120,37 @@ import {
     app.getCheckedValue = function (name, fallback) {
         var selected = document.querySelector('input[name="' + name + '"]:checked');
         return selected ? selected.value : fallback;
+    };
+
+    app.syncExportCategoryFields = function () {
+        var format = app.getCheckedValue('export-format', 'png');
+        var category;
+        if (format === 'pdf') category = 'pdf';
+        else if (format === 'webm' || format === 'mp4') category = 'video';
+        else category = 'image';
+        document.getElementById('image-format-field').hidden = category !== 'image';
+        document.getElementById('video-format-field').hidden = category !== 'video';
+        var catRadio = document.querySelector('input[name="export-category"][value="' + category + '"]');
+        if (catRadio) catRadio.checked = true;
+    };
+
+    app.onExportCategoryChange = function () {
+        var category = app.getCheckedValue('export-category', 'image');
+        document.getElementById('image-format-field').hidden = category !== 'image';
+        document.getElementById('video-format-field').hidden = category !== 'video';
+        /* Ensure the correct format radio is selected within each category. */
+        if (category === 'pdf') {
+            /* PDF has no sub-format; set a hidden value so updateExportOptions works. */
+            var pdfRadio = document.querySelector('input[name="export-format"][value="pdf"]');
+            if (pdfRadio) pdfRadio.checked = true;
+        } else if (category === 'video') {
+            var mp4Radio = document.querySelector('input[name="export-format"][value="mp4"]');
+            if (mp4Radio) mp4Radio.checked = true;
+        } else {
+            var pngRadio = document.querySelector('input[name="export-format"][value="png"]');
+            if (pngRadio) pngRadio.checked = true;
+        }
+        app.updateExportOptions();
     };
 
     app.updateExportOptions = function () {
@@ -3204,17 +3299,21 @@ import {
                     width: sourceVideoDims.width, height: sourceVideoDims.height, aspectRatio: selectedVideoAspect
                 });
                 var videoAspect = videoDims.aspectRatio;
-                /* Cap video resolution for performance. */
-                var maxVideoPixels = 1280 * 720 * 4;
+                /* Cap video resolution for performance, bounded by the device
+                   profile so low-memory phones record at a smaller canvas. */
+                var maxVideoPixels = Math.min(1280 * 720 * 4, app.deviceProfile.maxExportPixels);
                 var videoScale = 1;
                 while (videoDims.width * videoDims.height * videoScale * videoScale > maxVideoPixels && videoScale > 0.5) {
                     videoScale -= 0.1;
                 }
                 videoScale = Math.round(videoScale * 10) / 10;
-                var fps = parseInt(document.getElementById('export-print-dpi') ? '30' : '30', 10);
                 var videoTimeline = app.playbackController.createTimeline(app.playbackMode, {
                     cycles: app.playbackMode === 'shuffle' ? 3 : 1
                 });
+                /* Video export renders every frame synchronously; warm the
+                   bitmap cache by render order so LRU-evicted photos don't
+                   drop out as blank cells mid-recording. */
+                app.startPlaybackBitmapPreload(app.wall.layout);
                 extension = format;
                 mime = format === 'mp4' ? 'video/mp4' : 'video/webm';
                 outputPromise = recordTimelineCanvas(app.wall, videoTimeline, {

@@ -6,6 +6,8 @@
  * BrowserVideoTranscoder (ffmpeg.wasm).
  */
 
+import { isNativeApp } from '../platform/NativeFileService.js';
+
 var WEBM_MIME_CANDIDATES = [
     'video/webm;codecs=vp9',
     'video/webm;codecs=vp8',
@@ -19,11 +21,15 @@ var NATIVE_MP4_MIME_CANDIDATES = [
 ];
 
 /**
- * Pick the best supported WebM mimeType.
+ * Pick the best supported mimeType. When format is 'webm', only WebM
+ * candidates are considered so the recorded stream is container-compatible.
  */
-export function pickVideoMimeType() {
+export function pickVideoMimeType(format) {
     if (typeof MediaRecorder === 'undefined') return '';
-    var nativeApp = typeof window !== 'undefined' && Boolean(window.__TAURI_INTERNALS__);
+    var nativeApp = isNativeApp();
+    if (format === 'webm') return WEBM_MIME_CANDIDATES.find(function (c) {
+        try { return MediaRecorder.isTypeSupported(c); } catch (_) { return false; }
+    }) || '';
     var candidates = nativeApp ? NATIVE_MP4_MIME_CANDIDATES.concat(WEBM_MIME_CANDIDATES) : WEBM_MIME_CANDIDATES;
     return candidates.find(function (c) {
         try { return MediaRecorder.isTypeSupported(c); } catch (_) { return false; }
@@ -59,7 +65,7 @@ export async function recordTimelineCanvas(wall, timeline, options) {
         throw new Error('当前浏览器不支持视频录制（MediaRecorder 不可用）');
     }
 
-    var mimeType = pickVideoMimeType();
+    var mimeType = pickVideoMimeType(format);
     if (!mimeType) throw new Error('当前浏览器不支持 WebM 视频录制');
 
     /* Create an offscreen export canvas. */
@@ -89,8 +95,14 @@ export async function recordTimelineCanvas(wall, timeline, options) {
     }
 
     var chunks = [];
+    var recorderError = null;
     recorder.ondataavailable = function (event) {
         if (event.data && event.data.size > 0) chunks.push(event.data);
+    };
+    /* Observe failures from the very first frame: an error surfaced only at
+       stop() would surface as an unrelated InvalidStateError instead. */
+    recorder.onerror = function (event) {
+        recorderError = (event && event.error) || new Error('视频录制失败');
     };
 
     var frameDuration = 1000 / fps;
@@ -98,7 +110,6 @@ export async function recordTimelineCanvas(wall, timeline, options) {
     if (totalFrames < 1) totalFrames = 1;
 
     onStatus('正在渲染视频…');
-    recorder.start();
 
     var now = typeof performance !== 'undefined' && performance.now ?
         function () { return performance.now(); } : function () { return Date.now(); };
@@ -117,37 +128,81 @@ export async function recordTimelineCanvas(wall, timeline, options) {
         }
     }
 
-    /* MediaRecorder timestamps frames in wall-clock time, so rendering is
-       paced to the selected FPS instead of running one frame per display RAF. */
-    for (var frame = 0; frame < totalFrames; frame++) {
-        await waitUntil(startedAt + frame * frameDuration);
-        var time = Math.min(timeline.duration, frame * frameDuration);
-        var playbackFrame = timeline.getFrame(time);
-
-        exportCtx.clearRect(0, 0, pixelWidth, pixelHeight);
-        wall.renderPlaybackFrame(exportCtx, playbackFrame, {
-            sourceFrame: wall.getExportFrame(options.aspectRatio || 'auto'),
-            background: options.background || 'transparent'
+    /* Let the compositor commit the canvas between frames. requestFrame()
+       captures the canvas at the next commit; rendering the following frame
+       in the same tick coalesces both requests into the newest state, which
+       collapses the export to (near-)static video once per-frame rendering
+       falls behind the encoder on real devices. */
+    async function waitForCommit() {
+        await new Promise(function (resolve) {
+            if (typeof requestAnimationFrame === 'function') requestAnimationFrame(resolve);
+            else setTimeout(resolve, 16);
         });
-        if (canRequestFrame) videoTrack.requestFrame();
-
-        onProgress(frame + 1, totalFrames);
+        await new Promise(function (resolve) {
+            if (typeof requestAnimationFrame === 'function') requestAnimationFrame(resolve);
+            else setTimeout(resolve, 1);
+        });
     }
 
-    /* Render one final frame to ensure the last state is captured. */
-    wall.renderPlaybackFrame(exportCtx, timeline.getFrame(timeline.duration), {
-        sourceFrame: wall.getExportFrame(options.aspectRatio || 'auto'),
-        background: options.background || 'transparent'
-    });
-    if (canRequestFrame) videoTrack.requestFrame();
+    /* Compute the export frame layout once — it doesn't change between frames. */
+    var sourceFrame = wall.getExportFrame(options.aspectRatio || 'auto');
+    var background = options.background || 'transparent';
 
-    await new Promise(function (resolve) { setTimeout(resolve, frameDuration); });
+    try {
+        var recordingStartedAt = now();
+        recorder.start();
+        /* MediaRecorder timestamps frames in wall-clock time, so rendering is
+           paced to the selected FPS instead of running one frame per display RAF. */
+        for (var frame = 0; frame < totalFrames; frame++) {
+            await waitUntil(startedAt + frame * frameDuration);
+            var time = Math.min(timeline.duration, frame * frameDuration);
+            var playbackFrame = timeline.getFrame(time);
 
-    onStatus('正在保存视频…');
-    var stopPromise = new Promise(function (resolve) { recorder.onstop = resolve; });
-    recorder.stop();
-    await stopPromise;
-    stream.getTracks().forEach(function (track) { track.stop(); });
+            exportCtx.clearRect(0, 0, pixelWidth, pixelHeight);
+            wall.renderPlaybackFrame(exportCtx, playbackFrame, {
+                sourceFrame: sourceFrame,
+                background: background
+            });
+            if (canRequestFrame) {
+                videoTrack.requestFrame();
+                await waitForCommit();
+            }
+
+            onProgress(frame + 1, totalFrames);
+            if (recorderError) throw recorderError;
+        }
+
+        /* Render one final frame to ensure the last state is captured. */
+        wall.renderPlaybackFrame(exportCtx, timeline.getFrame(timeline.duration), {
+            sourceFrame: sourceFrame,
+            background: background
+        });
+        if (canRequestFrame) {
+            videoTrack.requestFrame();
+            await waitForCommit();
+        }
+
+        await new Promise(function (resolve) { setTimeout(resolve, frameDuration); });
+
+        onStatus('正在保存视频…');
+        if (recorderError) throw recorderError;
+        var stopPromise = new Promise(function (resolve, reject) {
+            recorder.onstop = resolve;
+            recorder.onerror = function (e) { reject(e.error || new Error('视频录制失败')); };
+        });
+        recorder.stop();
+        await stopPromise;
+        /* Slow devices render slower than real time; the recorded stream is
+           then longer than the nominal timeline. Downstream muxing trims to
+           the provided duration, so report what was actually captured. */
+        var recordedDuration = Math.max(timeline.duration, now() - recordingStartedAt);
+    } finally {
+        /* Ensure stream tracks are always cleaned up, even on error. */
+        stream.getTracks().forEach(function (track) { track.stop(); });
+        if (recorder.state === 'recording') {
+            try { recorder.stop(); } catch (_) {}
+        }
+    }
 
     var recordedType = String(recorder.mimeType || mimeType || 'video/webm').split(';')[0];
     var webmBlob = new Blob(chunks, { type: recordedType });
@@ -158,7 +213,10 @@ export async function recordTimelineCanvas(wall, timeline, options) {
         var transcoder = await import('./NativeVideoTranscoder.js');
         var mp4Blob = await transcoder.transcodeVideoForPlatform(webmBlob, {
             backgroundMusic: options.backgroundMusic,
-            duration: timeline.duration / 1000,
+            duration: recordedDuration / 1000,
+            /* pickVideoMimeType already prefers H.264 MP4 inside the native
+               app; skip a redundant re-encode when the recording is MP4. */
+            skipWhenAlreadyMp4: true,
             onStatus: function (s) { onStatus(s.message || '正在转换…'); }
         });
         return mp4Blob;
@@ -168,7 +226,7 @@ export async function recordTimelineCanvas(wall, timeline, options) {
         onStatus('正在混合背景音乐…');
         var muxer = await import('./BrowserVideoTranscoder.js');
         return muxer.addBackgroundMusicToWebM(webmBlob, options.backgroundMusic, {
-            duration: timeline.duration / 1000,
+            duration: recordedDuration / 1000,
             onStatus: function (s) { onStatus(s.message || '正在混合音乐…'); }
         });
     }

@@ -30,6 +30,7 @@ export function printPixelDimensions(preset, dpi, bleedMm) {
 }
 
 export function assessPrintResolution(widthPixels, heightPixels, preset) {
+    preset = preset || PRINT_PRESETS[0];
     var horizontalDpi = widthPixels / (preset.widthMm / MM_PER_INCH);
     var verticalDpi = heightPixels / (preset.heightMm / MM_PER_INCH);
     // Standard paper dimensions round to whole pixels (A4/300 DPI is
@@ -66,12 +67,12 @@ export async function createPrintPdf(canvas, options) {
     var totalHeightMm = preset.heightMm + bleedMm * 2;
     var pageWidth = mmToPoints(totalWidthMm);
     var pageHeight = mmToPoints(totalHeightMm);
-    var document = await PDFDocument.create();
-    document.setTitle(options.title || 'Photo Wall');
-    document.setCreator('Photo Wall');
-    document.setProducer('Photo Wall local print export');
-    var page = document.addPage([pageWidth, pageHeight]);
-    var png = await document.embedPng(await (await canvasBlob(canvas)).arrayBuffer());
+    var pdfDoc = await PDFDocument.create();
+    pdfDoc.setTitle(options.title || 'Photo Wall');
+    pdfDoc.setCreator('Photo Wall');
+    pdfDoc.setProducer('Photo Wall local print export');
+    var page = pdfDoc.addPage([pageWidth, pageHeight]);
+    var png = await pdfDoc.embedPng(await (await canvasBlob(canvas)).arrayBuffer());
     page.drawImage(png, { x: 0, y: 0, width: pageWidth, height: pageHeight });
 
     if (bleedMm > 0 && options.cropMarks !== false) {
@@ -91,5 +92,5 @@ export async function createPrintPdf(canvas, options) {
             }, lineOptions));
         });
     }
-    return new Blob([await document.save()], { type: 'application/pdf' });
+    return new Blob([await pdfDoc.save()], { type: 'application/pdf' });
 }

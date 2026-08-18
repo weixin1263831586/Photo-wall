@@ -24,7 +24,7 @@ enum NativeVideoError: LocalizedError {
   }
 }
 
-class ExamplePlugin: Plugin {
+class NativeVideoPlugin: Plugin {
   @objc public func capabilities(_ invoke: Invoke) {
     invoke.resolve([
       "available": true,
@@ -142,5 +142,5 @@ class ExamplePlugin: Plugin {
 
 @_cdecl("init_plugin_native_video")
 func initPlugin() -> Plugin {
-  return ExamplePlugin()
+  return NativeVideoPlugin()
 }

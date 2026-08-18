@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <title>照片墙 — Photo Shape Wall</title>
     <link rel="icon" type="image/svg+xml" href="assets/app-icon.svg">
     <link rel="stylesheet" href="css/style.css">
@@ -50,7 +50,7 @@
 
             <!-- Custom text shape -->
             <div class="text-shape-row">
-                <input type="text" id="text-shape-input" placeholder="输入文字/数字 如 520" maxlength="12">
+                <input type="text" id="text-shape-input" placeholder="输入文字/数字 如 520" maxlength="12" aria-label="自定义文字形状">
                 <button class="btn btn-mini" id="text-shape-btn">生成</button>
             </div>
 
@@ -64,7 +64,7 @@
         <!-- Upload -->
         <section class="panel">
             <h3 class="panel-title">上传素材</h3>
-            <div class="drop-zone" id="drop-zone">
+            <div class="drop-zone" id="drop-zone" role="button" tabindex="0" aria-label="上传素材，点击或拖放照片">
                 <div class="drop-zone-icon">📁</div>
                 <p class="drop-zone-text">点击或拖放照片、视频到这里</p>
                 <p class="drop-zone-hint">照片 + 视频混合 · 照片 40 MB / 视频 200 MB · 最多 1000 个素材</p>
@@ -158,7 +158,7 @@
                     <span class="switch-track"></span>
                 </label>
             </div>
-            <p class="setting-hint">开启后按照片色彩形成柔和渐变</p>
+            <p class="setting-hint">智能匹配照片内容与格位，优先保证人物、构图和重点照片</p>
         </section>
 
         <section class="panel overlay-panel">
@@ -390,14 +390,28 @@
                 <input type="text" id="export-name" value="我的照片墙" maxlength="60">
             </label>
             <fieldset class="export-field">
+                <legend>导出类型</legend>
+                <div class="option-segments compact">
+                    <label><input type="radio" name="export-category" value="image" checked><span>图片</span></label>
+                    <label><input type="radio" name="export-category" value="pdf"><span>PDF</span></label>
+                    <label><input type="radio" name="export-category" value="video"><span>视频</span></label>
+                </div>
+                <!-- Hidden radio to keep export-format group state for PDF category -->
+                <input type="radio" name="export-format" value="pdf" hidden aria-hidden="true">
+            </fieldset>
+            <fieldset class="export-field" id="image-format-field">
                 <legend>图片格式</legend>
-                <div class="option-segments" id="export-format-options">
+                <div class="option-segments compact">
                     <label><input type="radio" name="export-format" value="png" checked><span>PNG<small>画质最佳</small></span></label>
                     <label><input type="radio" name="export-format" value="jpeg"><span>JPG<small>文件较小</small></span></label>
                     <label><input type="radio" name="export-format" value="webp"><span>WebP<small>体积更小</small></span></label>
-                    <label><input type="radio" name="export-format" value="pdf"><span>PDF<small>专业打印</small></span></label>
-                    <label><input type="radio" name="export-format" value="webm"><span>视频<small>动态 WebM</small></span></label>
-                    <label><input type="radio" name="export-format" value="mp4"><span>MP4<small>动态视频</small></span></label>
+                </div>
+            </fieldset>
+            <fieldset class="export-field" id="video-format-field" hidden>
+                <legend>视频格式</legend>
+                <div class="option-segments compact">
+                    <label><input type="radio" name="export-format" value="mp4"><span>MP4<small>通用视频</small></span></label>
+                    <label><input type="radio" name="export-format" value="webm"><span>WebM<small>体积更小</small></span></label>
                 </div>
             </fieldset>
             <fieldset class="export-field" id="video-export-field" hidden>
@@ -429,7 +443,7 @@
             </fieldset>
             <fieldset class="export-field" id="export-scale-field">
                 <legend>清晰度</legend>
-                <div class="option-segments compact" id="export-scale-options">
+                <div class="option-segments compact">
                     <label><input type="radio" name="export-scale" value="1"><span>标准 <small>1×</small></span></label>
                     <label><input type="radio" name="export-scale" value="2" checked><span>高清 <small>2×</small></span></label>
                     <label><input type="radio" name="export-scale" value="3"><span>超清 <small>3×</small></span></label>
@@ -437,7 +451,7 @@
             </fieldset>
             <fieldset class="export-field">
                 <legend>画布比例</legend>
-                <div class="option-segments" id="export-aspect-options">
+                <div class="option-segments">
                     <label><input type="radio" name="export-aspect" value="auto" checked><span>紧贴轮廓<small>最少空白</small></span></label>
                     <label><input type="radio" name="export-aspect" value="3:4"><span>3:4<small>竖版照片</small></span></label>
                     <label><input type="radio" name="export-aspect" value="4:3"><span>4:3<small>横版照片</small></span></label>
@@ -447,7 +461,7 @@
             </fieldset>
             <fieldset class="export-field" id="export-background-field">
                 <legend>画布背景</legend>
-                <div class="background-options" id="export-background-options">
+                <div class="background-options">
                     <label><input type="radio" name="export-background" value="#ffffff" checked><span class="background-swatch white"></span><span>白色</span></label>
                     <label><input type="radio" name="export-background" value="#111118"><span class="background-swatch dark"></span><span>深色</span></label>
                     <label id="transparent-background-option"><input type="radio" name="export-background" value="transparent"><span class="background-swatch transparent"></span><span>透明</span></label>
@@ -613,11 +627,11 @@
 <!-- ======================== Loading ======================== -->
 <div class="loading-overlay" id="loading-overlay">
     <div class="spinner"></div>
-    <p id="loading-text">正在加载照片…</p>
+    <p id="loading-text" role="status" aria-live="polite">正在加载照片…</p>
 </div>
 
 <!-- ======================== Toast ======================== -->
-<div class="toast" id="toast"></div>
+<div class="toast" id="toast" role="status" aria-live="polite" aria-atomic="true"></div>
 
 <script type="module" src="js/app.js"></script>
 </body>

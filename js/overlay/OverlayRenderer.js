@@ -42,11 +42,22 @@ function overlayMetrics(context, overlay, width, height, bounds) {
     context.font = overlay.fontWeight + ' ' + size + 'px ' + overlay.fontFamily;
     var textWidth = Math.max(size, context.measureText(overlay.content).width);
     context.restore();
+    /* drawOverlay renders at the anchor point with textAlign honoured, then
+       rotates around that anchor. Mirror both so the hit box covers what is
+       actually painted. */
+    var alignOffset = overlay.align === 'left' ? textWidth / 2 :
+        overlay.align === 'right' ? -textWidth / 2 : 0;
+    var boxWidth = textWidth + size * 0.4;
+    var boxHeight = size * 1.4;
+    var cx = overlay.x * width + alignOffset;
+    var cy = overlay.y * height;
+    var rad = overlay.rotation * Math.PI / 180;
+    var cos = Math.abs(Math.cos(rad)), sin = Math.abs(Math.sin(rad));
     return {
-        x: overlay.x * width - textWidth / 2 - size * 0.2,
-        y: overlay.y * height - size * 0.7,
-        width: textWidth + size * 0.4,
-        height: size * 1.4
+        x: cx - (boxWidth * cos + boxHeight * sin) / 2,
+        y: cy - (boxWidth * sin + boxHeight * cos) / 2,
+        width: boxWidth * cos + boxHeight * sin,
+        height: boxWidth * sin + boxHeight * cos
     };
 }
 

@@ -29,3 +29,10 @@ pub struct NativeVideoCapabilities {
     pub platform: String,
     pub encoder: String,
 }
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenFileRequest {
+    pub path: String,
+    pub mime_type: String,
+}

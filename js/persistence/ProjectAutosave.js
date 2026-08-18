@@ -48,7 +48,11 @@ function openDatabase(factory, databaseName) {
                 database.createObjectStore(AUDIO_STORE, { keyPath: 'id' });
             }
         };
-        request.onsuccess = function () { resolve(request.result); };
+        request.onsuccess = function () {
+            var database = request.result;
+            database.onversionchange = function () { database.close(); };
+            resolve(database);
+        };
         request.onerror = function () { reject(request.error || new Error('Unable to open autosave database')); };
         request.onblocked = function () { reject(new Error('Autosave database upgrade is blocked')); };
     });
@@ -113,7 +117,12 @@ export function createProjectAutosave(options) {
 
     function database() {
         if (!factory) return Promise.reject(new Error('IndexedDB is unavailable'));
-        if (!databasePromise) databasePromise = openDatabase(factory, databaseName);
+        if (!databasePromise) {
+            databasePromise = openDatabase(factory, databaseName).catch(function (error) {
+                databasePromise = null;
+                throw error;
+            });
+        }
         return databasePromise;
     }
 

@@ -2,26 +2,6 @@ function clamp01(value) {
     return Math.max(0, Math.min(1, Number(value) || 0));
 }
 
-function aspectFit(photo, cell) {
-    var photoAspect = Math.max(0.05, Number(photo.aspectRatio) || 1);
-    var cellAspect = Math.max(0.05, cell.width / Math.max(1, cell.height));
-    return Math.exp(-Math.abs(Math.log(photoAspect / cellAspect)));
-}
-
-function colourMatch(photo, cell, width, height, hueOffset) {
-    var spatialProgress = clamp01((cell.x / Math.max(1, width)) * 0.65 + (cell.y / Math.max(1, height)) * 0.35);
-    var desiredHue = (spatialProgress * 360 + (Number(hueOffset) || 0)) % 360;
-    var difference = Math.abs((Number(photo.hue) || 0) - desiredHue) % 360;
-    return 1 - Math.min(difference, 360 - difference) / 180;
-}
-
-function focalSafety(photo, cell) {
-    var cropMismatch = 1 - aspectFit(photo, cell);
-    var focalOffset = Math.hypot(clamp01(photo.focusX) - 0.5, clamp01(photo.focusY) - 0.5) / Math.SQRT1_2;
-    var clearance = Math.min(1, (Number(cell.boundaryDistance) || 0) / Math.max(1, Math.min(cell.width, cell.height) * 0.5));
-    return clamp01(1 - cropMismatch * focalOffset * (1.2 - clearance * 0.35));
-}
-
 function photoMetrics(photo) {
     var aspectRatio = Math.max(0.05, Number(photo.aspectRatio) || 1);
     var contrast = clamp01(photo.contrast);
@@ -52,20 +32,6 @@ function scoreMetrics(photo, cell) {
         0.20 * photo.importance;
     if (cell.isLarge) score += photo.importance ? 1.5 : photo.quality * 0.25;
     if (cell.isBoundary) score += photo.subjectScore * 0.12;
-    return score;
-}
-
-export function placementScore(photo, cell, context) {
-    var importance = photo.featured ? 1 : 0;
-    var quality = clamp01((Number(photo.sharpness) || 0) * 2.5) * 0.6 + clamp01(photo.contrast) * 0.4;
-    var score =
-        0.25 * colourMatch(photo, cell, context.width, context.height, context.hueOffset) +
-        0.18 * aspectFit(photo, cell) +
-        0.12 * quality +
-        0.10 * clamp01(photo.contrast) +
-        0.15 * focalSafety(photo, cell) +
-        0.20 * importance;
-    if (cell.isLarge) score += importance ? 1.5 : quality * 0.25;
     return score;
 }
 

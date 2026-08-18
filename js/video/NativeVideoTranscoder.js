@@ -1,3 +1,5 @@
+import { isNativeApp } from '../platform/NativeFileService.js';
+
 function extensionFor(blob, fallback) {
     var type = String(blob && blob.type || '').toLowerCase();
     if (type.indexOf('webm') >= 0) return 'webm';
@@ -11,7 +13,7 @@ function extensionFor(blob, fallback) {
 }
 
 function nativeRuntimeAvailable() {
-    return typeof window !== 'undefined' && Boolean(window.__TAURI_INTERNALS__);
+    return isNativeApp();
 }
 
 async function removeQuietly(filesystem, path) {
@@ -30,6 +32,16 @@ export async function transcodeVideoForPlatform(blob, options) {
     if (!nativeRuntimeAvailable()) {
         var browser = await import('./BrowserVideoTranscoder.js');
         return browser.transcodeVideoForBrowser(blob, options);
+    }
+
+    /* On native platforms MediaRecorder can already emit an H.264 MP4
+       (pickVideoMimeType prefers mp4 mime candidates). Re-encoding it through
+       the platform encoder would double the work for no gain, so only
+       transcode when the recorded stream is not MP4 or audio must be mixed. */
+    var hasMusic = Boolean(options.backgroundMusic &&
+        (options.backgroundMusic.originalBlob || options.backgroundMusic.blob) instanceof Blob);
+    if (options.skipWhenAlreadyMp4 === true && !hasMusic && /^video\/mp4/.test(String(blob.type))) {
+        return blob;
     }
 
     var filesystem;
@@ -63,7 +75,7 @@ export async function transcodeVideoForPlatform(blob, options) {
         if (options.onStatus) {
             options.onStatus({ phase: 'native', message: '正在使用' + capabilities.encoder + '编码…' });
         }
-        var result = await invoke('plugin:native-video|transcode', {
+        var invokePromise = invoke('plugin:native-video|transcode', {
             payload: {
                 inputPath: inputPath,
                 outputPath: outputPath,
@@ -77,9 +89,24 @@ export async function transcodeVideoForPlatform(blob, options) {
                 fadeOut: music ? music.fadeOut : 0
             }
         });
-        var bytes = await filesystem.readFile(result.outputPath || outputPath);
-        if (!bytes || bytes.byteLength < 512) throw new Error('原生编码器未生成有效视频');
-        return new Blob([bytes], { type: 'video/mp4' });
+        /* If the race times out and we fall back, the native job keeps
+           running; swallow its eventual rejection so it is not captured as
+           an unhandledrejection crash report. */
+        invokePromise.catch(function () {});
+        var timeoutId;
+        try {
+            var result = await Promise.race([
+                invokePromise,
+                new Promise(function (_, reject) {
+                    timeoutId = setTimeout(function () { reject(new Error('原生视频编码超时')); }, 300000);
+                })
+            ]);
+            var bytes = await filesystem.readFile(result.outputPath || outputPath);
+            if (!bytes || bytes.byteLength < 512) throw new Error('原生编码器未生成有效视频');
+            return new Blob([bytes], { type: 'video/mp4' });
+        } finally {
+            clearTimeout(timeoutId);
+        }
     } catch (error) {
         console.warn('原生视频编码失败，回退到浏览器编码。', error);
         if (options.onStatus) options.onStatus({ phase: 'fallback', message: '原生编码不可用，正在使用本地兼容引擎…' });
@@ -92,8 +119,4 @@ export async function transcodeVideoForPlatform(blob, options) {
             await removeQuietly(filesystem, audioPath);
         }
     }
-}
-
-export function hasNativeVideoEncoder() {
-    return nativeRuntimeAvailable();
 }

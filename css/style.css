@@ -5,6 +5,11 @@
 /* ---------- Reset ---------- */
 *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
 
+/* The HTML hidden attribute must always win over component display rules
+   (e.g. .btn, .export-field), otherwise JS `.hidden = true` toggles silently
+   fail. Every show/hide in this app flips the attribute. */
+[hidden] { display: none !important; }
+
 :root {
     --bg:          #0e0e14;
     --sidebar-bg:  #16161f;
@@ -95,11 +100,6 @@ body {
 }
 
 /* ---------- Product presets ---------- */
-.preset-tip {
-    color: var(--accent-hi);
-    font-size: 10px;
-}
-
 .template-filters {
     display: grid;
     grid-template-columns: minmax(0, 1fr) 72px;
@@ -298,7 +298,6 @@ body {
     border-radius: 8px;
     background: rgba(0,0,0,.12);
 }
-.overlay-inspector[hidden] { display: none; }
 .overlay-inspector input[type="text"] { grid-column: 1 / -1; }
 .overlay-delete-btn { grid-column: 1 / -1; justify-self: end; }
 .overlay-inspector label { display: flex; align-items: center; gap: 5px; color: var(--text-dim); font-size: 9px; }
@@ -361,7 +360,6 @@ body {
 }
 .music-preview-btn { border-style: solid; margin-top: 7px; }
 .music-editor { margin-top: 8px; }
-.music-editor[hidden] { display: none; }
 .music-summary { display: flex; justify-content: space-between; gap: 8px; color: var(--text); font-size: 10px; }
 .music-summary span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .music-summary small { color: var(--text-dim); flex-shrink: 0; }
@@ -556,11 +554,6 @@ body {
 }
 
 /* ---------- Buttons ---------- */
-.btn-row {
-    display: flex;
-    gap: 8px;
-}
-
 .btn {
     padding: 9px 14px;
     border: none;
@@ -911,6 +904,9 @@ body {
 .photo-card:hover .photo-edit, .photo-edit:focus { opacity: 1; }
 .photo-edit:hover { background: var(--accent); }
 .mobile-device .photo-edit { opacity: .88; }
+/* Touch devices have no hover: keep destructive and edit affordances visible
+   instead of an invisible-but-tappable hit area. */
+.mobile-device .photo-remove { opacity: .88; }
 
 .photo-card:hover .photo-remove, .photo-remove:focus { opacity: 1; }
 .photo-remove:hover { background: #e95770; }
@@ -1259,7 +1255,7 @@ body {
 
 .export-layout {
     display: grid;
-    grid-template-columns: minmax(280px, 1fr) minmax(390px, 1.15fr);
+    grid-template-columns: minmax(280px, 1fr) minmax(320px, 1.15fr);
     gap: 22px;
     align-items: start;
 }
@@ -1743,8 +1739,6 @@ body {
     object-fit: contain;
 }
 
-#lightbox-video[hidden], #lightbox-img[hidden] { display: none; }
-
 .lb-info {
     color: rgba(255, 255, 255, 0.6);
     font-size: 13px;
@@ -1869,7 +1863,7 @@ body {
 .loading-overlay {
     position: fixed;
     inset: 0;
-    z-index: 999;
+    z-index: 1300;
     background: rgba(0, 0, 0, 0.7);
     backdrop-filter: blur(4px);
     display: none;
@@ -1894,9 +1888,11 @@ body {
 @keyframes spin { to { transform: rotate(360deg); } }
 
 /* ======================= Toast ======================= */
+/* Keep the toast clear of the canvas help pill (desktop) and of the
+   bottom playback controls (mobile, ~58px tall). */
 .toast {
     position: fixed;
-    bottom: 30px;
+    bottom: 72px;
     left: 50%;
     transform: translateX(-50%) translateY(80px);
     background: var(--panel-bg);
@@ -1962,11 +1958,10 @@ body {
     /* Sidebar becomes a slide-up bottom sheet */
     .sidebar-backdrop { display: block; }
     .app.sidebar-open .sidebar-backdrop { opacity: 1; }
-    .sidebar-backdrop[hidden] { display: none; }
 
     .sidebar {
         position: fixed;
-        z-index: 490;
+        z-index: 510;
         left: 0;
         right: 0;
         bottom: 0;
@@ -2047,7 +2042,7 @@ body {
     .photo-editor-preview { min-height: 220px; }
 }
 
-@media (max-width: 520px) {
+@media (max-width: 640px) {
     .sidebar {
         padding: 10px 13px max(18px, env(safe-area-inset-bottom));
         gap: 10px;

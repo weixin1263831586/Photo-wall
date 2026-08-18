@@ -43,6 +43,15 @@ impl<R: Runtime> NativeVideo<R> {
             ))
         }
     }
+
+    /// Desktop keeps using the opener plugin path; the dedicated
+    /// FileProvider-based open is a mobile-only concern.
+    pub fn open_file(&self, payload: OpenFileRequest) -> crate::Result<()> {
+        let _ = payload;
+        Err(crate::Error::Message(
+            "open_file is only available on Android and iOS".into(),
+        ))
+    }
 }
 
 #[cfg(windows)]

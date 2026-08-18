@@ -1,7 +1,44 @@
 var tauriRuntime = typeof window !== 'undefined' && !!window.__TAURI_INTERNALS__;
+var PLAY_CACHE_PREFIX = 'play-';
+var PLAY_CACHE_MAX_AGE_MS = 24 * 60 * 60 * 1000; /* 24 hours */
 
 export function isNativeApp() {
     return tauriRuntime;
+}
+
+/**
+ * Remove stale play-* cache files left by previous system-player opens.
+ * Only deletes files older than 24h to avoid clobbering a player that
+ * might still be reading a just-created file.
+ */
+export async function cleanupPlayCache() {
+    if (!tauriRuntime) return;
+    try {
+        var filesystem = await import('@tauri-apps/plugin-fs');
+        var pathAPI = await import('@tauri-apps/api/path');
+        var cacheDir = await pathAPI.appCacheDir();
+        var entries;
+        try {
+            entries = await filesystem.readDir(cacheDir);
+        } catch (_) {
+            return; /* directory doesn't exist yet — nothing to clean */
+        }
+        var now = Date.now();
+        for (var i = 0; i < entries.length; i++) {
+            var name = entries[i].name || entries[i];
+            if (typeof name !== 'string' || !name.startsWith(PLAY_CACHE_PREFIX)) continue;
+            /* Extract the timestamp from the filename: play-<timestamp36>-<file> */
+            var parts = name.split('-');
+            if (parts.length < 3) continue;
+            var created = parseInt(parts[1], 36);
+            if (Number.isFinite(created) && (now - created) > PLAY_CACHE_MAX_AGE_MS) {
+                try {
+                    var fullPath = await pathAPI.join(cacheDir, name);
+                    await filesystem.remove(fullPath);
+                } catch (_) { /* best-effort */ }
+            }
+        }
+    } catch (_) { /* best-effort, never block the app */ }
 }
 
 function browserDownload(blob, fileName) {
@@ -40,12 +77,24 @@ export async function openBlobWithSystem(blob, fileName) {
     try {
         var filesystem = await import('@tauri-apps/plugin-fs');
         var pathAPI = await import('@tauri-apps/api/path');
-        var opener = await import('@tauri-apps/plugin-opener');
+        var coreAPI = await import('@tauri-apps/api/core');
         var cacheDirectory = await pathAPI.appCacheDir();
         var cacheName = 'play-' + Date.now().toString(36) + '-' + fileName;
         var cachePath = await pathAPI.join(cacheDirectory, cacheName);
         await filesystem.writeFile(cachePath, new Uint8Array(await blob.arrayBuffer()));
-        await opener.openPath(cachePath);
+        /* Android 7+ StrictMode blocks ACTION_VIEW on plain file:// URIs, so
+           the cached file is exposed through the app FileProvider instead.
+           The opener plugin's file:// path silently fails on device. */
+        if (/android/i.test(String(navigator.userAgent))) {
+            await coreAPI.invoke('plugin:native-video|open_file', {
+                payload: { path: cachePath, mimeType: blob.type || 'video/mp4' }
+            });
+        } else {
+            var opener = await import('@tauri-apps/plugin-opener');
+            await opener.openPath(cachePath);
+        }
+        /* Best-effort cleanup of stale play-* files from earlier sessions. */
+        cleanupPlayCache();
         return { opened: true, native: true, path: cachePath };
     } catch (error) {
         console.warn('系统播放器打开失败，改为保存原视频。', error);

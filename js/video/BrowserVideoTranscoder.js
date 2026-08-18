@@ -80,6 +80,8 @@ async function loadFFmpeg(onStatus) {
 
 async function runTranscode(blob, options) {
     options = options || {};
+    /* Argument problems are not engine failures — validate before loading
+       ffmpeg so a bad request doesn't terminate the ~31 MB engine. */
     if (!(blob instanceof Blob) || !blob.size) throw new Error('没有可转码的视频数据');
     if (blob.size > MAX_BROWSER_TRANSCODE_BYTES) throw new Error('视频超过 120 MB，请使用系统播放器打开原文件');
     var music = options.backgroundMusic;
@@ -121,7 +123,19 @@ async function runTranscode(blob, options) {
             args.push('-map', '0:v:0', '-map', '0:a?');
         }
         if (outputFormat === 'webm') {
-            args.push('-c:v', 'copy', '-c:a', 'libopus', '-b:a', '160k', outputName);
+            /* MediaRecorder WebM already carries VP8/VP9, so the video stream
+               can be copied straight into the output container. Re-encoding
+               through libvpx-vp9 reliably OOM-crashes the single-threaded wasm
+               core at encode flush, so it is reserved for inputs whose codec
+               cannot live in WebM (e.g. an H.264 MP4 recording). */
+            var isWebmSource = String(blob.type).indexOf('webm') >= 0 ||
+                extensionFor(blob, options.name) === 'webm';
+            if (isWebmSource) {
+                args.push('-c:v', 'copy', '-c:a', 'libopus', '-b:a', '160k', outputName);
+            } else {
+                args.push('-c:v', 'libvpx-vp9', '-deadline', 'realtime', '-cpu-used', '8',
+                    '-b:v', '1M', '-c:a', 'libopus', '-b:a', '160k', outputName);
+            }
         } else {
             args.push(
                 '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2',
@@ -138,6 +152,14 @@ async function runTranscode(blob, options) {
         if (!musicBlob && outputFormat === 'mp4') resultCache.set(blob, result);
         if (options.onStatus) options.onStatus({ phase: 'complete', progress: 1, message: '转码完成，正在播放…' });
         return result;
+    } catch (err) {
+        /* Reset the engine so the next call re-loads a fresh worker. */
+        try {
+            var engine = await ffmpegPromise;
+            if (engine && engine.ffmpeg) engine.ffmpeg.terminate();
+        } catch (_) {}
+        ffmpegPromise = null;
+        throw err;
     } finally {
         progressListener = function () {};
         try { await ffmpeg.deleteFile(inputName); } catch (ignore) {}

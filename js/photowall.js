@@ -216,10 +216,6 @@ import { drawOverlays, getOverlayAt } from './overlay/OverlayRenderer.js';
         this.render();
         return true;
     };
-    PhotoWall.prototype.setLayoutSeed = function (value, regenerate) {
-        this.layoutSeed = normalizeSeed(value);
-        if (regenerate !== false && this.shape) this.generateLayout();
-    };
     PhotoWall.prototype.nextLayoutVariant = function () {
         this.layoutSeed = normalizeSeed(this.layoutSeed + 1);
         if (this.shape) this.generateLayout();
@@ -402,7 +398,7 @@ import { drawOverlays, getOverlayAt } from './overlay/OverlayRenderer.js';
                     var seed = mixSeed(this.layoutSeed,
                         ((row + 1) * 73856093 ^ (col + 1) * 19349663) >>> 0);
                     jitterX = ((seed % 101) / 100 - 0.5) * cellW * 0.22;
-                    jitterY = (((seed >> 8) % 101) / 100 - 0.5) * cellH * 0.22;
+                    jitterY = (((seed >>> 8) % 101) / 100 - 0.5) * cellH * 0.22;
                 }
                 cells.push({
                     x: fitted.x + fitted.width / 2 + jitterX,
@@ -866,11 +862,6 @@ import { drawOverlays, getOverlayAt } from './overlay/OverlayRenderer.js';
         this.render();
     };
 
-    /* Compatibility wrappers for existing integrations. */
-    PhotoWall.prototype.setRevealOpacities = function (opacities, scales) {
-        this.setPlaybackFrame({ mode: 'reveal', opacities: opacities, scales: scales });
-    };
-
     PhotoWall.prototype.clearReveal = function () {
         this.clearPlayback();
     };
@@ -898,6 +889,8 @@ import { drawOverlays, getOverlayAt } from './overlay/OverlayRenderer.js';
 
         if (this._renderOrder.length !== this.layout.length) this._refreshOrderCache();
         var renderOrder = this._renderOrder;
+        var scratch = this._scratchItem || (this._scratchItem = {});
+        var scratch2 = this._scratchItem2 || (this._scratchItem2 = {});
         for (var oi = 0; oi < renderOrder.length; oi++) {
             var ci = renderOrder[oi];
             var alpha = frame.opacities ? Math.max(0, Math.min(1, frame.opacities[ci] || 0)) : 1;
@@ -907,12 +900,12 @@ import { drawOverlays, getOverlayAt } from './overlay/OverlayRenderer.js';
             var playbackX = frame.offsetsX ? Number(frame.offsetsX[ci]) || 0 : 0;
             var playbackY = frame.offsetsY ? Number(frame.offsetsY[ci]) || 0 : 0;
             var playbackZoom = frame.photoZooms ? Number(frame.photoZooms[ci]) || 1 : 1;
+            /* Build the effective item in a reusable scratch object to avoid per-frame GC. */
+            Object.assign(scratch, item);
             if (playbackX || playbackY || playbackZoom !== 1) {
-                item = Object.assign({}, item, {
-                    x: item.x + playbackX,
-                    y: item.y + playbackY,
-                    playbackZoom: playbackZoom
-                });
+                scratch.x = item.x + playbackX;
+                scratch.y = item.y + playbackY;
+                scratch.playbackZoom = playbackZoom;
             }
             var previousIndex = frame.previousIndices && Number(frame.previousIndices[ci]);
             var nextIndex = frame.photoIndices && Number(frame.photoIndices[ci]);
@@ -923,28 +916,37 @@ import { drawOverlays, getOverlayAt } from './overlay/OverlayRenderer.js';
                 if (previousPhoto && progress < 1) {
                     ctx.save();
                     ctx.globalAlpha = alpha * (1 - progress);
-                    this._drawPhoto(ctx, Object.assign({}, item, {
+                    Object.assign(scratch2, scratch, {
                         photo: previousPhoto, photoIndex: previousIndex, photoId: previousPhoto.id
-                    }), false, cellScale, false);
+                    });
+                    this._drawPhoto(ctx, scratch2, false, cellScale, false);
                     ctx.restore();
                 }
                 if (nextPhoto && progress > 0) {
                     ctx.save();
                     ctx.globalAlpha = alpha * progress;
-                    this._drawPhoto(ctx, Object.assign({}, item, {
+                    Object.assign(scratch2, scratch, {
                         photo: nextPhoto, photoIndex: nextIndex, photoId: nextPhoto.id
-                    }), false, cellScale, false);
+                    });
+                    this._drawPhoto(ctx, scratch2, false, cellScale, false);
                     ctx.restore();
                 }
             } else {
                 var assignedPhoto = Number.isInteger(nextIndex) ? this.photos[nextIndex] : null;
-                var renderItem = assignedPhoto ? Object.assign({}, item, {
-                    photo: assignedPhoto, photoIndex: nextIndex, photoId: assignedPhoto.id
-                }) : item;
-                ctx.save();
-                ctx.globalAlpha = alpha;
-                this._drawPhoto(ctx, renderItem, false, cellScale, false);
-                ctx.restore();
+                if (assignedPhoto) {
+                    Object.assign(scratch2, scratch, {
+                        photo: assignedPhoto, photoIndex: nextIndex, photoId: assignedPhoto.id
+                    });
+                    ctx.save();
+                    ctx.globalAlpha = alpha;
+                    this._drawPhoto(ctx, scratch2, false, cellScale, false);
+                    ctx.restore();
+                } else {
+                    ctx.save();
+                    ctx.globalAlpha = alpha;
+                    this._drawPhoto(ctx, scratch, false, cellScale, false);
+                    ctx.restore();
+                }
             }
         }
         ctx.globalCompositeOperation = 'destination-in';
@@ -961,12 +963,6 @@ import { drawOverlays, getOverlayAt } from './overlay/OverlayRenderer.js';
             ctx.fillRect(0, 0, outputWidth, outputHeight);
             ctx.restore();
         }
-    };
-
-    PhotoWall.prototype.renderRevealFrame = function (ctx, opacities, width, height, scale, scales) {
-        this.renderPlaybackFrame(ctx, { mode: 'reveal', opacities: opacities, scales: scales }, {
-            sourceFrame: { x: 0, y: 0, width: width, height: height }
-        });
     };
 
     PhotoWall.prototype._composeLayerAsync = function (revision) {
@@ -1314,10 +1310,6 @@ import { drawOverlays, getOverlayAt } from './overlay/OverlayRenderer.js';
         }
         context.globalCompositeOperation = 'source-over';
         return output;
-    };
-
-    PhotoWall.prototype.exportPNG = function (scale) {
-        return this.createExportCanvas({ scale: scale, background: '#ffffff' }).toDataURL('image/png');
     };
 
     PhotoWall.prototype.getArrangement = function () {

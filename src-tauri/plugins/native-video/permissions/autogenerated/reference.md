@@ -6,6 +6,7 @@ Default permissions for the plugin
 
 - `allow-capabilities`
 - `allow-transcode`
+- `allow-open-file`
 
 ## Permission Table
 
@@ -38,6 +39,32 @@ Enables the capabilities command without any pre-configured scope.
 <td>
 
 Denies the capabilities command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`native-video:allow-open-file`
+
+</td>
+<td>
+
+Enables the open_file command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`native-video:deny-open-file`
+
+</td>
+<td>
+
+Denies the open_file command without any pre-configured scope.
 
 </td>
 </tr>

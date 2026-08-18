@@ -100,26 +100,26 @@ export function computePlaybackOrder(cells, mode, options) {
         /* ---- Scan orders ---- */
         case PlaybackOrders.LEFT_RIGHT:
             return indices.sort(function (a, b) {
-                return num(cells[a].x, 0) - num(cells[b].x, 0) ||
-                    num(cells[a].y, 0) - num(cells[b].y, 0);
+                return cellCenterX(cells[a]) - cellCenterX(cells[b]) ||
+                    cellCenterY(cells[a]) - cellCenterY(cells[b]);
             });
 
         case PlaybackOrders.RIGHT_LEFT:
             return indices.sort(function (a, b) {
-                return num(cells[b].x, 0) - num(cells[a].x, 0) ||
-                    num(cells[a].y, 0) - num(cells[b].y, 0);
+                return cellCenterX(cells[b]) - cellCenterX(cells[a]) ||
+                    cellCenterY(cells[a]) - cellCenterY(cells[b]);
             });
 
         case PlaybackOrders.TOP_BOTTOM:
             return indices.sort(function (a, b) {
-                return num(cells[a].y, 0) - num(cells[b].y, 0) ||
-                    num(cells[a].x, 0) - num(cells[b].x, 0);
+                return cellCenterY(cells[a]) - cellCenterY(cells[b]) ||
+                    cellCenterX(cells[a]) - cellCenterX(cells[b]);
             });
 
         case PlaybackOrders.BOTTOM_TOP:
             return indices.sort(function (a, b) {
-                return num(cells[b].y, 0) - num(cells[a].y, 0) ||
-                    num(cells[a].x, 0) - num(cells[b].x, 0);
+                return cellCenterY(cells[b]) - cellCenterY(cells[a]) ||
+                    cellCenterX(cells[a]) - cellCenterX(cells[b]);
             });
 
         /* ---- Spiral from center outward ---- */
@@ -148,7 +148,7 @@ export function computePlaybackOrder(cells, mode, options) {
     }
 }
 
-function photoForCell(cell, options) {
+export function photoForCell(cell, options) {
     if (cell && cell.photo) return cell.photo;
     var photos = options && Array.isArray(options.photos) ? options.photos : [];
     var photoIndex = Number(cell && cell.photoIndex);
@@ -177,16 +177,24 @@ function sortFeaturedFirst(indices, cells, options, cx, cy) {
         var featuredA = photoForCell(cells[a], options)?.featured === true ? 0 : 1;
         var featuredB = photoForCell(cells[b], options)?.featured === true ? 0 : 1;
         if (featuredA !== featuredB) return featuredA - featuredB;
-        var da = Math.hypot(num(cells[a].x, 0) - cx, num(cells[a].y, 0) - cy);
-        var db = Math.hypot(num(cells[b].x, 0) - cx, num(cells[b].y, 0) - cy);
+        var da = Math.hypot(cellCenterX(cells[a]) - cx, cellCenterY(cells[a]) - cy);
+        var db = Math.hypot(cellCenterX(cells[b]) - cx, cellCenterY(cells[b]) - cy);
         return da - db || a - b;
     });
 }
 
+function cellCenterX(cell) {
+    return num(cell.x, 0) + num(cell.width, 0) / 2;
+}
+
+function cellCenterY(cell) {
+    return num(cell.y, 0) + num(cell.height, 0) / 2;
+}
+
 function sortByDistance(indices, cells, ox, oy) {
     return indices.sort(function (a, b) {
-        var da = Math.hypot(num(cells[a].x, 0) - ox, num(cells[a].y, 0) - oy);
-        var db = Math.hypot(num(cells[b].x, 0) - ox, num(cells[b].y, 0) - oy);
+        var da = Math.hypot(cellCenterX(cells[a]) - ox, cellCenterY(cells[a]) - oy);
+        var db = Math.hypot(cellCenterX(cells[b]) - ox, cellCenterY(cells[b]) - oy);
         return da - db;
     });
 }
@@ -201,8 +209,8 @@ function sortByBoundaryDistance(indices, cells, innermostFirst) {
 
 function sortBySpiral(indices, cells, cx, cy) {
     var scored = indices.map(function (idx) {
-        var dx = num(cells[idx].x, 0) - cx;
-        var dy = num(cells[idx].y, 0) - cy;
+        var dx = cellCenterX(cells[idx]) - cx;
+        var dy = cellCenterY(cells[idx]) - cy;
         var radius = Math.hypot(dx, dy);
         var angle = Math.atan2(dy, dx);
         /* Sort primarily by radius, secondarily by angle — creates a spiral feel. */

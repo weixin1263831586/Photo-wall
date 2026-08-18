@@ -15,7 +15,7 @@ pub fn init<R: Runtime, C: DeserializeOwned>(
     api: PluginApi<R, C>,
 ) -> crate::Result<NativeVideo<R>> {
     #[cfg(target_os = "android")]
-    let handle = api.register_android_plugin("com.photowall.nativevideo", "ExamplePlugin")?;
+    let handle = api.register_android_plugin("com.photowall.nativevideo", "NativeVideoPlugin")?;
     #[cfg(target_os = "ios")]
     let handle = api.register_ios_plugin(init_plugin_native_video)?;
     Ok(NativeVideo(handle))
@@ -34,6 +34,12 @@ impl<R: Runtime> NativeVideo<R> {
     pub fn transcode(&self, payload: TranscodeRequest) -> crate::Result<TranscodeResponse> {
         self.0
             .run_mobile_plugin("transcode", payload)
+            .map_err(Into::into)
+    }
+
+    pub fn open_file(&self, payload: OpenFileRequest) -> crate::Result<()> {
+        self.0
+            .run_mobile_plugin::<()>("openFile", payload)
             .map_err(Into::into)
     }
 }

@@ -22,11 +22,6 @@ export function normalizeBackgroundMusic(music) {
     };
 }
 
-export function musicSegmentDuration(music) {
-    music = normalizeBackgroundMusic(music);
-    return music ? Math.max(0, music.endTime - music.startTime) : 0;
-}
-
 export function musicVolumeAt(music, elapsedSeconds, totalSeconds) {
     music = normalizeBackgroundMusic(music);
     if (!music) return 0;

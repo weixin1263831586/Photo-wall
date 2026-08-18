@@ -307,6 +307,18 @@
           "markdownDescription": "Denies the capabilities command without any pre-configured scope."
         },
         {
+          "description": "Enables the open_file command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-open-file",
+          "markdownDescription": "Enables the open_file command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the open_file command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-open-file",
+          "markdownDescription": "Denies the open_file command without any pre-configured scope."
+        },
+        {
           "description": "Enables the transcode command without any pre-configured scope.",
           "type": "string",
           "const": "allow-transcode",
@@ -319,10 +331,10 @@
           "markdownDescription": "Denies the transcode command without any pre-configured scope."
         },
         {
-          "description": "Default permissions for the plugin\n#### This default permission set includes:\n\n- `allow-capabilities`\n- `allow-transcode`",
+          "description": "Default permissions for the plugin\n#### This default permission set includes:\n\n- `allow-capabilities`\n- `allow-transcode`\n- `allow-open-file`",
           "type": "string",
           "const": "default",
-          "markdownDescription": "Default permissions for the plugin\n#### This default permission set includes:\n\n- `allow-capabilities`\n- `allow-transcode`"
+          "markdownDescription": "Default permissions for the plugin\n#### This default permission set includes:\n\n- `allow-capabilities`\n- `allow-transcode`\n- `allow-open-file`"
         }
       ]
     }

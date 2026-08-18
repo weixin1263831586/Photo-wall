@@ -18,11 +18,24 @@ export function createPhotoAnalysisWorkerClient(options) {
                 else request.resolve(event.data.analysis);
             }
             function handleError(event) {
-                pending.forEach(function (request) {
+                /* Only reject requests that belong to the failed worker, not all. */
+                var failedWorker = event.target;
+                var failedIndex = workers.indexOf(failedWorker);
+                pending.forEach(function (request, id) {
+                    if (request.workerIndex !== failedIndex) return;
                     clearTimeout(request.timeout);
                     request.reject(new Error(event.message || 'photo analysis worker failed'));
+                    pending.delete(id);
                 });
-                pending.clear();
+                /* Remove the failed worker so round-robin skips it. */
+                if (failedIndex !== -1) {
+                    workers.splice(failedIndex, 1);
+                    try { failedWorker.terminate(); } catch (_) {}
+                    /* Re-index remaining pending requests' workerIndex. */
+                    pending.forEach(function (request) {
+                        if (request.workerIndex > failedIndex) request.workerIndex--;
+                    });
+                }
             }
             for (var index = 0; index < workerCount; index++) {
                 var worker = new Worker(new URL('../workers/photo-analysis.worker.js', import.meta.url), { type: 'module' });
@@ -40,12 +53,13 @@ export function createPhotoAnalysisWorkerClient(options) {
         if (!workers.length || !(blob instanceof Blob)) return Promise.reject(new Error('photo analysis worker unavailable'));
         return new Promise(function (resolve, reject) {
             var id = ++sequence;
+            var workerIndex = nextWorker++ % workers.length;
             var timeout = setTimeout(function () {
                 pending.delete(id);
                 reject(new Error('photo analysis worker timed out'));
             }, timeoutMs);
-            pending.set(id, { resolve: resolve, reject: reject, timeout: timeout });
-            workers[nextWorker++ % workers.length].postMessage({ id: id, blob: blob });
+            pending.set(id, { resolve: resolve, reject: reject, timeout: timeout, workerIndex: workerIndex });
+            workers[workerIndex].postMessage({ id: id, blob: blob });
         });
     }
 

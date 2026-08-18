@@ -22,6 +22,7 @@ tauri-plugin-fs = "2"
 tauri-plugin-log = "2"
 tauri-plugin-process = "2"
 tauri-plugin-opener = "2"
+tauri-plugin-share = "2"
 tauri-plugin-native-video = { path = "plugins/native-video" }
 
 [target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]

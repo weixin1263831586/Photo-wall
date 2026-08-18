@@ -17,7 +17,7 @@ export function createPlaybackController(app) {
                 transition: timing.transition,
                 transitionStyle: app.playbackTransition,
                 photos: app.photos,
-                cycles: mode === 'shuffle' ? 1 : 1,
+                cycles: 1,
                 originX: origin ? origin.x : undefined,
                 originY: origin ? origin.y : undefined
             }, overrides));

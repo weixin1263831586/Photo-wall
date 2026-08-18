@@ -1,9 +1,7 @@
+import { isNativeApp } from './NativeFileService.js';
+
 const CRASH_STORAGE_KEY = 'photo-wall-crash-reports-v1';
 const MAX_CRASH_REPORTS = 10;
-
-function nativeRuntime() {
-    return typeof window !== 'undefined' && Boolean(window.__TAURI_INTERNALS__);
-}
 
 function serializeReason(reason) {
     if (reason instanceof Error) return { message: reason.message, stack: reason.stack || '' };
@@ -38,7 +36,7 @@ export function storeCrashReport(report, storage) {
 }
 
 async function writeNativeLog(level, message) {
-    if (!nativeRuntime()) return;
+    if (!isNativeApp()) return;
     try {
         var logger = await import('@tauri-apps/plugin-log');
         await logger[level](message);
@@ -65,7 +63,7 @@ export function installCrashCapture() {
 
 export async function checkAndInstallUpdate(options) {
     options = options || {};
-    if (!nativeRuntime()) return { supported: false };
+    if (!isNativeApp()) return { supported: false };
     try {
         var updater = await import('@tauri-apps/plugin-updater');
         var update = await updater.check();

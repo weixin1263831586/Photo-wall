@@ -18,3 +18,13 @@ pub(crate) async fn transcode<R: Runtime>(
         .await
         .map_err(|error| crate::Error::Message(error.to_string()))?
 }
+
+#[command]
+pub(crate) async fn open_file<R: Runtime>(
+    app: AppHandle<R>,
+    payload: OpenFileRequest,
+) -> Result<()> {
+    tauri::async_runtime::spawn_blocking(move || app.native_video().open_file(payload))
+        .await
+        .map_err(|error| crate::Error::Message(error.to_string()))?
+}

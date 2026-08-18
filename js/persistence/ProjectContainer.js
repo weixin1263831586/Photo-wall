@@ -246,5 +246,3 @@ export function migrateProject(project) {
     migrated.overlays = Array.isArray(project.overlays) ? project.overlays : [];
     return migrated;
 }
-
-export const PROJECT_CONTAINER_VERSION = CONTAINER_VERSION;

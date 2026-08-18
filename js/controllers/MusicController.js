@@ -21,6 +21,8 @@ export function installMusicController(app) {
     };
 
     app.useBuiltInMusic = function (id) {
+        if (app._builtInMusicBusy) return;
+        app._builtInMusicBusy = true;
         var button = document.querySelector('[data-music-track="' + id + '"]');
         if (button) button.classList.add('active');
         app.showLoading(true, '正在生成内置配乐…');
@@ -32,6 +34,8 @@ export function installMusicController(app) {
             if (button) button.classList.remove('active');
             console.error(error);
             app.toast('内置配乐生成失败');
+        }).finally(function () {
+            app._builtInMusicBusy = false;
         });
     };
 
@@ -72,28 +76,42 @@ export function installMusicController(app) {
             app.toast(valid ? '音乐文件不能超过 80 MB' : '请选择 MP3、WAV、M4A、AAC 或 OGG 音乐');
             return;
         }
-        app.recordHistory();
+        app.releaseMusicAudio();
         var probeURL = URL.createObjectURL(file);
         var probe = new Audio(probeURL);
         probe.preload = 'metadata';
         var settled = false;
+        var probeTimer = setTimeout(function () {
+            finish();
+            app.toast('音乐读取超时，请尝试其他格式');
+        }, 10000);
         function finish() {
             if (settled) return;
             settled = true;
+            clearTimeout(probeTimer);
             URL.revokeObjectURL(probeURL);
+            probe.removeAttribute('src');
+            probe.load();
         }
-        probe.addEventListener('loadedmetadata', function () {
-            var duration = Number.isFinite(probe.duration) ? probe.duration : 0;
-            finish();
+        function commit(duration) {
+            /* Record history only after the file actually loads, so a failed
+               upload doesn't leave a no-op undo step. */
+            app.recordHistory();
             app.backgroundMusic = normalizeBackgroundMusic({
                 name: file.name, type: file.type || 'audio/mpeg', duration: duration,
-                volume: 0.7, startTime: 0, endTime: duration, loop: true,
+                volume: 0.7, startTime: 0, endTime: duration, loop: duration > 0,
                 fadeIn: 1, fadeOut: 1, originalBlob: file
             });
             app.attachMusicAudio();
             app.syncMusicControls();
             if (app.autosave) app.autosave.schedule();
-            app.toast('背景音乐已添加');
+            app.toast(duration > 0 ? '背景音乐已添加' :
+                '背景音乐已添加，但无法读取时长；循环播放已停用');
+        }
+        probe.addEventListener('loadedmetadata', function () {
+            var duration = Number.isFinite(probe.duration) ? probe.duration : 0;
+            finish();
+            commit(duration);
         }, { once: true });
         probe.addEventListener('error', function () {
             finish();

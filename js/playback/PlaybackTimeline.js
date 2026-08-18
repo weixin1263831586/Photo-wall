@@ -10,6 +10,13 @@
 import { computePlaybackOrder } from './PlaybackOrder.js';
 import { createSeededRandom, normalizeSeed } from '../layout/SeededRandom.js';
 
+function photoForCell(cell, options) {
+    if (cell && cell.photo) return cell.photo;
+    var photos = options && Array.isArray(options.photos) ? options.photos : [];
+    var photoIndex = Number(cell && cell.photoIndex);
+    return Number.isInteger(photoIndex) ? photos[photoIndex] || null : null;
+}
+
 function clamp01(value) {
     return Math.max(0, Math.min(1, Number(value) || 0));
 }
@@ -131,17 +138,33 @@ export function createTimeline(layout, order, options) {
             for (var i = 0; i < items.length; i++) {
                 var item = items[i];
                 var progress = opacities[item.cellIndex];
-                photoZooms[item.cellIndex] = transitionStyle === 'ken-burns' ? 1 + progress * 0.08 : 1;
-                if (transitionStyle !== 'slide') continue;
                 var cell = layout[item.cellIndex] || {};
+                if (transitionStyle === 'ken-burns') {
+                    /* Slow zoom-in from 1.0 to 1.08 combined with a gentle pan
+                       towards the photo's subject focus point. */
+                    photoZooms[item.cellIndex] = 1 + progress * 0.08;
+                    var photo = photoForCell ? photoForCell(cell, options) : null;
+                    var focusX = photo ? Number(photo.focusX) : 0.5;
+                    var focusY = photo ? Number(photo.focusY) : 0.5;
+                    if (!Number.isFinite(focusX)) focusX = 0.5;
+                    if (!Number.isFinite(focusY)) focusY = 0.5;
+                    /* Pan starts slightly off-center and drifts towards the subject. */
+                    var panFromX = (0.5 - focusX) * 0.5;
+                    var panFromY = (0.5 - focusY) * 0.5;
+                    var cellW = Number(cell.width) || 48;
+                    var cellH = Number(cell.height) || 48;
+                    offsetsX[item.cellIndex] = panFromX * cellW * progress;
+                    offsetsY[item.cellIndex] = panFromY * cellH * progress;
+                }
+                if (transitionStyle !== 'slide') continue;
                 var originX = Number.isFinite(Number(options.originX)) ? Number(options.originX) : Number(options.canvasWidth) / 2;
                 var originY = Number.isFinite(Number(options.originY)) ? Number(options.originY) : Number(options.canvasHeight) / 2;
                 var dx = Number(cell.x) - originX;
                 var dy = Number(cell.y) - originY;
                 var distance = Math.max(1, Math.hypot(dx, dy));
                 var amount = Math.min(32, Math.max(12, Math.min(Number(cell.width) || 48, Number(cell.height) || 48) * 0.28));
-                offsetsX[item.cellIndex] = -(dx / distance) * amount * (1 - progress);
-                offsetsY[item.cellIndex] = -(dy / distance) * amount * (1 - progress);
+                offsetsX[item.cellIndex] += -(dx / distance) * amount * (1 - progress);
+                offsetsY[item.cellIndex] += -(dy / distance) * amount * (1 - progress);
             }
             return {
                 mode: 'reveal',

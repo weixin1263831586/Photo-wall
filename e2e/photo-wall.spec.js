@@ -427,7 +427,8 @@ test('exports the selected reveal timeline as a non-empty WebM video', async fun
     await page.locator('#playback-mode').selectOption('reveal');
     await page.locator('#flow-speed').selectOption('fast');
     await page.locator('#export-btn').click();
-    await page.getByRole('radio', { name: /动态 WebM/ }).click({ force: true });
+    await page.getByRole('radio', { name: /视频/, exact: true }).click({ force: true });
+    await page.getByRole('radio', { name: /WebM/, exact: true }).click({ force: true });
     await expect(page.locator('#export-dimensions')).toContainText('30fps');
 
     var downloadPromise = page.waitForEvent('download', { timeout: 30000 });
@@ -445,7 +446,8 @@ test('exports background music in an MP4 video', async function ({ page }) {
     await page.locator('#playback-mode').selectOption('reveal');
     await page.locator('#flow-speed').selectOption('fast');
     await page.locator('#export-btn').click();
-    await page.getByRole('radio', { name: /MP4/ }).click({ force: true });
+    await page.getByRole('radio', { name: /视频/, exact: true }).click({ force: true });
+    await page.getByRole('radio', { name: /^MP4/, exact: true }).click({ force: true });
 
     // ffmpeg.wasm has a 32 MB cold-start core, so first-run CI exports need
     // more time than the normal UI interaction budget.
@@ -461,7 +463,7 @@ test('exports background music in an MP4 video', async function ({ page }) {
 test('exports a printable PDF document', async function ({ page }) {
     await page.locator('#file-input').setInputFiles([pngPhoto(13), pngPhoto(14)]);
     await page.locator('#export-btn').click();
-    await page.locator('input[name="export-format"][value="pdf"]').check({ force: true });
+    await page.locator('input[name="export-category"][value="pdf"]').check({ force: true });
     await expect(page.locator('#print-export-field')).toBeVisible();
     await page.locator('#export-print-dpi').selectOption('150');
     var downloadPromise = page.waitForEvent('download');

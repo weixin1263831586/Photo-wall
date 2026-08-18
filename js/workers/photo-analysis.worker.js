@@ -6,7 +6,11 @@ self.addEventListener('message', async function (event) {
     try {
         var blob = event.data && event.data.blob;
         if (!(blob instanceof Blob)) throw new Error('invalid image blob');
-        bitmap = await createImageBitmap(blob);
+        try {
+            bitmap = await createImageBitmap(blob, { imageOrientation: 'from-image' });
+        } catch (_) {
+            bitmap = await createImageBitmap(blob);
+        }
         var size = 48;
         var canvas = new OffscreenCanvas(size, size);
         var context = canvas.getContext('2d', { willReadFrequently: true });

@@ -37,7 +37,8 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
     Builder::new("native-video")
         .invoke_handler(tauri::generate_handler![
             commands::capabilities,
-            commands::transcode
+            commands::transcode,
+            commands::open_file
         ])
         .setup(|app, api| {
             #[cfg(mobile)]
