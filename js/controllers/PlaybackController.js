@@ -1,3 +1,4 @@
+import './ExportAbortBridge.js';
 import { createTimeline } from '../playback/PlaybackTimeline.js';
 import { scheduleRuntimeOptimization } from './RuntimeOptimizationController.js';
 
