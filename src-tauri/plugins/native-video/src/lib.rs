@@ -40,7 +40,8 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             commands::transcode,
             commands::open_file,
             commands::extract_poster,
-            commands::transcode_frames
+            commands::transcode_frames,
+            commands::cancel_export
         ])
         .setup(|app, api| {
             #[cfg(mobile)]
