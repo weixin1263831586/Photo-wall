@@ -28,3 +28,23 @@ pub(crate) async fn open_file<R: Runtime>(
         .await
         .map_err(|error| crate::Error::Message(error.to_string()))?
 }
+
+#[command]
+pub(crate) async fn extract_poster<R: Runtime>(
+    app: AppHandle<R>,
+    payload: ExtractPosterRequest,
+) -> Result<ExtractPosterResponse> {
+    tauri::async_runtime::spawn_blocking(move || app.native_video().extract_poster(payload))
+        .await
+        .map_err(|error| crate::Error::Message(error.to_string()))?
+}
+
+#[command]
+pub(crate) async fn transcode_frames<R: Runtime>(
+    app: AppHandle<R>,
+    payload: TranscodeFramesRequest,
+) -> Result<TranscodeResponse> {
+    tauri::async_runtime::spawn_blocking(move || app.native_video().transcode_frames(payload))
+        .await
+        .map_err(|error| crate::Error::Message(error.to_string()))?
+}
