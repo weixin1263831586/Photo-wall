@@ -46,10 +46,10 @@ export function derivePersonBox(faceBox) {
     var fb = clampBox(faceBox);
     if (!fb) return null;
     var expandX = fb.width * 0.3;
-    var personW = Math.min(1, fb.width + expandX * 2);
-    var personH = Math.min(1 - fb.y, fb.height * 2.8);
     var px = Math.max(0, fb.x - expandX);
-    return { x: px, y: fb.y, width: personW, height: personH };
+    var personW = Math.min(1 - px, fb.width + expandX * 2);
+    var personH = Math.min(1 - fb.y, fb.height * 2.8);
+    return clampBox({ x: px, y: fb.y, width: personW, height: personH });
 }
 
 function rotatePoint(x, y, radians) {
@@ -124,11 +124,7 @@ function visibleBoxRatio(layout, photo, cell, box, maskData) {
     return visible / total;
 }
 
-/**
- * Build the candidate target grid (normalised [0,1] within the cell).
- * We sample a 5×5 grid of target points centred at 0.5.
- */
-function candidateTargets() {
+var CANDIDATE_TARGETS = (function () {
     var offsets = [0, 0.25, 0.5, 0.75, 1.0];
     var targets = [];
     for (var iy = 0; iy < offsets.length; iy++) {
@@ -137,6 +133,15 @@ function candidateTargets() {
         }
     }
     return targets;
+})();
+
+/**
+ * Build the candidate target grid (normalised [0,1] within the cell).
+ * Reuse one immutable-by-convention grid to avoid allocating 25 objects for
+ * every boundary photo evaluated by the crop optimiser.
+ */
+function candidateTargets() {
+    return CANDIDATE_TARGETS;
 }
 
 /**
