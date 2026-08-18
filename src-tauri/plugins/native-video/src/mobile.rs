@@ -54,4 +54,10 @@ impl<R: Runtime> NativeVideo<R> {
             .run_mobile_plugin("transcodeFrames", payload)
             .map_err(Into::into)
     }
+
+    pub fn cancel_export(&self) -> crate::Result<()> {
+        self.0
+            .run_mobile_plugin::<()>("cancelExport", ())
+            .map_err(Into::into)
+    }
 }
