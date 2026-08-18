@@ -2,6 +2,8 @@ package com.photowall.nativevideo
 
 import android.app.Activity
 import android.content.Intent
+import android.graphics.Bitmap
+import android.media.MediaMetadataRetriever
 import android.net.Uri
 import androidx.annotation.OptIn
 import androidx.core.content.FileProvider
@@ -24,12 +26,37 @@ import app.tauri.annotation.TauriPlugin
 import app.tauri.plugin.Invoke
 import app.tauri.plugin.JSObject
 import app.tauri.plugin.Plugin
+import java.io.File
+import java.io.FileOutputStream
 import java.nio.ByteBuffer
+import kotlin.math.min
 
 @InvokeArg
 class TranscodeArgs {
     lateinit var inputPath: String
     lateinit var outputPath: String
+    var audioPath: String? = null
+    var duration: Double = 0.0
+    var volume: Double = 0.7
+    var startTime: Double = 0.0
+    var endTime: Double = 0.0
+    var loopAudio: Boolean = true
+    var fadeIn: Double = 0.0
+    var fadeOut: Double = 0.0
+}
+
+@InvokeArg
+class ExtractPosterArgs {
+    lateinit var inputPath: String
+    lateinit var outputPath: String
+    var maxDimension: Int = 1280
+}
+
+@InvokeArg
+class TranscodeFramesArgs {
+    var framePaths: Array<String> = emptyArray()
+    lateinit var outputPath: String
+    var fps: Int = 15
     var audioPath: String? = null
     var duration: Double = 0.0
     var volume: Double = 0.7
@@ -68,24 +95,28 @@ class FadeAudioProcessor(
     }
 
     override fun queueInput(inputBuffer: ByteBuffer) {
+        val isFloat = inputAudioFormat.encoding == C.ENCODING_PCM_FLOAT
         val channels = inputAudioFormat.channelCount.coerceAtLeast(1)
-        val bytesPerFrame = 2 * channels // 16-bit PCM
+        val bytesPerSample = if (isFloat) 4 else 2
+        val bytesPerFrame = bytesPerSample * channels
         val remaining = inputBuffer.remaining()
         val frameCount = remaining / bytesPerFrame
-        val output = replaceOutputBuffer(remaining)
-        val isFloat = inputAudioFormat.encoding == C.ENCODING_PCM_FLOAT
+        val output = replaceOutputBuffer(frameCount * bytesPerFrame)
 
         for (frame in 0 until frameCount) {
             val globalFrame = samplesProcessed + frame
             val gain = computeGain(globalFrame)
             for (ch in 0 until channels) {
                 if (isFloat) {
-                    // Should not happen in Transformer's default pipeline, but handle defensively.
-                    val f = inputBuffer.float
-                    output.putFloat(f * gain)
+                    val sample = inputBuffer.float
+                    output.putFloat(sample * gain)
                 } else {
-                    val s = inputBuffer.short
-                    output.putShort((s.toInt() * gain).toInt().coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt()).toShort())
+                    val sample = inputBuffer.short
+                    output.putShort(
+                        (sample.toInt() * gain).toInt()
+                            .coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt())
+                            .toShort()
+                    )
                 }
             }
         }
@@ -94,16 +125,16 @@ class FadeAudioProcessor(
     }
 
     internal fun computeGain(frameIndex: Long): Float {
-        var g = peakVolume
+        var gain = peakVolume
         if (fadeInSamples > 0 && frameIndex < fadeInSamples) {
-            g *= frameIndex.toFloat() / fadeInSamples
+            gain *= frameIndex.toFloat() / fadeInSamples
         }
         if (totalSamples > fadeOutStartSample && frameIndex > fadeOutStartSample) {
             val remaining = (totalSamples - frameIndex).coerceAtLeast(0).toFloat()
             val fadeSpan = (totalSamples - fadeOutStartSample).coerceAtLeast(1).toFloat()
-            g *= (remaining / fadeSpan).coerceIn(0f, 1f)
+            gain *= (remaining / fadeSpan).coerceIn(0f, 1f)
         }
-        return g.coerceIn(0f, 1f)
+        return gain.coerceIn(0f, 1f)
     }
 
     override fun onReset() {
@@ -121,6 +152,32 @@ class OpenFileArgs {
 class NativeVideoPlugin(private val activity: Activity) : Plugin(activity) {
     private var activeTransformer: Transformer? = null
     private var activeInvoke: Invoke? = null
+    private var activeOutputFile: File? = null
+
+    private fun clearActiveExport(deleteOutput: Boolean = false) {
+        val output = activeOutputFile
+        activeInvoke = null
+        activeTransformer = null
+        activeOutputFile = null
+        if (deleteOutput && output?.exists() == true) {
+            runCatching { output.delete() }
+        }
+    }
+
+    private fun resolveExport(output: File, encoder: String) {
+        val pending = activeInvoke
+        val ret = JSObject()
+        ret.put("outputPath", output.absolutePath)
+        ret.put("encoder", encoder)
+        clearActiveExport(false)
+        pending?.resolve(ret)
+    }
+
+    private fun rejectExport(message: String, deleteOutput: Boolean = true) {
+        val pending = activeInvoke
+        clearActiveExport(deleteOutput)
+        pending?.reject(message)
+    }
 
     /**
      * Opens a media file with the system player. Opening a plain file:// URI
@@ -131,7 +188,7 @@ class NativeVideoPlugin(private val activity: Activity) : Plugin(activity) {
     fun openFile(invoke: Invoke) {
         try {
             val args = invoke.parseArgs(OpenFileArgs::class.java)
-            val file = java.io.File(args.path)
+            val file = File(args.path)
             if (!file.isFile) {
                 invoke.reject("File to open is missing")
                 return
@@ -161,6 +218,157 @@ class NativeVideoPlugin(private val activity: Activity) : Plugin(activity) {
         invoke.resolve(ret)
     }
 
+    @Command
+    fun extractPoster(invoke: Invoke) {
+        val args = invoke.parseArgs(ExtractPosterArgs::class.java)
+        val input = File(args.inputPath)
+        if (!input.isFile) {
+            invoke.reject("Video poster input file is missing")
+            return
+        }
+        val output = File(args.outputPath)
+        output.parentFile?.mkdirs()
+        val retriever = MediaMetadataRetriever()
+        var sourceBitmap: Bitmap? = null
+        var scaledBitmap: Bitmap? = null
+        try {
+            retriever.setDataSource(input.absolutePath)
+            val durationMs = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
+                ?.toLongOrNull()?.coerceAtLeast(0L) ?: 0L
+            val targetUs = if (durationMs > 0) min(durationMs / 10, 3_000L) * 1000L else -1L
+            sourceBitmap = if (targetUs >= 0) {
+                retriever.getFrameAtTime(targetUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+            } else {
+                retriever.frameAtTime
+            }
+            val bitmap = sourceBitmap
+                ?: throw IllegalStateException("Android decoder could not extract a video frame")
+            val maxDimension = args.maxDimension.coerceIn(320, 1920)
+            val maxSide = maxOf(bitmap.width, bitmap.height)
+            scaledBitmap = if (maxSide > maxDimension) {
+                val scale = maxDimension.toFloat() / maxSide.toFloat()
+                Bitmap.createScaledBitmap(
+                    bitmap,
+                    (bitmap.width * scale).toInt().coerceAtLeast(1),
+                    (bitmap.height * scale).toInt().coerceAtLeast(1),
+                    true
+                )
+            } else {
+                bitmap
+            }
+            FileOutputStream(output).use { stream ->
+                if (scaledBitmap?.compress(Bitmap.CompressFormat.JPEG, 90, stream) != true) {
+                    throw IllegalStateException("Android poster JPEG encode failed")
+                }
+            }
+            val ret = JSObject()
+            ret.put("outputPath", output.absolutePath)
+            ret.put("width", scaledBitmap?.width ?: bitmap.width)
+            ret.put("height", scaledBitmap?.height ?: bitmap.height)
+            ret.put("duration", durationMs / 1000.0)
+            invoke.resolve(ret)
+        } catch (error: Throwable) {
+            runCatching { if (output.exists()) output.delete() }
+            invoke.reject(error.message ?: "Android video poster extraction failed")
+        } finally {
+            if (scaledBitmap != null && scaledBitmap !== sourceBitmap) {
+                scaledBitmap?.recycle()
+            }
+            sourceBitmap?.recycle()
+            retriever.release()
+        }
+    }
+
+    @OptIn(UnstableApi::class)
+    @Command
+    fun transcodeFrames(invoke: Invoke) {
+        if (activeTransformer != null) {
+            invoke.reject("A native video export is already running")
+            return
+        }
+        val args = invoke.parseArgs(TranscodeFramesArgs::class.java)
+        val frameFiles = args.framePaths.map { File(it) }
+        if (frameFiles.isEmpty() || frameFiles.any { !it.isFile }) {
+            invoke.reject("One or more Android export frames are missing")
+            return
+        }
+        val output = File(args.outputPath)
+        output.parentFile?.mkdirs()
+        if (output.exists()) output.delete()
+
+        try {
+            val fps = args.fps.coerceIn(8, 30)
+            val frameDurationMs = (1000.0 / fps).toLong().coerceAtLeast(1L)
+            val frameItems = frameFiles.map { frame ->
+                val media = MediaItem.Builder()
+                    .setUri(Uri.fromFile(frame))
+                    .setImageDurationMs(frameDurationMs)
+                    .build()
+                EditedMediaItem.Builder(media)
+                    .setFrameRate(fps)
+                    .build()
+            }
+            val videoSequence = EditedMediaItemSequence.Builder(frameItems).build()
+            val audioFile = args.audioPath?.let { File(it) }?.takeIf { it.isFile }
+            val composition = if (audioFile != null) {
+                val audioMedia = MediaItem.Builder()
+                    .setUri(Uri.fromFile(audioFile))
+                    .setClippingConfiguration(
+                        MediaItem.ClippingConfiguration.Builder()
+                            .setStartPositionMs((args.startTime.coerceAtLeast(0.0) * 1000).toLong())
+                            .also { clip ->
+                                if (args.endTime > args.startTime) {
+                                    clip.setEndPositionMs((args.endTime * 1000).toLong())
+                                }
+                            }
+                            .build()
+                    )
+                    .build()
+                val fadeProcessor = FadeAudioProcessor(
+                    fadeInSeconds = args.fadeIn.coerceIn(0.0, 10.0).toFloat(),
+                    fadeOutSeconds = args.fadeOut.coerceIn(0.0, 10.0).toFloat(),
+                    durationSeconds = args.duration.coerceAtLeast(0.0).toFloat(),
+                    peakVolume = args.volume.coerceIn(0.0, 1.0).toFloat()
+                )
+                val audio = EditedMediaItem.Builder(audioMedia)
+                    .setRemoveVideo(true)
+                    .setEffects(Effects(listOf(fadeProcessor), emptyList()))
+                    .build()
+                val audioSequence = EditedMediaItemSequence.Builder(audio)
+                    .setIsLooping(args.loopAudio)
+                    .build()
+                Composition.Builder(listOf(videoSequence, audioSequence)).build()
+            } else {
+                Composition.Builder(listOf(videoSequence)).build()
+            }
+
+            val transformer = Transformer.Builder(activity)
+                .setVideoMimeType(MimeTypes.VIDEO_H264)
+                .setAudioMimeType(MimeTypes.AUDIO_AAC)
+                .addListener(object : Transformer.Listener {
+                    override fun onCompleted(composition: Composition, exportResult: ExportResult) {
+                        resolveExport(output, "Android Media3 image sequence / H.264")
+                    }
+
+                    override fun onError(
+                        composition: Composition,
+                        exportResult: ExportResult,
+                        exportException: ExportException
+                    ) {
+                        rejectExport(exportException.message ?: "Android frame export failed")
+                    }
+                })
+                .build()
+            activeInvoke = invoke
+            activeTransformer = transformer
+            activeOutputFile = output
+            transformer.start(composition, output.absolutePath)
+        } catch (error: Throwable) {
+            clearActiveExport(true)
+            invoke.reject(error.message ?: "Android frame export failed")
+        }
+    }
+
     @OptIn(UnstableApi::class)
     @Command
     fun transcode(invoke: Invoke) {
@@ -169,12 +377,12 @@ class NativeVideoPlugin(private val activity: Activity) : Plugin(activity) {
             return
         }
         val args = invoke.parseArgs(TranscodeArgs::class.java)
-        val input = java.io.File(args.inputPath)
+        val input = File(args.inputPath)
         if (!input.isFile) {
             invoke.reject("Native encoder input file is missing")
             return
         }
-        val output = java.io.File(args.outputPath)
+        val output = File(args.outputPath)
         output.parentFile?.mkdirs()
         if (output.exists()) output.delete()
 
@@ -184,7 +392,7 @@ class NativeVideoPlugin(private val activity: Activity) : Plugin(activity) {
                 .build()
             val videoSequence = EditedMediaItemSequence.Builder(video).build()
 
-            val audioFile = args.audioPath?.let { java.io.File(it) }?.takeIf { it.isFile }
+            val audioFile = args.audioPath?.let { File(it) }?.takeIf { it.isFile }
             val composition = if (audioFile != null) {
                 val audioMedia = MediaItem.Builder()
                     .setUri(Uri.fromFile(audioFile))
@@ -224,12 +432,7 @@ class NativeVideoPlugin(private val activity: Activity) : Plugin(activity) {
                 .setAudioMimeType(MimeTypes.AUDIO_AAC)
                 .addListener(object : Transformer.Listener {
                     override fun onCompleted(composition: Composition, exportResult: ExportResult) {
-                        val ret = JSObject()
-                        ret.put("outputPath", output.absolutePath)
-                        ret.put("encoder", "Android MediaCodec H.264 / AAC")
-                        activeInvoke?.resolve(ret)
-                        activeInvoke = null
-                        activeTransformer = null
+                        resolveExport(output, "Android MediaCodec H.264 / AAC")
                     }
 
                     override fun onError(
@@ -237,19 +440,38 @@ class NativeVideoPlugin(private val activity: Activity) : Plugin(activity) {
                         exportResult: ExportResult,
                         exportException: ExportException
                     ) {
-                        activeInvoke?.reject(exportException.message ?: "Android native video export failed")
-                        activeInvoke = null
-                        activeTransformer = null
+                        rejectExport(exportException.message ?: "Android native video export failed")
                     }
                 })
                 .build()
             activeInvoke = invoke
             activeTransformer = transformer
+            activeOutputFile = output
             transformer.start(composition, output.absolutePath)
         } catch (error: Throwable) {
-            activeInvoke = null
-            activeTransformer = null
+            clearActiveExport(true)
             invoke.reject(error.message ?: "Android native video export failed")
+        }
+    }
+
+    @OptIn(UnstableApi::class)
+    @Command
+    fun cancelExport(invoke: Invoke) {
+        activity.runOnUiThread {
+            val transformer = activeTransformer
+            val pending = activeInvoke
+            val output = activeOutputFile
+            activeTransformer = null
+            activeInvoke = null
+            activeOutputFile = null
+            try {
+                transformer?.cancel()
+                pending?.reject("Native video export cancelled")
+                if (output?.exists() == true) runCatching { output.delete() }
+                invoke.resolve()
+            } catch (error: Throwable) {
+                invoke.reject(error.message ?: "Unable to cancel native video export")
+            }
         }
     }
 }
