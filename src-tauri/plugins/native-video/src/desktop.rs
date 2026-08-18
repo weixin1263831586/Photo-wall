@@ -69,6 +69,12 @@ impl<R: Runtime> NativeVideo<R> {
             "transcode_frames is only available on Android and iOS".into(),
         ))
     }
+
+    pub fn cancel_export(&self) -> crate::Result<()> {
+        Err(crate::Error::Message(
+            "cancel_export is only available on Android and iOS".into(),
+        ))
+    }
 }
 
 #[cfg(windows)]
