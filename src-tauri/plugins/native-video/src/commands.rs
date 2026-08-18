@@ -48,3 +48,8 @@ pub(crate) async fn transcode_frames<R: Runtime>(
         .await
         .map_err(|error| crate::Error::Message(error.to_string()))?
 }
+
+#[command]
+pub(crate) async fn cancel_export<R: Runtime>(app: AppHandle<R>) -> Result<()> {
+    app.native_video().cancel_export()
+}
