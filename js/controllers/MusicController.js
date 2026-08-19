@@ -82,20 +82,20 @@ export function installMusicController(app) {
         probe.preload = 'metadata';
         var settled = false;
         var probeTimer = setTimeout(function () {
+            if (settled) return;
             finish();
             app.toast('音乐读取超时，请尝试其他格式');
         }, 10000);
         function finish() {
-            if (settled) return;
+            if (settled) return false;
             settled = true;
             clearTimeout(probeTimer);
             URL.revokeObjectURL(probeURL);
             probe.removeAttribute('src');
             probe.load();
+            return true;
         }
         function commit(duration) {
-            /* Record history only after the file actually loads, so a failed
-               upload doesn't leave a no-op undo step. */
             app.recordHistory();
             app.backgroundMusic = normalizeBackgroundMusic({
                 name: file.name, type: file.type || 'audio/mpeg', duration: duration,
@@ -109,11 +109,13 @@ export function installMusicController(app) {
                 '背景音乐已添加，但无法读取时长；循环播放已停用');
         }
         probe.addEventListener('loadedmetadata', function () {
+            if (settled) return;
             var duration = Number.isFinite(probe.duration) ? probe.duration : 0;
-            finish();
+            if (!finish()) return;
             commit(duration);
         }, { once: true });
         probe.addEventListener('error', function () {
+            if (settled) return;
             finish();
             app.toast('音乐无法读取，请尝试其他格式');
         }, { once: true });
@@ -190,7 +192,12 @@ export function installMusicController(app) {
         app.musicAudio.volume = standalone ? music.volume : musicVolumeAt(music, 0, timelineDurationMs / 1000);
         app.musicStandalonePreview = standalone === true;
         app.musicPlaybackStartedAt = performance.now();
-        app.musicAudio.play().catch(function () { app.toast('浏览器阻止了音乐播放，请再次点击播放'); });
+        app.musicAudio.play().catch(function () {
+            app.musicStandalonePreview = false;
+            app.musicPlaybackStartedAt = 0;
+            app.syncMusicControls();
+            app.toast('浏览器阻止了音乐播放，请再次点击播放');
+        });
         app.syncMusicControls();
     };
 

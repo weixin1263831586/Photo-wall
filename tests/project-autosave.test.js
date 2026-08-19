@@ -65,6 +65,24 @@ test('manual backups retain blobs and rotate to the five newest snapshots', asyn
     autosave.destroy();
 });
 
+test('manual backup limit can be reduced for storage-constrained devices', async function () {
+    var blob = new Blob(['photo-data'], { type: 'image/jpeg' });
+    var autosave = createProjectAutosave({
+        indexedDB: new IDBFactory(),
+        databaseName: 'backup-limit-test',
+        backupLimit: 2,
+        capture: function () {
+            return {
+                project: { format: 'photo-wall-project', version: 2, photos: [] },
+                photos: [{ id: 'photo-1', name: 'one.jpg', originalBlob: blob }]
+            };
+        }
+    });
+    for (var count = 0; count < 4; count++) await autosave.createBackup('backup-' + count);
+    assert.equal((await autosave.listBackups()).length, 2);
+    autosave.destroy();
+});
+
 test('autosave stores and restores background music separately from project metadata', async function () {
     var photoBlob = new Blob(['photo'], { type: 'image/jpeg' });
     var musicBlob = new Blob(['music'], { type: 'audio/mpeg' });

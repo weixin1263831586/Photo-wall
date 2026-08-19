@@ -7,6 +7,7 @@
  */
 
 import { isNativeApp } from '../platform/NativeFileService.js';
+import { isAndroidNativeApp, recordTimelineOnAndroid } from '../platform/AndroidMediaBridge.js';
 
 var WEBM_MIME_CANDIDATES = [
     'video/webm;codecs=vp9',
@@ -20,37 +21,50 @@ var NATIVE_MP4_MIME_CANDIDATES = [
     'video/mp4'
 ];
 
+var activeAbortSignal = null;
+
+export function setVideoExportAbortSignal(signal) {
+    activeAbortSignal = signal || null;
+}
+
+function currentSignal(options) {
+    var earlySignal = typeof window !== 'undefined' ? window.__PHOTO_WALL_EXPORT_ABORT_SIGNAL__ : null;
+    return (options && options.signal) || activeAbortSignal || earlySignal || null;
+}
+
+function abortError() {
+    var error = new Error('视频导出已取消');
+    error.name = 'AbortError';
+    return error;
+}
+
+function throwIfAborted(signal) {
+    if (signal && signal.aborted) throw abortError();
+}
+
+function dispatchExportEvent(name, detail) {
+    if (typeof window === 'undefined' || typeof CustomEvent === 'undefined') return;
+    window.dispatchEvent(new CustomEvent('photowall:video-export-' + name, { detail: detail || {} }));
+}
+
 /**
  * Pick the best supported mimeType. When format is 'webm', only WebM
  * candidates are considered so the recorded stream is container-compatible.
  */
 export function pickVideoMimeType(format) {
+    if (isAndroidNativeApp()) return format === 'webm' ? '' : 'video/mp4';
     if (typeof MediaRecorder === 'undefined') return '';
     var nativeApp = isNativeApp();
-    if (format === 'webm') return WEBM_MIME_CANDIDATES.find(function (c) {
-        try { return MediaRecorder.isTypeSupported(c); } catch (_) { return false; }
+    if (format === 'webm') return WEBM_MIME_CANDIDATES.find(function (candidate) {
+        try { return MediaRecorder.isTypeSupported(candidate); } catch (_) { return false; }
     }) || '';
     var candidates = nativeApp ? NATIVE_MP4_MIME_CANDIDATES.concat(WEBM_MIME_CANDIDATES) : WEBM_MIME_CANDIDATES;
-    return candidates.find(function (c) {
-        try { return MediaRecorder.isTypeSupported(c); } catch (_) { return false; }
+    return candidates.find(function (candidate) {
+        try { return MediaRecorder.isTypeSupported(candidate); } catch (_) { return false; }
     }) || '';
 }
 
-/**
- * Record a timeline-driven animation from a PhotoWall instance.
- *
- * @param {object} wall        PhotoWall instance (must have renderPlaybackFrame).
- * @param {object} timeline    PlaybackTimeline from createTimeline().
- * @param {object} options     {
- *   width, height,            — target canvas dimensions (CSS px)
- *   fps      default 30,
- *   format   'webm' | 'mp4',
- *   scale    export scale multiplier (default 1),
- *   onProgress(frame, total),
- *   onStatus(message)
- * }
- * @returns {Promise<Blob>}    Video blob.
- */
+/** Record a timeline-driven animation from a PhotoWall instance. */
 export async function recordTimelineCanvas(wall, timeline, options) {
     options = options || {};
     var cssWidth = Math.round(options.width || wall.cssWidth || 1080);
@@ -60,6 +74,13 @@ export async function recordTimelineCanvas(wall, timeline, options) {
     var scale = Math.max(0.5, Number(options.scale) || 1);
     var onProgress = options.onProgress || function () {};
     var onStatus = options.onStatus || function () {};
+
+    /* Android APKs use Media3/MediaCodec directly. Android System WebView
+       frequently exposes MediaRecorder without a working canvas recorder (or
+       exposes no compatible MIME at all), so do not gate APK export on it. */
+    if (isAndroidNativeApp()) {
+        return recordTimelineOnAndroid(wall, timeline, options);
+    }
 
     if (typeof MediaRecorder === 'undefined') {
         throw new Error('当前浏览器不支持视频录制（MediaRecorder 不可用）');
@@ -159,10 +180,17 @@ export async function recordTimelineCanvas(wall, timeline, options) {
             var playbackFrame = timeline.getFrame(time);
 
             exportCtx.clearRect(0, 0, pixelWidth, pixelHeight);
-            wall.renderPlaybackFrame(exportCtx, playbackFrame, {
-                sourceFrame: sourceFrame,
-                background: background
-            });
+            if (typeof wall.renderPlaybackFrameAsync === 'function') {
+                await wall.renderPlaybackFrameAsync(exportCtx, playbackFrame, {
+                    sourceFrame: sourceFrame,
+                    background: background
+                });
+            } else {
+                wall.renderPlaybackFrame(exportCtx, playbackFrame, {
+                    sourceFrame: sourceFrame,
+                    background: background
+                });
+            }
             if (canRequestFrame) {
                 videoTrack.requestFrame();
                 await waitForCommit();
@@ -173,10 +201,17 @@ export async function recordTimelineCanvas(wall, timeline, options) {
         }
 
         /* Render one final frame to ensure the last state is captured. */
-        wall.renderPlaybackFrame(exportCtx, timeline.getFrame(timeline.duration), {
-            sourceFrame: sourceFrame,
-            background: background
-        });
+        if (typeof wall.renderPlaybackFrameAsync === 'function') {
+            await wall.renderPlaybackFrameAsync(exportCtx, timeline.getFrame(timeline.duration), {
+                sourceFrame: sourceFrame,
+                background: background
+            });
+        } else {
+            wall.renderPlaybackFrame(exportCtx, timeline.getFrame(timeline.duration), {
+                sourceFrame: sourceFrame,
+                background: background
+            });
+        }
         if (canRequestFrame) {
             videoTrack.requestFrame();
             await waitForCommit();
@@ -231,5 +266,7 @@ export async function recordTimelineCanvas(wall, timeline, options) {
         });
     }
 
+    /* Stream tracks and the recorder are already torn down in the finally
+       block above; the export canvas is garbage-collected with this scope. */
     return webmBlob;
 }

@@ -65,7 +65,26 @@ export function createPhotoLibrary(options) {
             // thumbnails blank even after the sheet opens.
             image.loading = index < 24 ? 'eager' : 'lazy';
             var thumbnailSource = photo.thumbnailSrc || photo.src;
-            if (image.src !== thumbnailSource) image.src = thumbnailSource;
+            var sourceChanged = image.getAttribute('data-source') !== thumbnailSource;
+            if (sourceChanged) {
+                image.setAttribute('data-source', thumbnailSource || '');
+                image.removeAttribute('data-fallback-tried');
+                card.classList.remove('photo-load-failed');
+                image.onload = function () {
+                    card.classList.remove('photo-load-failed');
+                };
+                image.onerror = function () {
+                    var fallback = photo.workingSrc || photo.src;
+                    if (image.getAttribute('data-fallback-tried') !== '1' &&
+                        fallback && fallback !== image.getAttribute('src')) {
+                        image.setAttribute('data-fallback-tried', '1');
+                        image.src = fallback;
+                        return;
+                    }
+                    card.classList.add('photo-load-failed');
+                };
+                image.src = thumbnailSource || '';
+            }
             image.alt = photo.name || '';
             var mediaBadge = card.querySelector('.photo-media-badge');
             mediaBadge.hidden = photo.mediaType !== 'video';
@@ -135,7 +154,7 @@ export function createPhotoLibrary(options) {
                 dragIndex = pointerGesture.sourceIndex;
                 pointerGesture.card.classList.add('dragging');
                 try { library.setPointerCapture(event.pointerId); } catch (ignore) {}
-            }, 240);
+            }, 380);
         });
         library.addEventListener('pointermove', function (event) {
             if (!pointerGesture || pointerGesture.pointerId !== event.pointerId) return;

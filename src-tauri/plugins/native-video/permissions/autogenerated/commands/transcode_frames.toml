@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-transcode-frames"
+description = "Enables the transcode_frames command without any pre-configured scope."
+commands.allow = ["transcode_frames"]
+
+[[permission]]
+identifier = "deny-transcode-frames"
+description = "Denies the transcode_frames command without any pre-configured scope."
+commands.deny = ["transcode_frames"]

@@ -246,15 +246,11 @@
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
         </button>
         <header class="workspace-bar" aria-label="画布工具栏">
-            <div class="canvas-status-wrap">
-                <span class="status-dot"></span>
-                <span id="canvas-status">所有素材仅在本地处理</span>
-            </div>
             <div class="canvas-motion-controls" id="canvas-motion-controls" aria-label="画布交互与播放">
-                <button class="canvas-control-btn" id="position-mode-btn" type="button" aria-pressed="false" disabled>
+                <button class="canvas-control-btn" id="position-mode-btn" type="button" aria-pressed="false" title="局部调图" disabled>
                     <span aria-hidden="true">✥</span><span>局部调图</span>
                 </button>
-                <button class="canvas-control-btn" id="flow-play-btn" type="button" aria-pressed="false" disabled>
+                <button class="canvas-control-btn" id="flow-play-btn" type="button" aria-pressed="false" title="流动播放" disabled>
                     <span aria-hidden="true" id="flow-play-icon">▶</span><span id="flow-play-label">流动播放</span>
                 </button>
                 <label class="flow-speed-field" for="playback-mode">
@@ -349,6 +345,10 @@
         <div class="canvas-stage" id="canvas-stage">
             <canvas id="wall-canvas" tabindex="0" aria-label="照片墙编辑画布，点击照片可查看原图"></canvas>
             <div class="playback-origin-marker" id="playback-origin-marker" aria-hidden="true"></div>
+            <div class="canvas-status-wrap">
+                <span class="status-dot"></span>
+                <span id="canvas-status">所有素材仅在本地处理</span>
+            </div>
             <div class="empty-state" id="empty-state">
                 <div class="empty-visual" aria-hidden="true">
                     <svg viewBox="0 0 72 72"><rect x="9" y="14" width="54" height="44" rx="8"/><circle cx="27" cy="30" r="5"/><path d="M14 52l15-14 10 9 7-6 12 11"/></svg>

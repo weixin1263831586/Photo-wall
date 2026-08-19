@@ -7,6 +7,9 @@ Default permissions for the plugin
 - `allow-capabilities`
 - `allow-transcode`
 - `allow-open-file`
+- `allow-extract-poster`
+- `allow-transcode-frames`
+- `allow-cancel-export`
 
 ## Permission Table
 
@@ -16,6 +19,32 @@ Default permissions for the plugin
 <th>Description</th>
 </tr>
 
+
+<tr>
+<td>
+
+`native-video:allow-cancel-export`
+
+</td>
+<td>
+
+Enables the cancel_export command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`native-video:deny-cancel-export`
+
+</td>
+<td>
+
+Denies the cancel_export command without any pre-configured scope.
+
+</td>
+</tr>
 
 <tr>
 <td>
@@ -39,6 +68,32 @@ Enables the capabilities command without any pre-configured scope.
 <td>
 
 Denies the capabilities command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`native-video:allow-extract-poster`
+
+</td>
+<td>
+
+Enables the extract_poster command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`native-video:deny-extract-poster`
+
+</td>
+<td>
+
+Denies the extract_poster command without any pre-configured scope.
 
 </td>
 </tr>
@@ -91,6 +146,32 @@ Enables the transcode command without any pre-configured scope.
 <td>
 
 Denies the transcode command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`native-video:allow-transcode-frames`
+
+</td>
+<td>
+
+Enables the transcode_frames command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`native-video:deny-transcode-frames`
+
+</td>
+<td>
+
+Denies the transcode_frames command without any pre-configured scope.
 
 </td>
 </tr>

@@ -52,6 +52,29 @@ impl<R: Runtime> NativeVideo<R> {
             "open_file is only available on Android and iOS".into(),
         ))
     }
+
+    pub fn extract_poster(&self, payload: ExtractPosterRequest) -> crate::Result<ExtractPosterResponse> {
+        let _ = payload;
+        Err(crate::Error::Message(
+            "extract_poster is only available on Android and iOS".into(),
+        ))
+    }
+
+    pub fn transcode_frames(
+        &self,
+        payload: TranscodeFramesRequest,
+    ) -> crate::Result<TranscodeResponse> {
+        let _ = payload;
+        Err(crate::Error::Message(
+            "transcode_frames is only available on Android and iOS".into(),
+        ))
+    }
+
+    pub fn cancel_export(&self) -> crate::Result<()> {
+        Err(crate::Error::Message(
+            "cancel_export is only available on Android and iOS".into(),
+        ))
+    }
 }
 
 #[cfg(windows)]

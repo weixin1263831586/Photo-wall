@@ -2,34 +2,57 @@ function clamp01(value) {
     return Math.max(0, Math.min(1, Number(value) || 0));
 }
 
+function normalizeBox(box, width, height) {
+    if (!box || !width || !height) return null;
+    var x = clamp01(Number(box.x) / width);
+    var y = clamp01(Number(box.y) / height);
+    var right = clamp01((Number(box.x) + Number(box.width)) / width);
+    var bottom = clamp01((Number(box.y) + Number(box.height)) / height);
+    var normalizedWidth = Math.max(0, right - x);
+    var normalizedHeight = Math.max(0, bottom - y);
+    if (!normalizedWidth || !normalizedHeight) return null;
+    return { x: x, y: y, width: normalizedWidth, height: normalizedHeight };
+}
+
 export function dominantFaceFocus(faces, width, height) {
-    if (!Array.isArray(faces) || !faces.length || !width || !height) return null;
+    width = Number(width) || 0;
+    height = Number(height) || 0;
+    if (!Array.isArray(faces) || !faces.length || width <= 0 || height <= 0) return null;
     var normalizedFaces = faces.map(function (face) {
         var box = face && face.boundingBox;
-        var area = box ? Math.max(0, Number(box.width) || 0) * Math.max(0, Number(box.height) || 0) : 0;
-        if (!box || !area) return null;
+        var normalized = normalizeBox(box, width, height);
+        if (!box || !normalized) return null;
+        var area = normalized.width * width * normalized.height * height;
         return {
             box: box,
             area: area,
-            normalized: {
-                x: clamp01(Number(box.x) / width),
-                y: clamp01(Number(box.y) / height),
-                width: clamp01(Number(box.width) / width),
-                height: clamp01(Number(box.height) / height)
-            }
+            normalized: normalized
         };
     }).filter(Boolean);
+    if (!normalizedFaces.length) return null;
+
     var dominant = normalizedFaces.reduce(function (best, face) {
         return !best || face.area > best.area ? face : best;
     }, null);
     if (!dominant || !dominant.box || !dominant.area) return null;
+
     /* Normalised face box [0,1] for downstream auto-crop optimisation. */
     var faceBox = dominant.normalized;
     var minX = Math.min.apply(null, normalizedFaces.map(function (face) { return face.normalized.x; }));
     var minY = Math.min.apply(null, normalizedFaces.map(function (face) { return face.normalized.y; }));
-    var maxX = Math.max.apply(null, normalizedFaces.map(function (face) { return face.normalized.x + face.normalized.width; }));
-    var maxY = Math.max.apply(null, normalizedFaces.map(function (face) { return face.normalized.y + face.normalized.height; }));
-    var faceGroupBox = { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+    var maxX = Math.max.apply(null, normalizedFaces.map(function (face) {
+        return face.normalized.x + face.normalized.width;
+    }));
+    var maxY = Math.max.apply(null, normalizedFaces.map(function (face) {
+        return face.normalized.y + face.normalized.height;
+    }));
+    var faceGroupBox = {
+        x: clamp01(minX),
+        y: clamp01(minY),
+        width: Math.max(0, Math.min(1, maxX) - clamp01(minX)),
+        height: Math.max(0, Math.min(1, maxY) - clamp01(minY))
+    };
+
     /* Medium/large tiles frame the whole group instead of only the largest face. */
     var expandX = faceGroupBox.width * 0.18;
     var personX = clamp01(faceGroupBox.x - expandX);

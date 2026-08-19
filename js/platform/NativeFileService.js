@@ -1,3 +1,5 @@
+import { writeBlobToFile } from './BlobFileWriter.js';
+
 var tauriRuntime = typeof window !== 'undefined' && !!window.__TAURI_INTERNALS__;
 var PLAY_CACHE_PREFIX = 'play-';
 var PLAY_CACHE_MAX_AGE_MS = 24 * 60 * 60 * 1000; /* 24 hours */
@@ -81,7 +83,7 @@ export async function openBlobWithSystem(blob, fileName) {
         var cacheDirectory = await pathAPI.appCacheDir();
         var cacheName = 'play-' + Date.now().toString(36) + '-' + fileName;
         var cachePath = await pathAPI.join(cacheDirectory, cacheName);
-        await filesystem.writeFile(cachePath, new Uint8Array(await blob.arrayBuffer()));
+        await writeBlobToFile(blob, filesystem, cachePath);
         /* Android 7+ StrictMode blocks ACTION_VIEW on plain file:// URIs, so
            the cached file is exposed through the app FileProvider instead.
            The opener plugin's file:// path silently fails on device. */
@@ -120,7 +122,7 @@ export async function saveBlob(blob, options) {
             filters: options.filters || []
         });
         if (!path) return { saved: false, cancelled: true, native: true };
-        await filesystem.writeFile(path, new Uint8Array(await blob.arrayBuffer()));
+        await writeBlobToFile(blob, filesystem, path);
         return { saved: true, native: true, path: path };
     } catch (error) {
         console.warn('原生保存失败，已回退浏览器下载。', error);

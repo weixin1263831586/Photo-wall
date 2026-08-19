@@ -72,6 +72,9 @@ import { drawOverlays, getOverlayAt } from './overlay/OverlayRenderer.js';
         this._composeRevision = -1;
         this._composePromise = null;
         this._hasComposedLayer = false;
+        this._composeRetryTimer = null;
+        this._composeRetryCount = 0;
+        this._maxComposeRetries = 2;
         this._transitionPendingDuration = 0;
         this._transitionProgress = 1;
         this._transitionRAF = null;
@@ -85,6 +88,11 @@ import { drawOverlays, getOverlayAt } from './overlay/OverlayRenderer.js';
         this._cachedLayerRevision = -1;
         this._composeRevision = -1;
         if (this._autoCropCache) this._autoCropCache.clear();
+        if (this._composeRetryTimer) {
+            clearTimeout(this._composeRetryTimer);
+            this._composeRetryTimer = null;
+        }
+        this._composeRetryCount = 0;
     };
 
     PhotoWall.prototype.resize = function () {
@@ -902,14 +910,15 @@ import { drawOverlays, getOverlayAt } from './overlay/OverlayRenderer.js';
             var playbackZoom = frame.photoZooms ? Number(frame.photoZooms[ci]) || 1 : 1;
             /* Build the effective item in a reusable scratch object to avoid per-frame GC. */
             Object.assign(scratch, item);
-            if (playbackX || playbackY || playbackZoom !== 1) {
-                scratch.x = item.x + playbackX;
-                scratch.y = item.y + playbackY;
-                scratch.playbackZoom = playbackZoom;
-            }
+            /* Always overwrite transient fields. Object.assign() does not
+               remove playbackZoom left by the previous scratch item. */
+            scratch.x = item.x + playbackX;
+            scratch.y = item.y + playbackY;
+            scratch.playbackZoom = playbackZoom;
             var previousIndex = frame.previousIndices && Number(frame.previousIndices[ci]);
             var nextIndex = frame.photoIndices && Number(frame.photoIndices[ci]);
-            var progress = Math.max(0, Math.min(1, Number(frame.transitionProgress) || 0));
+            var progressValue = frame.transitionProgresses ? frame.transitionProgresses[ci] : frame.transitionProgress;
+            var progress = Math.max(0, Math.min(1, Number(progressValue) || 0));
             if (frame.mode === 'shuffle' && Number.isInteger(previousIndex) && Number.isInteger(nextIndex) && previousIndex !== nextIndex) {
                 var previousPhoto = this.photos[previousIndex];
                 var nextPhoto = this.photos[nextIndex];
@@ -965,6 +974,116 @@ import { drawOverlays, getOverlayAt } from './overlay/OverlayRenderer.js';
         }
     };
 
+    /**
+     * Async export renderer. The live renderer intentionally stays synchronous,
+     * but export must not assume every photo remains resident in the bounded
+     * bitmap LRU. Resolve each source immediately before drawing it so a large
+     * wall cannot export blank cells merely because an older bitmap was evicted.
+     */
+    PhotoWall.prototype.renderPlaybackFrameAsync = async function (ctx, frame, options) {
+        if (!this.assetManager) {
+            this.renderPlaybackFrame(ctx, frame, options);
+            return;
+        }
+        if (!this.maskData || !this.layout.length) return;
+        options = options || {};
+        frame = frame || { mode: 'reveal' };
+        var sourceFrame = options.sourceFrame || {
+            x: 0, y: 0,
+            width: Math.max(1, this.cssWidth),
+            height: Math.max(1, this.cssHeight)
+        };
+        var outputWidth = ctx.canvas.width;
+        var outputHeight = ctx.canvas.height;
+        var scaleX = outputWidth / Math.max(1, sourceFrame.width);
+        var scaleY = outputHeight / Math.max(1, sourceFrame.height);
+        var self = this;
+        var scratch = this._scratchAsyncItem || (this._scratchAsyncItem = {});
+
+        async function drawResolved(photo, item, photoIndex, alpha, cellScale) {
+            if (!photo || alpha <= 0) return;
+            var source = null;
+            try {
+                source = await self.assetManager.getBitmap(photo, 'working');
+            } catch (workingError) {
+                try {
+                    source = await self.assetManager.getBitmap(photo, 'thumbnail');
+                } catch (_) {
+                    source = photo.img;
+                }
+            }
+            if (!source) return;
+            Object.assign(scratch, item, {
+                photo: photo,
+                photoIndex: photoIndex,
+                photoId: photo.id
+            });
+            ctx.save();
+            ctx.globalAlpha = alpha;
+            self._drawPhoto(ctx, scratch, false, cellScale, false, source);
+            ctx.restore();
+        }
+
+        ctx.save();
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.clearRect(0, 0, outputWidth, outputHeight);
+        ctx.setTransform(scaleX, 0, 0, scaleY, -sourceFrame.x * scaleX, -sourceFrame.y * scaleY);
+        ctx.globalCompositeOperation = 'source-over';
+        ctx.globalAlpha = 1;
+        if (this._renderOrder.length !== this.layout.length) this._refreshOrderCache();
+
+        for (var oi = 0; oi < this._renderOrder.length; oi++) {
+            var ci = this._renderOrder[oi];
+            var alpha = frame.opacities ? Math.max(0, Math.min(1, frame.opacities[ci] || 0)) : 1;
+            if (alpha <= 0) continue;
+            var cellScale = frame.scales ? Math.max(0.5, Math.min(1, frame.scales[ci] || 1)) : 1;
+            var item = this.layout[ci];
+            var playbackX = frame.offsetsX ? Number(frame.offsetsX[ci]) || 0 : 0;
+            var playbackY = frame.offsetsY ? Number(frame.offsetsY[ci]) || 0 : 0;
+            var playbackZoom = frame.photoZooms ? Number(frame.photoZooms[ci]) || 1 : 1;
+            var effectiveItem = Object.assign({}, item, {
+                x: item.x + playbackX,
+                y: item.y + playbackY,
+                playbackZoom: playbackZoom
+            });
+            var previousIndex = frame.previousIndices && Number(frame.previousIndices[ci]);
+            var nextIndex = frame.photoIndices && Number(frame.photoIndices[ci]);
+            var progressValue = frame.transitionProgresses ? frame.transitionProgresses[ci] : frame.transitionProgress;
+            var progress = Math.max(0, Math.min(1, Number(progressValue) || 0));
+
+            if (frame.mode === 'shuffle' && Number.isInteger(previousIndex) &&
+                Number.isInteger(nextIndex) && previousIndex !== nextIndex) {
+                if (progress < 1) {
+                    await drawResolved(this.photos[previousIndex], effectiveItem, previousIndex,
+                        alpha * (1 - progress), cellScale);
+                }
+                if (progress > 0) {
+                    await drawResolved(this.photos[nextIndex], effectiveItem, nextIndex,
+                        alpha * progress, cellScale);
+                }
+            } else {
+                var assignedIndex = Number.isInteger(nextIndex) ? nextIndex : item.photoIndex;
+                var assignedPhoto = Number.isInteger(assignedIndex) ? this.photos[assignedIndex] : item.photo;
+                await drawResolved(assignedPhoto, effectiveItem, assignedIndex, alpha, cellScale);
+            }
+        }
+
+        ctx.globalCompositeOperation = 'destination-in';
+        ctx.drawImage(this.maskData.maskCanvas, 0, 0, this.cssWidth, this.cssHeight);
+        ctx.globalCompositeOperation = 'source-over';
+        drawOverlays(ctx, this.overlays, this.cssWidth, this.cssHeight, { bounds: this.getExportBounds() });
+        ctx.restore();
+
+        if (options.background && options.background !== 'transparent') {
+            ctx.save();
+            ctx.setTransform(1, 0, 0, 1, 0, 0);
+            ctx.globalCompositeOperation = 'destination-over';
+            ctx.fillStyle = options.background;
+            ctx.fillRect(0, 0, outputWidth, outputHeight);
+            ctx.restore();
+        }
+    };
+
     PhotoWall.prototype._composeLayerAsync = function (revision) {
         if (!this.assetManager || this._composeRevision === revision) return this._composePromise;
         this._composeRevision = revision;
@@ -981,6 +1100,7 @@ import { drawOverlays, getOverlayAt } from './overlay/OverlayRenderer.js';
             context.clearRect(0, 0, w, h);
             context.globalCompositeOperation = 'source-over';
             if (self._renderOrder.length !== self.layout.length) self._refreshOrderCache();
+            var missingSources = 0;
             for (var orderIndex = 0; orderIndex < self._renderOrder.length; orderIndex++) {
                 if (revision !== self._renderRevision) return false;
                 var item = self.layout[self._renderOrder[orderIndex]];
@@ -989,9 +1109,14 @@ import { drawOverlays, getOverlayAt } from './overlay/OverlayRenderer.js';
                     source = await self.assetManager.getBitmap(item.photo, 'working');
                 } catch (decodeError) {
                     console.warn('照片工作图解码失败:', decodeError);
-                    source = item.photo && item.photo.img;
+                    try {
+                        source = await self.assetManager.getBitmap(item.photo, 'thumbnail');
+                    } catch (_) {
+                        source = item.photo && item.photo.img;
+                    }
                 }
                 if (revision !== self._renderRevision) return false;
+                if (!source) missingSources++;
                 if (source) {
                     try {
                         self._drawPhoto(context, item, false, 1, false, source);
@@ -1018,6 +1143,19 @@ import { drawOverlays, getOverlayAt } from './overlay/OverlayRenderer.js';
             self.photos.forEach(function (photo) { self.assetManager.releaseElement(photo); });
             self._startLayerTransition();
             self.render();
+            if (missingSources && self._composeRetryCount < self._maxComposeRetries) {
+                self._composeRetryCount++;
+                var retryDelay = 180 * self._composeRetryCount;
+                self._composeRetryTimer = setTimeout(function () {
+                    self._composeRetryTimer = null;
+                    if (revision !== self._renderRevision) return;
+                    self._composeRevision = -1;
+                    self._cachedLayerRevision = -1;
+                    self.render();
+                }, retryDelay);
+            } else if (!missingSources) {
+                self._composeRetryCount = 0;
+            }
             return true;
         }).finally(function () {
             if (self._composeRevision === revision) self._composePromise = null;
@@ -1032,7 +1170,10 @@ import { drawOverlays, getOverlayAt } from './overlay/OverlayRenderer.js';
         var cropWidth = width, cropHeight = height;
         width *= scale;
         height *= scale;
-        var img = imageOverride || (this.assetManager && this.assetManager.peekBitmap(item.photo, 'working')) || item.photo.img;
+        var img = imageOverride ||
+            (this.assetManager && this.assetManager.peekBitmap(item.photo, 'working')) ||
+            (this.assetManager && this.assetManager.peekBitmap(item.photo, 'thumbnail')) ||
+            item.photo.img;
         if (!img) return;
         var x = item.x, y = item.y;
         ctx.save();

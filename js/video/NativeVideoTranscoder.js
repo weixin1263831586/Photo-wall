@@ -1,4 +1,5 @@
 import { isNativeApp } from '../platform/NativeFileService.js';
+import { writeBlobToFile, readFileAsBlob } from '../platform/BlobFileWriter.js';
 
 function extensionFor(blob, fallback) {
     var type = String(blob && blob.type || '').toLowerCase();
@@ -64,13 +65,13 @@ export async function transcodeVideoForPlatform(blob, options) {
         var jobId = Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
         inputPath = await pathAPI.join(cacheDirectory, 'native-video-' + jobId + '.' + extensionFor(blob, 'webm'));
         outputPath = await pathAPI.join(cacheDirectory, 'native-video-' + jobId + '.mp4');
-        await filesystem.writeFile(inputPath, new Uint8Array(await blob.arrayBuffer()));
+        await writeBlobToFile(blob, filesystem, inputPath);
 
         var music = options.backgroundMusic;
         var musicBlob = music && (music.originalBlob || music.blob);
         if (musicBlob instanceof Blob) {
             audioPath = await pathAPI.join(cacheDirectory, 'native-audio-' + jobId + '.' + extensionFor(musicBlob, 'wav'));
-            await filesystem.writeFile(audioPath, new Uint8Array(await musicBlob.arrayBuffer()));
+            await writeBlobToFile(musicBlob, filesystem, audioPath);
         }
         if (options.onStatus) {
             options.onStatus({ phase: 'native', message: '正在使用' + capabilities.encoder + '编码…' });
@@ -101,9 +102,9 @@ export async function transcodeVideoForPlatform(blob, options) {
                     timeoutId = setTimeout(function () { reject(new Error('原生视频编码超时')); }, 300000);
                 })
             ]);
-            var bytes = await filesystem.readFile(result.outputPath || outputPath);
-            if (!bytes || bytes.byteLength < 512) throw new Error('原生编码器未生成有效视频');
-            return new Blob([bytes], { type: 'video/mp4' });
+            var exportBlob = await readFileAsBlob(filesystem, result.outputPath || outputPath, 'video/mp4');
+            if (!exportBlob || exportBlob.size < 512) throw new Error('原生编码器未生成有效视频');
+            return exportBlob;
         } finally {
             clearTimeout(timeoutId);
         }

@@ -1,3 +1,10 @@
 [default]
 description = "Default permissions for the plugin"
-permissions = ["allow-capabilities", "allow-transcode", "allow-open-file"]
+permissions = [
+    "allow-capabilities",
+    "allow-transcode",
+    "allow-open-file",
+    "allow-extract-poster",
+    "allow-transcode-frames",
+    "allow-cancel-export"
+]

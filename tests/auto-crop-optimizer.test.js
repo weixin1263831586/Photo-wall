@@ -50,6 +50,14 @@ test('derivePersonBox expands downward and outward from face', function () {
     assert.ok(pb.y === fb.y, 'person box starts at face top');
 });
 
+test('derivePersonBox keeps the expanded body inside normalized image bounds', function () {
+    var pb = derivePersonBox({ x: 0.82, y: 0.7, width: 0.18, height: 0.2 });
+    assert.ok(pb);
+    assert.ok(pb.x >= 0 && pb.y >= 0);
+    assert.ok(pb.x + pb.width <= 1 + Number.EPSILON);
+    assert.ok(pb.y + pb.height <= 1 + Number.EPSILON);
+});
+
 test('derivePersonBox returns null for invalid input', function () {
     assert.equal(derivePersonBox(null), null);
     assert.equal(derivePersonBox({ x: 0.9, y: 0.9, width: 0, height: 0 }), null);
@@ -81,9 +89,6 @@ test('no faceBox returns 0.5/0.5 for interior cell', function () {
 /* ------------------------------------------------------------------ */
 
 test('face in photo, right-half-visible cell → optimizer picks subject strategy', function () {
-    // The cell is 100×100, mask only visible on right half.
-    // Face is centered in the photo. The optimizer should use subject-aware
-    // placement (not fallback) and produce a positive score.
     var mask = rightHalfMask(200, 200);
     var cell = {
         isBoundary: true,
@@ -114,7 +119,6 @@ test('face centered in photo, full mask → target near center', function () {
         faceBox: { x: 0.4, y: 0.3, width: 0.2, height: 0.3 }
     };
     var result = computeOptimalPlacement(photo, cell, fullMask(200, 200), { width: 400, height: 400 });
-    // Interior cell — should still produce a valid placement
     assert.ok(result.targetX >= 0 && result.targetX <= 1);
     assert.ok(result.targetY >= 0 && result.targetY <= 1);
 });
@@ -148,7 +152,6 @@ test('zoom is computed for boundary cells', function () {
         faceBox: { x: 0.3, y: 0.3, width: 0.3, height: 0.3 }
     };
     var result = computeOptimalPlacement(photo, cell, fullMask(200, 200), { width: 400, height: 400 });
-    // Expected: 1.12 + max(0, 0.75 - 0.4) * 0.4 = 1.12 + 0.14 = 1.26
     assert.ok(result.zoom > 1.1 && result.zoom < 1.5);
 });
 

@@ -1,9 +1,33 @@
 const MAX_BROWSER_TRANSCODE_BYTES = 120 * 1024 * 1024;
+/* ffmpeg.wasm 0.12.x has no worker.onerror hook: when the wasm engine dies
+   (OOM crash) or stalls in a phase without progress callbacks, exec() never
+   settles and the transcode queue blocks forever. This watchdog converts the
+   silent hang into a normal error so the engine resets and the UI recovers. */
+const STALL_TIMEOUT_MS = 90000;
 
 var ffmpegPromise = null;
 var transcodeQueue = Promise.resolve();
 var resultCache = new WeakMap();
 var progressListener = function () {};
+var lastEngineActivityAt = 0;
+
+function execWithStallWatchdog(ffmpeg, args, timeout, label) {
+    lastEngineActivityAt = Date.now();
+    var pending = ffmpeg.exec(args, timeout);
+    /* If the watchdog fires first, terminate() later force-rejects the still
+       pending exec; mark it handled so it never surfaces as an
+       unhandledrejection crash report. */
+    pending.catch(function () {});
+    var timer;
+    var guard = new Promise(function (_, reject) {
+        timer = setInterval(function () {
+            if (Date.now() - lastEngineActivityAt >= STALL_TIMEOUT_MS) {
+                reject(new Error(label + '：本地转码引擎已停止响应，已自动重置。请重试，或改用 WebM 格式 / 降低视频尺寸与时长'));
+            }
+        }, 5000);
+    });
+    return Promise.race([pending, guard]).finally(function () { clearInterval(timer); });
+}
 
 function extensionFor(blob, name) {
     var match = String(name || '').toLowerCase().match(/\.([a-z0-9]{2,5})$/);
@@ -47,7 +71,8 @@ async function loadFFmpeg(onStatus) {
             import('@ffmpeg/ffmpeg/worker?url')
         ]).then(async function (modules) {
             var ffmpeg = new modules[0].FFmpeg();
-            ffmpeg.on('progress', function (event) { progressListener(event); });
+            ffmpeg.on('progress', function (event) { lastEngineActivityAt = Date.now(); progressListener(event); });
+            ffmpeg.on('log', function () { lastEngineActivityAt = Date.now(); });
             if (onStatus) onStatus({ phase: 'loading', message: '首次加载本地视频引擎（约 31 MB）…' });
             var timeout;
             try {
@@ -111,10 +136,10 @@ async function runTranscode(blob, options) {
             var musicDuration = Math.max(0, Number(music.duration) || 0);
             var musicStart = clamp(music.startTime, 0, musicDuration, 0);
             var musicEnd = clamp(music.endTime, Math.min(musicDuration, musicStart + 0.05), musicDuration, musicDuration);
-            var trimCode = await ffmpeg.exec([
+            var trimCode = await execWithStallWatchdog(ffmpeg, [
                 '-ss', musicStart.toFixed(3), '-to', musicEnd.toFixed(3), '-i', audioName,
                 '-vn', '-c:a', 'pcm_s16le', segmentName
-            ], 60000);
+            ], 60000, '背景音乐选段');
             if (trimCode !== 0) throw new Error('背景音乐选段失败（代码 ' + trimCode + '）');
             if (music.loop !== false) args.push('-stream_loop', '-1');
             args.push('-i', segmentName);
@@ -144,7 +169,7 @@ async function runTranscode(blob, options) {
                 '-movflags', '+faststart', outputName
             );
         }
-        var exitCode = await ffmpeg.exec(args, 180000);
+        var exitCode = await execWithStallWatchdog(ffmpeg, args, 180000, '视频转码');
         if (exitCode !== 0) throw new Error('视频转码失败（代码 ' + exitCode + '）');
         var output = await ffmpeg.readFile(outputName);
         if (!(output instanceof Uint8Array) || !output.byteLength) throw new Error('视频转码没有生成有效文件');

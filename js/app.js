@@ -29,6 +29,7 @@ import {
     openProjectContainer
 } from './persistence/ProjectContainer.js';
 import { isNativeApp, openBlobWithSystem, saveBlob, cleanupPlayCache } from './platform/NativeFileService.js';
+import { isAndroidNativeApp, transcodeVideoForAndroidPlayback } from './platform/AndroidMediaBridge.js';
 import { checkAndInstallUpdate, installCrashCapture } from './platform/RuntimeServices.js';
 import { createDeviceProfile, getImportDimension } from './platform/DeviceProfile.js';
 import {
@@ -130,6 +131,7 @@ import {
         app.deviceProfile = createDeviceProfile({
             viewportWidth: window.innerWidth,
             coarsePointer: window.matchMedia('(pointer: coarse)').matches,
+            mobile: isAndroidNativeApp(),
             deviceMemory: navigator.deviceMemory,
             hardwareConcurrency: navigator.hardwareConcurrency
         });
@@ -139,6 +141,8 @@ import {
             thumbnailDimension: app.deviceProfile.thumbnailDimension,
             maxWorkingEntries: app.deviceProfile.maxWorkingBitmaps,
             maxWorkingPixels: app.deviceProfile.maxWorkingBitmapPixels,
+            maxThumbnailEntries: Math.min(app.maxPhotos, app.deviceProfile.recommendedPhotoCount * 2),
+            maxThumbnailPixels: app.deviceProfile.mobile ? 32000000 : 80000000,
             maxOriginalEntries: app.deviceProfile.maxOriginalBitmaps,
             maxOriginalPixels: app.deviceProfile.maxOriginalBitmapPixels
         });
@@ -162,6 +166,8 @@ import {
         });
         app.autosave = createProjectAutosave({
             delay: app.deviceProfile.mobile ? 2500 : 1500,
+            backupLimit: app.deviceProfile.mobile ? 2 : 5,
+            maxBackupBytes: app.deviceProfile.mobile ? 256 * 1024 * 1024 : 1024 * 1024 * 1024,
             capture: function () { return app.captureAutosaveSnapshot(); },
             onError: function (error) { console.warn('自动保存失败:', error); }
         });
@@ -221,17 +227,19 @@ import {
          * leaving the canvas at its 300×150 default. A ResizeObserver plus a
          * deferred fallback guarantees a resize once layout is ready. */
         var stage = document.getElementById('canvas-stage');
-        app._canvasResizeObserver = new ResizeObserver(function () {
-            clearTimeout(app.resizeTimer);
-            app.resizeTimer = setTimeout(function () {
-                /* A rebuild during playback would leave the running timeline
-                   driving a brand-new layout (mismatched cell indices). */
-                if (app.flowPlaying || app.revealTimeline) app.stopAllPlayback(true);
-                app.wall.resize();
-                app.updateCustomOriginMarker();
-            }, 80);
-        });
-        app._canvasResizeObserver.observe(stage);
+        if (typeof ResizeObserver === 'function') {
+            app._canvasResizeObserver = new ResizeObserver(function () {
+                clearTimeout(app.resizeTimer);
+                app.resizeTimer = setTimeout(function () {
+                    /* A rebuild during playback would leave the running timeline
+                       driving a brand-new layout (mismatched cell indices). */
+                    if (app.flowPlaying || app.revealTimeline) app.stopAllPlayback(true);
+                    app.wall.resize();
+                    app.updateCustomOriginMarker();
+                }, 80);
+            });
+            app._canvasResizeObserver.observe(stage);
+        }
         requestAnimationFrame(function () { app.wall.resize(); });
         setTimeout(function () {
             if (!app.wall.cssWidth || app.wall.cssWidth <= 100) {
@@ -1965,8 +1973,10 @@ import {
             }
             app.autosaveRestoring = true;
             app.autosave.suspend();
+            var skipped = Number(snapshot.skippedPhotoCount) || 0;
             return app.restoreProject(snapshot.project, {
-                successMessage: '已从自动保存恢复 · ' + snapshot.project.photos.length + ' 张照片'
+                successMessage: '已从自动保存恢复 · ' + snapshot.project.photos.length + ' 个素材' +
+                    (skipped ? ' · 跳过 ' + skipped + ' 个损坏项' : '')
             }).finally(function () {
                 app.autosaveRestoring = false;
                 app.autosave.resume();
@@ -2573,12 +2583,13 @@ import {
      */
     app._playbackPreloaderToken = 0;
 
-    app.startPlaybackBitmapPreload = function (layout) {
+    app.startPlaybackBitmapPreload = function (layout, preferredOrder) {
         var manager = app.assetManager;
         var wall = app.wall;
         if (!manager || !wall || !layout.length) return;
         if (wall._renderOrder.length !== layout.length) wall._refreshOrderCache();
-        var order = wall._renderOrder.slice();
+        var order = Array.isArray(preferredOrder) && preferredOrder.length === layout.length ?
+            preferredOrder.slice() : wall._renderOrder.slice();
         var token = ++app._playbackPreloaderToken;
         var cursor = 0;
         function next() {
@@ -2586,10 +2597,14 @@ import {
             var item = layout[order[cursor++]];
             var photo = item && item.photo;
             if (!photo) { next(); return; }
-            manager.getBitmap(photo, 'working').catch(function () {}).then(function () {
+            /* Thumbnails are intentionally retained in a much larger, low-pixel
+               cache. Warming full working images simply evicted earlier photos
+               before playback reached them on Android. */
+            manager.getBitmap(photo, 'thumbnail').catch(function () {}).then(function () {
                 if (token === app._playbackPreloaderToken) next();
             });
         }
+        next();
         next();
     };
 
@@ -2622,8 +2637,8 @@ import {
         }
         app.setPositionMode(false);
         app.stopAllPlayback(false);
-        app.startPlaybackBitmapPreload(app.wall.layout);
         app.revealTimeline = app.playbackController.createTimeline('reveal');
+        app.startPlaybackBitmapPreload(app.wall.layout, app.revealTimeline.orderedIndices);
         app.revealStartTime = performance.now();
         app.flowPlaying = true; /* reuse the flag for button state */
         app.updateFlowControls();
@@ -2665,8 +2680,8 @@ import {
         app.stopAllPlayback(false);
         app.flowSnapshot = app.captureState();
         app.flowCycleCount = 0;
-        app.startPlaybackBitmapPreload(app.wall.layout);
         app.revealTimeline = app.playbackController.createTimeline('shuffle', { cycles: 1 });
+        app.startPlaybackBitmapPreload(app.wall.layout, app.revealTimeline.orderedIndices);
         app.revealStartTime = performance.now();
         app.flowPlaying = true;
         app.updateFlowControls();
@@ -2686,7 +2701,7 @@ import {
             app.flowCycleCount++;
             app.revealTimeline = app.playbackController.createTimeline('shuffle', { cycles: 1 });
             app.revealStartTime = performance.now();
-            app.startPlaybackBitmapPreload(app.wall.layout);
+            app.startPlaybackBitmapPreload(app.wall.layout, app.revealTimeline.orderedIndices);
         }
         app.wall.setPlaybackFrame(app.revealTimeline.getFrame(performance.now() - app.revealStartTime));
         app.revealRAF = requestAnimationFrame(app.runFlowTimelineFrame);
@@ -2733,9 +2748,8 @@ import {
         if (playbackTransitionSelect) playbackTransitionSelect.disabled = !hasPhotos;
         if (playbackOrderSelect) {
             playbackOrderSelect.disabled = !hasPhotos;
-            /* Only show order selector for reveal mode. */
             var orderLabel = playbackOrderSelect.closest('.flow-speed-field');
-            if (orderLabel) orderLabel.style.display = app.playbackMode === 'reveal' ? '' : 'none';
+            if (orderLabel) orderLabel.style.display = hasPhotos ? '' : 'none';
         }
         if (playbackModeSelect) {
             var modeLabel = playbackModeSelect.closest('.flow-speed-field');
@@ -2967,7 +2981,7 @@ import {
         systemPlayer.hidden = true;
         browserPlayer.hidden = true;
         browserPlayer.disabled = false;
-        browserPlayer.textContent = '浏览器转码播放';
+        browserPlayer.textContent = isAndroidNativeApp() ? '转码后播放' : '浏览器转码播放';
         systemPlayer.textContent = isNativeApp() ? '使用系统播放器' : '下载原视频';
         if (app.lightboxObjectURL) URL.revokeObjectURL(app.lightboxObjectURL);
         if (app.lightboxTranscodedURL) URL.revokeObjectURL(app.lightboxTranscodedURL);
@@ -3013,7 +3027,7 @@ import {
             };
             video.onerror = function () {
                 if (app.photos[app.lightboxIndex] === photo) {
-                    info.textContent = photo.name + ' · 当前设备不支持此视频编码，可在浏览器内本地转码播放';
+                    info.textContent = photo.name + ' · 当前设备不支持此视频编码，可转码后在应用内播放';
                     browserPlayer.hidden = false;
                     systemPlayer.hidden = false;
                 }
@@ -3030,17 +3044,44 @@ import {
         var video = document.getElementById('lightbox-video');
         var token = ++app.lightboxTranscodeToken;
         button.disabled = true;
-        button.textContent = '正在加载视频引擎…';
-        import('./video/BrowserVideoTranscoder.js').then(function (module) {
-            return module.transcodeVideoForBrowser(source, {
-                name: photo.name,
-                onStatus: function (status) {
-                    if (token !== app.lightboxTranscodeToken) return;
-                    button.textContent = status.message || '正在本地转码…';
-                    info.textContent = photo.name + ' · 转码仅在当前设备内完成，原文件保持不变';
-                }
+        button.textContent = isAndroidNativeApp() ? '正在使用设备解码器…' : '正在加载视频引擎…';
+        var enginePromise = isAndroidNativeApp() ?
+            import('./platform/AndroidMediaBridge.js').then(function (module) {
+                /* ffmpeg.wasm regularly OOMs on Android WebView, so prefer the
+                   hardware-accelerated Media3 pipeline and fall back to the
+                   wasm engine only when the device encoder refuses the file. */
+                return module.transcodeVideoForAndroidPlayback(source, {
+                    name: photo.name,
+                    onStatus: function (status) {
+                        if (token !== app.lightboxTranscodeToken) return;
+                        button.textContent = status.message || '正在设备转码…';
+                        info.textContent = photo.name + ' · 转码仅在当前设备内完成，原文件保持不变';
+                    }
+                }).catch(function (nativeError) {
+                    console.warn('Android 设备转码失败，回退到浏览器引擎:', nativeError);
+                    button.textContent = '设备转码不可用，正在使用本地兼容引擎…';
+                    return import('./video/BrowserVideoTranscoder.js').then(function (browser) {
+                        return browser.transcodeVideoForBrowser(source, {
+                            name: photo.name,
+                            onStatus: function (status) {
+                                if (token !== app.lightboxTranscodeToken) return;
+                                button.textContent = status.message || '正在本地转码…';
+                            }
+                        });
+                    });
+                });
+            }) :
+            import('./video/BrowserVideoTranscoder.js').then(function (module) {
+                return module.transcodeVideoForBrowser(source, {
+                    name: photo.name,
+                    onStatus: function (status) {
+                        if (token !== app.lightboxTranscodeToken) return;
+                        button.textContent = status.message || '正在本地转码…';
+                        info.textContent = photo.name + ' · 转码仅在当前设备内完成，原文件保持不变';
+                    }
+                });
             });
-        }).then(function (playableBlob) {
+        enginePromise.then(function (playableBlob) {
             if (token !== app.lightboxTranscodeToken || app.photos[app.lightboxIndex] !== photo) return;
             if (app.lightboxTranscodedURL) URL.revokeObjectURL(app.lightboxTranscodedURL);
             app.lightboxTranscodedURL = URL.createObjectURL(playableBlob);
@@ -3060,7 +3101,7 @@ import {
             if (token !== app.lightboxTranscodeToken) return;
             console.error('浏览器视频转码失败:', error);
             button.disabled = false;
-            button.textContent = '重试浏览器转码';
+            button.textContent = '重试转码播放';
             info.textContent = photo.name + ' · ' + (error && error.message ? error.message : '本地转码失败');
             document.getElementById('lightbox-system-player').hidden = false;
         });
@@ -3069,6 +3110,20 @@ import {
     /* ------------------------------------------------------------------ *
      *  Export
      * ------------------------------------------------------------------ */
+
+    app.updateExportDialogCopy = function () {
+        var category = app.getCheckedValue('export-category', 'image');
+        var title = document.getElementById('export-title');
+        var subtitle = title && title.parentElement ? title.parentElement.querySelector('p') : null;
+        if (title) title.textContent = category === 'video' ? '导出视频' :
+            category === 'pdf' ? '导出 PDF' : '导出图片';
+        if (subtitle) subtitle.textContent = category === 'video' ?
+            (isAndroidNativeApp() ?
+                'Android 使用 MediaCodec 导出 H.264 MP4，可选择尺寸、顺序与转场' :
+                '选择视频尺寸、比例、播放顺序与转场后保存为 MP4 / WebM') :
+            category === 'pdf' ? '选择纸张、DPI、出血和裁切标记' :
+            '选择适合分享或打印的输出设置';
+    };
 
     app.openExportDialog = function () {
         if (app.wall.layout.length === 0) {
@@ -3082,6 +3137,7 @@ import {
         dialog.classList.add('active');
         dialog.setAttribute('aria-hidden', 'false');
         app.syncExportCategoryFields();
+        app.updateExportDialogCopy();
         app.updateExportOptions();
         setTimeout(function () {
             var nameInput = document.getElementById('export-name');
@@ -3150,11 +3206,25 @@ import {
             var pngRadio = document.querySelector('input[name="export-format"][value="png"]');
             if (pngRadio) pngRadio.checked = true;
         }
+        app.updateExportDialogCopy();
         app.updateExportOptions();
     };
 
     app.updateExportOptions = function () {
         var format = app.getCheckedValue('export-format', 'png');
+        if (isAndroidNativeApp()) {
+            var webmRadio = document.querySelector('input[name="export-format"][value="webm"]');
+            var mp4Radio = document.querySelector('input[name="export-format"][value="mp4"]');
+            if (webmRadio) {
+                webmRadio.disabled = true;
+                var webmOption = webmRadio.closest('label');
+                if (webmOption) webmOption.hidden = true;
+            }
+            if (format === 'webm') {
+                if (mp4Radio) mp4Radio.checked = true;
+                format = 'mp4';
+            }
+        }
         var transparentRadio = document.querySelector('input[name="export-background"][value="transparent"]');
         var transparentOption = document.getElementById('transparent-background-option');
         var isVideo = format === 'webm' || format === 'mp4';
@@ -3269,6 +3339,10 @@ import {
         }
         try {
             var format = app.getCheckedValue('export-format', 'png');
+            if (isAndroidNativeApp() && format === 'webm') {
+                format = 'mp4';
+                app.toast('Android 应用使用原生 H.264/MP4 导出');
+            }
             var scale = parseInt(app.getCheckedValue('export-scale', '2'), 10);
             var aspectRatio = app.getCheckedValue('export-aspect', 'auto');
             var background = app.getExportBackground();
@@ -3281,14 +3355,16 @@ import {
             var rawName = document.getElementById('export-name').value.trim() || '我的照片墙';
             var fileName = rawName.replace(/[<>:"/\\|?*\u0000-\u001F]/g, '-').replace(/[. ]+$/, '') || '我的照片墙';
             app.closeExportDialog();
-            app.showLoading(true, format === 'pdf' ? '正在生成印刷 PDF…' : '正在生成高清图片…');
+            var exportingVideo = format === 'webm' || format === 'mp4';
+            app.showLoading(true, format === 'pdf' ? '正在生成印刷 PDF…' :
+                exportingVideo ? '正在准备视频导出…' : '正在生成高清图片…');
 
             var outputPromise;
             var extension;
             var mime;
             if (format === 'webm' || format === 'mp4') {
                 /* ---- Video export ---- */
-                if (!pickVideoMimeType()) {
+                if (!isAndroidNativeApp() && !pickVideoMimeType(format)) {
                     app.showLoading(false);
                     app.toast('当前浏览器不支持视频录制');
                     return;
@@ -3313,13 +3389,13 @@ import {
                 /* Video export renders every frame synchronously; warm the
                    bitmap cache by render order so LRU-evicted photos don't
                    drop out as blank cells mid-recording. */
-                app.startPlaybackBitmapPreload(app.wall.layout);
+                app.startPlaybackBitmapPreload(app.wall.layout, videoTimeline.orderedIndices);
                 extension = format;
                 mime = format === 'mp4' ? 'video/mp4' : 'video/webm';
                 outputPromise = recordTimelineCanvas(app.wall, videoTimeline, {
                     width: videoDims.width,
                     height: videoDims.height,
-                    fps: 30,
+                    fps: isAndroidNativeApp() ? 15 : 30,
                     format: format,
                     scale: videoScale,
                     aspectRatio: videoAspect,
@@ -3378,7 +3454,9 @@ import {
 
             outputPromise.then(function (blob) {
                 return saveBlob(blob, {
-                    title: '导出照片墙图片',
+                    title: format === 'pdf' ? '导出照片墙 PDF' :
+                        (format === 'webm' || format === 'mp4') ? '导出照片墙视频' :
+                            '导出照片墙图片',
                     fileName: fileName + '.' + extension,
                     filters: [{ name: extension.toUpperCase() + (mime === 'application/pdf' ? ' 文档' : mime.startsWith('video/') ? ' 视频' : ' 图片'), extensions: [extension] }]
                 }).then(function (result) {
@@ -3392,7 +3470,9 @@ import {
                 });
             }).catch(function (error) {
                 app.showLoading(false);
-                app.toast('导出失败，请降低规格后重试');
+                var message = error && error.message ? String(error.message) : '';
+                app.toast(message ? '导出失败：' + message.slice(0, 80) :
+                    '导出失败，请降低规格后重试');
                 console.error(error);
             });
         } catch (err) {

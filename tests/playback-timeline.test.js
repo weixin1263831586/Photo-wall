@@ -41,6 +41,7 @@ test('shuffle timeline is deterministic and exposes crossfade assignments', func
     var start = first.getFrame(0);
     assert.deepEqual(start.previousIndices, [0, 1, 2]);
     assert.equal(start.transitionProgress, 0);
+    assert.deepEqual(Array.from(start.transitionProgresses), [0, 0, 0]);
 
     var transitioned = first.getFrame(400);
     assert.equal(transitioned.transitionProgress, 1);
@@ -49,6 +50,24 @@ test('shuffle timeline is deterministic and exposes crossfade assignments', func
     var end = first.getFrame(first.duration);
     assert.equal(end.transitionProgress, 1);
     assert.deepEqual(end.photoIndices, first.cycleStates[2]);
+});
+
+test('shuffle timeline staggers cell swaps using the selected playback order', function () {
+    var timeline = createTimeline(layout(), 'top-left', {
+        mode: 'shuffle',
+        canvasWidth: 100,
+        canvasHeight: 100,
+        seed: 9,
+        interval: 1200,
+        transition: 300,
+        stagger: 200,
+        cycles: 1
+    });
+    assert.equal(timeline.orderedIndices[0], 0);
+    var frame = timeline.getFrame(150);
+    assert.ok(frame.transitionProgresses[0] > 0, 'first ordered cell has started');
+    assert.equal(frame.transitionProgresses[1], 0);
+    assert.equal(frame.transitionProgresses[2], 0);
 });
 
 test('custom playback origin is honoured by reveal timeline', function () {

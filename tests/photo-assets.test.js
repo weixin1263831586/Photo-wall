@@ -88,3 +88,123 @@ test('asset manager falls back to a DOM image after bitmap decoding fails', asyn
     manager.destroy();
     assert.deepEqual(revoked, ['blob:fallback']);
 });
+
+function blankFrameDocument(sampleLuminance) {
+    var reads = 0;
+    var seeks = [];
+    var video = {
+        videoWidth: 640,
+        videoHeight: 360,
+        duration: 10,
+        currentTime: 0,
+        muted: true,
+        preload: '',
+        playsInline: true,
+        pause: function () {},
+        removeAttribute: function () {},
+        load: function () {
+            setTimeout(function () {
+                if (video.onloadedmetadata) video.onloadedmetadata();
+                if (video.onloadeddata) video.onloadeddata();
+            }, 0);
+        }
+    };
+    Object.defineProperty(video, 'currentTime', {
+        get: function () { return this._time || 0; },
+        set: function (value) {
+            this._time = value;
+            seeks.push(value);
+            var handler = this.onseeked;
+            if (handler) setTimeout(handler, 0);
+        }
+    });
+    var drawSizes = [];
+    function makeContext(canvas) {
+        return {
+            imageSmoothingEnabled: true,
+            imageSmoothingQuality: 'high',
+            fillStyle: '',
+            createLinearGradient: function () {
+                return { addColorStop: function () {} };
+            },
+            fillRect: function () {},
+            beginPath: function () {},
+            moveTo: function () {},
+            lineTo: function () {},
+            closePath: function () {},
+            fill: function () {},
+            fillText: function () {},
+            font: '',
+            textAlign: '',
+            drawImage: function (image, x, y, width, height) {
+                drawSizes.push(width + 'x' + height);
+            },
+            getImageData: function (x, y, width, height) {
+                reads++;
+                var luminance = sampleLuminance(reads);
+                var data = new Uint8ClampedArray(width * height * 4);
+                for (var i = 0; i < data.length; i += 4) {
+                    data[i] = luminance;
+                    data[i + 1] = luminance;
+                    data[i + 2] = luminance;
+                    data[i + 3] = 255;
+                }
+                return { data: data };
+            }
+        };
+    }
+    var document = {
+        createElement: function (tag) {
+            if (tag === 'video') return video;
+            var canvas = { width: 0, height: 0 };
+            canvas.getContext = function () { return makeContext(canvas); };
+            canvas.toBlob = function (callback, mime) {
+                setTimeout(function () {
+                    callback(new Blob(['frame'], { type: mime }));
+                }, 0);
+            };
+            return canvas;
+        }
+    };
+    return { document: document, video: video, seeks: seeks, drawSizes: drawSizes };
+}
+
+test('video import re-seeks to the middle when the captured poster frame is blank', async function () {
+    var env = blankFrameDocument(function (read) { return read === 1 ? 0 : 200; });
+    var manager = (await import('../js/image/PhotoAssetManager.js')).createPhotoAssetManager({
+        document: env.document,
+        URL: {
+            createObjectURL: function () { return 'blob:video'; },
+            revokeObjectURL: function () {}
+        }
+    });
+    var layers = await manager.createVideoLayers(new Blob(['mp4'], { type: 'video/mp4' }));
+
+    assert.equal(layers.mediaType, 'video');
+    assert.equal(layers.duration, 10);
+    assert.equal(layers.posterFallback, false);
+    assert.equal(layers.workingWidth, 640);
+    assert.equal(layers.workingBlob.type, 'image/jpeg');
+    /* loadVideoFrame seeks to 1s, the blank-frame recovery to the middle. */
+    assert.deepEqual(env.seeks, [1, 5]);
+    assert.deepEqual(env.drawSizes, ['48x27', '48x27', '640x360', '256x144']);
+    manager.destroy();
+});
+
+test('video import keeps a blank poster when re-seeking does not help', async function () {
+    var env = blankFrameDocument(function () { return 0; });
+    var manager = (await import('../js/image/PhotoAssetManager.js')).createPhotoAssetManager({
+        document: env.document,
+        URL: {
+            createObjectURL: function () { return 'blob:video'; },
+            revokeObjectURL: function () {}
+        }
+    });
+    var layers = await manager.createVideoLayers(new Blob(['mp4'], { type: 'video/mp4' }));
+
+    assert.equal(layers.mediaType, 'video');
+    assert.equal(layers.posterFallback, false);
+    assert.equal(layers.workingWidth, 640);
+    assert.deepEqual(env.seeks, [1, 5]);
+    manager.destroy();
+});
