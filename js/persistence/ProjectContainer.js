@@ -49,6 +49,10 @@ function extensionForMime(mime) {
     if (mime === 'video/webm') return 'webm';
     if (mime === 'video/quicktime') return 'mov';
     if (mime === 'video/x-m4v') return 'm4v';
+    if (mime === 'video/x-matroska') return 'mkv';
+    if (mime === 'video/x-msvideo') return 'avi';
+    if (mime === 'video/3gpp') return '3gp';
+    if (mime === 'video/mpeg') return 'mpeg';
     if (mime === 'audio/wav' || mime === 'audio/x-wav') return 'wav';
     if (mime === 'audio/mp4' || mime === 'audio/x-m4a') return 'm4a';
     if (mime === 'audio/aac') return 'aac';

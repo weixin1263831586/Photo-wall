@@ -16,6 +16,7 @@ import { createPlaybackController } from './controllers/PlaybackController.js';
 import { installMusicController } from './controllers/MusicController.js';
 import { PLAYBACK_ORDER_KEYS, PlaybackOrderLabels } from './playback/PlaybackOrder.js';
 import { recordTimelineCanvas, pickVideoMimeType } from './video/VideoRecorder.js';
+import { createWallVideoPlayer } from './video/WallVideoPlayer.js';
 import { resolveVideoExportDimensions } from './video/VideoExportPresets.js';
 import { normalizeBackgroundMusic } from './audio/BackgroundMusic.js';
 import { createPhotoAnalysisWorkerClient } from './image/PhotoAnalysisWorkerClient.js';
@@ -111,10 +112,14 @@ import {
         photoLoadConcurrency: 3,
         photoLoadTimeout: 30000,
         supportedImageTypes: ['image/jpeg', 'image/png', 'image/webp'],
-        supportedVideoTypes: ['video/mp4', 'video/webm', 'video/quicktime', 'video/x-m4v']
+        supportedVideoTypes: [
+            'video/mp4', 'video/webm', 'video/quicktime', 'video/x-m4v',
+            'video/x-matroska', 'video/x-msvideo', 'video/3gpp', 'video/mpeg'
+        ]
     };
 
     app._fileLoadToken = 0;
+    app.videoCompatibilityQueue = Promise.resolve();
 
     app.playbackController = createPlaybackController(app);
     installMusicController(app);
@@ -147,9 +152,15 @@ import {
             maxOriginalPixels: app.deviceProfile.maxOriginalBitmapPixels
         });
         app.templateLibrary = createTemplateLibrary();
+        app.videoPlayer = createWallVideoPlayer({
+            maxConcurrent: app.deviceProfile.mobile ? 4 : 10,
+            rotationInterval: app.deviceProfile.mobile ? 9000 : 12000,
+            onActivity: function () { if (app.wall) app.wall._ensureVideoLoop(); }
+        });
         app.wall = new PhotoWall(canvas, {
             maxDevicePixelRatio: app.deviceProfile.maxEditorDpr,
-            assetManager: app.assetManager
+            assetManager: app.assetManager,
+            videoPlayer: app.videoPlayer
         });
         document.documentElement.classList.toggle('mobile-device', app.deviceProfile.mobile);
         app.photoAnalyzerWorker = createPhotoAnalysisWorkerClient({
@@ -275,6 +286,7 @@ import {
             app.stopAllPlayback(false);
             if (app.autosave) app.autosave.saveNow();
             if (app.photoAnalyzerWorker) app.photoAnalyzerWorker.terminate();
+            if (app.videoPlayer) app.videoPlayer.destroy();
             if (app.assetManager) app.assetManager.destroy();
             if (app.detachCrashCapture) app.detachCrashCapture();
             app.releaseMusicAudio();
@@ -355,12 +367,22 @@ import {
         function openSidebar() {
             backdrop.hidden = false;
             document.querySelector('.app').classList.add('sidebar-open');
+            toggleBtn.setAttribute('aria-expanded', 'true');
+            if (!app.photos.length) {
+                requestAnimationFrame(function () {
+                    var sidebar = document.querySelector('.sidebar');
+                    if (sidebar) sidebar.scrollTo({ top: 0, behavior: 'smooth' });
+                });
+            }
         }
 
         function closeSidebar() {
             document.querySelector('.app').classList.remove('sidebar-open');
             backdrop.hidden = true;
+            toggleBtn.setAttribute('aria-expanded', 'false');
         }
+
+        app.closeMobileSidebar = closeSidebar;
 
         toggleBtn.addEventListener('click', function () {
             if (document.querySelector('.app').classList.contains('sidebar-open')) {
@@ -371,6 +393,26 @@ import {
         });
 
         backdrop.addEventListener('click', closeSidebar);
+        var closeButton = document.getElementById('mobile-sidebar-close');
+        if (closeButton) closeButton.addEventListener('click', closeSidebar);
+
+        document.querySelectorAll('.workflow-nav [data-workflow-target]').forEach(function (button) {
+            button.addEventListener('click', function () {
+                var target = document.getElementById(button.getAttribute('data-workflow-target'));
+                if (!target) return;
+                document.querySelectorAll('.workflow-nav [data-workflow-target]').forEach(function (item) {
+                    item.classList.toggle('active', item === button);
+                });
+                target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            });
+        });
+
+        document.addEventListener('keydown', function (event) {
+            if (event.key === 'Escape' && document.querySelector('.app').classList.contains('sidebar-open')) {
+                closeSidebar();
+                toggleBtn.focus();
+            }
+        });
 
         syncToggleVisibility();
         window.addEventListener('resize', syncToggleVisibility);
@@ -1659,13 +1701,17 @@ import {
     };
 
     app.isVideoFile = function (file) {
-        return Boolean(file) && (app.supportedVideoTypes.indexOf(file.type) >= 0 || /\.(mp4|webm|mov|m4v)$/i.test(file.name || ''));
+        return Boolean(file) && (app.supportedVideoTypes.indexOf(file.type) >= 0 || /\.(mp4|webm|mov|m4v|mkv|avi|3gp|mpeg|mpg)$/i.test(file.name || ''));
     };
 
     app.videoMimeForFile = function (file) {
         if (file && /^video\//i.test(file.type)) return file.type;
         var extension = ((file && file.name) || '').split('.').pop().toLowerCase();
-        return { mp4: 'video/mp4', webm: 'video/webm', mov: 'video/quicktime', m4v: 'video/x-m4v' }[extension] || 'video/mp4';
+        return {
+            mp4: 'video/mp4', webm: 'video/webm', mov: 'video/quicktime', m4v: 'video/x-m4v',
+            mkv: 'video/x-matroska', avi: 'video/x-msvideo', '3gp': 'video/3gpp',
+            mpeg: 'video/mpeg', mpg: 'video/mpeg'
+        }[extension] || 'video/mp4';
     };
 
     app.handleFiles = function (files) {
@@ -1677,7 +1723,7 @@ import {
         incoming.forEach(function (file) {
             var video = app.isVideoFile(file);
             var supportedType = app.supportedImageTypes.indexOf(file.type) >= 0 || video;
-            var supportedExtension = /\.(jpe?g|png|webp|mp4|webm|mov|m4v)$/i.test(file.name);
+            var supportedExtension = /\.(jpe?g|png|webp|mp4|webm|mov|m4v|mkv|avi|3gp|mpeg|mpg)$/i.test(file.name);
             if (!supportedType && !supportedExtension) return;
             if (file.size > (video ? app.maxVideoFileSize : app.maxFileSize)) { skippedLarge++; return; }
             var signature = [file.name, file.size, file.lastModified].join(':');
@@ -1692,7 +1738,7 @@ import {
             if (!remaining) app.toast('最多支持 ' + app.maxPhotos + ' 个素材');
             else if (skippedDuplicate) app.toast('这些素材已经添加过了');
             else if (skippedLarge) app.toast('照片不能超过 40 MB，视频不能超过 200 MB');
-            else app.toast('请选择 JPG、PNG、WebP、MP4、WebM 或 MOV 文件');
+            else app.toast('请选择常见照片或视频文件（JPG、PNG、MP4、MOV、MKV 等）');
             return;
         }
         app.stopAllPlayback(true);
@@ -1715,11 +1761,15 @@ import {
             app.renderPhotoLibrary();
             app.wall.setPhotos(app.photos);
             if (app.photos.length) app.hideEmptyState();
+            if (valid.length && window.matchMedia('(max-width: 768px)').matches && app.closeMobileSidebar) {
+                app.closeMobileSidebar();
+            }
             app.showLoading(false);
             var skipped = skippedLarge + skippedDuplicate + skippedLimit + (total - valid.length);
             var fallbackVideos = valid.filter(function (photo) { return photo.posterFallback; }).length;
             app.toast('已添加 ' + valid.length + ' 个素材' + (skipped ? ' · 跳过 ' + skipped + ' 个' : '') +
-                (fallbackVideos ? ' · ' + fallbackVideos + ' 个视频需使用设备解码播放' : ''));
+                (fallbackVideos ? ' · 正在兼容 ' + fallbackVideos + ' 个视频' : ''));
+            app.prepareIncompatibleVideos(valid);
         }).catch(function (err) {
             if (loadToken !== app._fileLoadToken) return;
             console.error('批量读取素材失败:', err);
@@ -1864,6 +1914,54 @@ import {
         });
     };
 
+    /** Android WebView codec support is narrower than the device media stack.
+     * Convert only incompatible clips, serially, while keeping originals for
+     * project saving and system playback. */
+    app.prepareIncompatibleVideos = function (photos) {
+        if (!isAndroidNativeApp()) return Promise.resolve([]);
+        var candidates = (Array.isArray(photos) ? photos : []).filter(function (photo) {
+            return photo && photo.mediaType === 'video' && photo.posterFallback === true &&
+                !photo.playbackBlob && photo.originalBlob instanceof Blob;
+        });
+        if (!candidates.length) return Promise.resolve([]);
+        var prepared = [];
+        app.videoCompatibilityQueue = app.videoCompatibilityQueue.catch(function () {}).then(async function () {
+            for (var index = 0; index < candidates.length; index++) {
+                var photo = candidates[index];
+                if (app.photos.indexOf(photo) < 0) continue;
+                photo.playbackStatus = 'converting';
+                app.renderPhotoLibrary();
+                try {
+                    var copy = await transcodeVideoForAndroidPlayback(photo.originalBlob, {
+                        name: photo.name,
+                        onStatus: function (status) {
+                            var canvasStatus = document.getElementById('canvas-status');
+                            if (canvasStatus && status && status.message) canvasStatus.textContent = status.message;
+                        }
+                    });
+                    if (app.photos.indexOf(photo) < 0) continue;
+                    photo.playbackBlob = copy;
+                    photo.playbackStatus = 'ready';
+                    prepared.push(photo);
+                    if (app.videoPlayer) app.videoPlayer.retry(photo);
+                } catch (error) {
+                    console.warn('视频兼容副本生成失败:', photo.name, error);
+                    photo.playbackStatus = 'poster';
+                }
+                app.renderPhotoLibrary();
+                if (app.videoPlayer) app.videoPlayer.sync(app.photos);
+                if (app.wall) app.wall.render();
+            }
+            var canvasStatus = document.getElementById('canvas-status');
+            if (canvasStatus && app.wall) {
+                canvasStatus.textContent = app.photos.length + ' 个素材 · ' + app.wall.layout.length + ' 个填充格位 · 本地处理';
+            }
+            if (prepared.length) app.toast(prepared.length + ' 个视频已可在框位中播放');
+            return prepared;
+        });
+        return app.videoCompatibilityQueue;
+    };
+
     app.getPhotoImportDimension = function (projectedCount) {
         return getImportDimension(app.deviceProfile, projectedCount);
     };
@@ -1895,20 +1993,26 @@ import {
 
     app.clearPhotos = function () {
         if (app.photos.length === 0) return;
-        if (!window.confirm('确定清空全部 ' + app.photos.length + ' 张照片吗？此操作可以撤销。')) return;
+        if (!window.confirm('确定清空全部 ' + app.photos.length + ' 个素材吗？此操作可以撤销。')) return;
         app.stopAllPlayback(true);
         app.recordHistory();
         app.photos.forEach(function (photo) { app.assetManager.releasePhoto(photo); });
+        if (app.videoPlayer) app.videoPlayer.sync([]);
         app.photos = [];
         app.updatePhotoCount();
         app.wall.setPhotos([]);
         app.renderPhotoLibrary();
         app.showEmptyState();
-        app.toast('已清空照片');
+        app.toast('已清空全部素材');
     };
 
     app.updatePhotoCount = function () {
         document.getElementById('photo-count').textContent = app.photos.length;
+        var videoCount = app.photos.reduce(function (total, photo) {
+            return total + (photo.mediaType === 'video' ? 1 : 0);
+        }, 0);
+        var summary = document.getElementById('media-count-summary');
+        if (summary) summary.textContent = (app.photos.length - videoCount) + ' 张照片 · ' + videoCount + ' 个视频';
         app.updateActionState();
     };
 
@@ -1943,6 +2047,7 @@ import {
         app.recordHistory();
         var removed = app.photos.splice(index, 1)[0];
         app.assetManager.releasePhoto(removed);
+        if (app.videoPlayer) app.videoPlayer.release(removed);
         app.updatePhotoCount();
         app.renderPhotoLibrary();
         app.wall.setPhotos(app.photos);
@@ -2242,6 +2347,13 @@ import {
                             focusY: !needsAnalysis && Number.isFinite(saved.focusY) ? saved.focusY : analysis.focusY,
                             focusSource: !needsAnalysis && saved.focusSource ? saved.focusSource : (analysis.focusSource || 'saliency'),
                             subjectScore: !needsAnalysis ? (Number(saved.subjectScore) || 0) : (Number(analysis.subjectScore) || 0),
+                            subjectConfidence: !needsAnalysis ? (Number(saved.subjectConfidence) || 0) : (Number(analysis.subjectConfidence) || 0),
+                            faceBox: (!needsAnalysis ? saved.faceBox : analysis.faceBox) || null,
+                            faceBoxes: (!needsAnalysis ? saved.faceBoxes : analysis.faceBoxes) || [],
+                            faceGroupBox: (!needsAnalysis ? saved.faceGroupBox : analysis.faceGroupBox) || null,
+                            faceCount: Number(!needsAnalysis ? saved.faceCount : analysis.faceCount) || 0,
+                            personBox: (!needsAnalysis ? saved.personBox : analysis.personBox) || null,
+                            captureTime: saved.captureTime || null,
                             analysisVersion: 2,
                             aspectRatio: Number.isFinite(saved.aspectRatio) ? saved.aspectRatio : analysis.aspectRatio,
                             mediaType: layers.mediaType || saved.mediaType || 'image',
@@ -2348,10 +2460,10 @@ import {
            append old photos into the freshly restored project. */
         app._fileLoadToken++;
         var totalPhotos = project.photos.length;
-        app.showLoading(true, '正在恢复 0/' + totalPhotos + ' 张照片…');
+        app.showLoading(true, '正在恢复 0/' + totalPhotos + ' 个素材…');
         return Promise.all([
             app.loadProjectPhotoBatch(project.photos, function (completed) {
-                app.showLoading(true, '正在恢复 ' + completed + '/' + totalPhotos + ' 张照片…');
+                app.showLoading(true, '正在恢复 ' + completed + '/' + totalPhotos + ' 个素材…');
             }),
             app.restoreProjectShape(project.shape)
         ]).then(function (results) {
@@ -2399,8 +2511,9 @@ import {
                 layout: project.layout
             });
             app.showLoading(false);
-            app.toast(options.successMessage || ('项目已恢复 · ' + photos.length + ' 张照片' +
-                (skippedPhotos ? ' · 跳过 ' + skippedPhotos + ' 张无法读取的照片' : '')));
+            app.toast(options.successMessage || ('项目已恢复 · ' + photos.length + ' 个素材' +
+                (skippedPhotos ? ' · 跳过 ' + skippedPhotos + ' 个无法读取的素材' : '')));
+            app.prepareIncompatibleVideos(app.photos);
         });
     };
 
@@ -2451,6 +2564,7 @@ import {
         app.photos.forEach(function (photo) {
             if (!restoredPhotoIds.has(photo.id)) app.assetManager.releasePhoto(photo);
         });
+        if (app.videoPlayer) app.videoPlayer.sync(state.photos);
         app.photos = state.photos.map(function (photo) {
             var restored = Object.assign({}, photo, { img: null });
             app.assetManager.attachURLs(restored);
@@ -2544,6 +2658,11 @@ import {
             x: app.customOrigin.normalizedX * Math.max(1, app.wall.cssWidth),
             y: app.customOrigin.normalizedY * Math.max(1, app.wall.cssHeight)
         };
+    };
+
+    app.getPlaybackCycles = function () {
+        var visibleCells = Math.max(1, app.wall && app.wall.layout ? app.wall.layout.length : 1);
+        return Math.max(1, Math.ceil(app.photos.length / visibleCells));
     };
 
     app.updateCustomOriginMarker = function () {
@@ -2680,7 +2799,7 @@ import {
         app.stopAllPlayback(false);
         app.flowSnapshot = app.captureState();
         app.flowCycleCount = 0;
-        app.revealTimeline = app.playbackController.createTimeline('shuffle', { cycles: 1 });
+        app.revealTimeline = app.playbackController.createTimeline('shuffle', { cycles: app.getPlaybackCycles() });
         app.startPlaybackBitmapPreload(app.wall.layout, app.revealTimeline.orderedIndices);
         app.revealStartTime = performance.now();
         app.flowPlaying = true;
@@ -2698,8 +2817,8 @@ import {
             app.wall.clearPlayback();
             app.wall.setArrangement(finalFrame.photoIndices);
             app.wall.layoutSeed += 1;
-            app.flowCycleCount++;
-            app.revealTimeline = app.playbackController.createTimeline('shuffle', { cycles: 1 });
+            app.flowCycleCount += app.revealTimeline.cycles;
+            app.revealTimeline = app.playbackController.createTimeline('shuffle', { cycles: app.getPlaybackCycles() });
             app.revealStartTime = performance.now();
             app.startPlaybackBitmapPreload(app.wall.layout, app.revealTimeline.orderedIndices);
         }
@@ -2718,8 +2837,8 @@ import {
         button.setAttribute('aria-pressed', String(app.flowPlaying));
         document.getElementById('flow-play-icon').textContent = app.flowPlaying ? '■' : '▶';
         document.getElementById('flow-play-label').textContent = app.flowPlaying ?
-            (app.playbackMode === 'shuffle' ? '停止流动' : '停止播放') :
-            (app.playbackMode === 'shuffle' ? '流动播放' : '逐张播放');
+            (app.playbackMode === 'shuffle' ? '停止轮播' : '停止播放') :
+            (app.playbackMode === 'shuffle' ? '素材轮播' : '逐张播放');
     };
 
     app.updateActionState = function () {
@@ -2987,7 +3106,8 @@ import {
         if (app.lightboxTranscodedURL) URL.revokeObjectURL(app.lightboxTranscodedURL);
         app.lightboxTranscodedURL = '';
         app.lightboxTranscodeToken++;
-        app.lightboxObjectURL = URL.createObjectURL(photo.originalBlob || photo.workingBlob || photo.blob);
+        var previewBlob = photo.playbackBlob || photo.originalBlob || photo.workingBlob || photo.blob;
+        app.lightboxObjectURL = URL.createObjectURL(previewBlob);
         img.removeAttribute('src');
         video.pause();
         video.onerror = null;
@@ -2999,7 +3119,7 @@ import {
             video.hidden = false;
             video.src = app.lightboxObjectURL;
             video.poster = photo.workingSrc || photo.thumbnailSrc || '';
-            if (photo.posterFallback) {
+            if (photo.posterFallback && !photo.playbackBlob) {
                 browserPlayer.hidden = false;
                 systemPlayer.hidden = false;
             }
@@ -3083,6 +3203,13 @@ import {
             });
         enginePromise.then(function (playableBlob) {
             if (token !== app.lightboxTranscodeToken || app.photos[app.lightboxIndex] !== photo) return;
+            /* Reuse the temporary H.264 copy in wall cells as well as in the
+               lightbox. The original remains the project/export source. */
+            photo.playbackBlob = playableBlob;
+            if (app.videoPlayer) {
+                app.videoPlayer.retry(photo);
+                app.videoPlayer.sync(app.photos);
+            }
             if (app.lightboxTranscodedURL) URL.revokeObjectURL(app.lightboxTranscodedURL);
             app.lightboxTranscodedURL = URL.createObjectURL(playableBlob);
             video.onerror = function () {
@@ -3275,7 +3402,7 @@ import {
         var height = dimensions.height;
         if (isVideo) {
             var previewTimeline = app.playbackController.createTimeline(app.playbackMode, {
-                cycles: app.playbackMode === 'shuffle' ? 3 : 1
+                cycles: app.playbackMode === 'shuffle' ? app.getPlaybackCycles() : 1
             });
             var durationSec = previewTimeline.duration / 1000;
             var totalFrames = Math.ceil(durationSec * 30) + 1;
@@ -3384,7 +3511,7 @@ import {
                 }
                 videoScale = Math.round(videoScale * 10) / 10;
                 var videoTimeline = app.playbackController.createTimeline(app.playbackMode, {
-                    cycles: app.playbackMode === 'shuffle' ? 3 : 1
+                    cycles: app.playbackMode === 'shuffle' ? app.getPlaybackCycles() : 1
                 });
                 /* Video export renders every frame synchronously; warm the
                    bitmap cache by render order so LRU-evicted photos don't

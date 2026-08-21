@@ -214,16 +214,35 @@ function createShuffleTimeline(layout, orderedIndices, options) {
         if (cellIndex >= 0 && cellIndex < cellCount) positionByCell[cellIndex] = position;
     });
 
-    /* Pre-compute which photo each cell shows at each cycle boundary. */
+    /* Pre-compute which photo each cell shows at each cycle boundary. When
+       the project contains more media than visible cells, cycle through the
+       complete library instead of only shuffling the initially assigned
+       subset. This is the actual carousel contract: every photo/video gets a
+       turn even in a fixed 2×2 or 3×3 layout. */
     var cycleStates = [];
     var currentAssignment = layout.map(function (item) {
         return item.photoIndex;
     });
+    var mediaCount = Array.isArray(options.photos) ? options.photos.length : 0;
+    var mediaQueue = [];
+    if (mediaCount > 0) {
+        for (var mediaIndex = 0; mediaIndex < mediaCount; mediaIndex++) mediaQueue.push(mediaIndex);
+        mediaQueue = shuffleAssignment(mediaQueue, baseSeed + 7919);
+    }
 
     for (var cycle = 0; cycle <= cycles; cycle++) {
         cycleStates.push(currentAssignment.slice());
         if (cycle < cycles) {
-            currentAssignment = shuffleAssignment(currentAssignment, baseSeed + cycle + 1);
+            if (mediaQueue.length) {
+                var nextAssignment = currentAssignment.slice();
+                for (var position = 0; position < cellCount; position++) {
+                    var targetCell = order[position];
+                    nextAssignment[targetCell] = mediaQueue[(cycle * cellCount + position) % mediaQueue.length];
+                }
+                currentAssignment = nextAssignment;
+            } else {
+                currentAssignment = shuffleAssignment(currentAssignment, baseSeed + cycle + 1);
+            }
         }
     }
 
@@ -245,6 +264,8 @@ function createShuffleTimeline(layout, orderedIndices, options) {
         interval: interval,
         transition: transition,
         cycles: cycles,
+        mediaCount: mediaCount,
+        carousel: mediaQueue.length > 0,
         cycleStates: cycleStates,
         orderedIndices: order,
         stagger: stagger,

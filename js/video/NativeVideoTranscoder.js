@@ -5,6 +5,9 @@ function extensionFor(blob, fallback) {
     var type = String(blob && blob.type || '').toLowerCase();
     if (type.indexOf('webm') >= 0) return 'webm';
     if (type.indexOf('quicktime') >= 0) return 'mov';
+    if (type.indexOf('matroska') >= 0) return 'mkv';
+    if (type.indexOf('msvideo') >= 0) return 'avi';
+    if (type.indexOf('3gpp') >= 0) return '3gp';
     if (type.indexOf('wav') >= 0) return 'wav';
     if (type.indexOf('mpeg') >= 0) return 'mp3';
     if (type.indexOf('ogg') >= 0) return 'ogg';

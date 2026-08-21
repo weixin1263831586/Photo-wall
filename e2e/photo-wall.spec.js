@@ -65,6 +65,32 @@ async function recordedWebm(page, name, width, height, colour) {
     return { name: name, mimeType: 'video/webm', buffer: Buffer.from(bytes) };
 }
 
+/** Records a WebM that alternates between two colours every few frames. */
+async function alternatingWebm(page, name, width, height, colourA, colourB) {
+    var bytes = await page.evaluate(async function (settings) {
+        var canvas = document.createElement('canvas');
+        canvas.width = settings.width;
+        canvas.height = settings.height;
+        var context = canvas.getContext('2d');
+        var stream = canvas.captureStream(12);
+        var recorder = new MediaRecorder(stream, { mimeType: 'video/webm;codecs=vp8' });
+        var chunks = [];
+        recorder.ondataavailable = function (event) { if (event.data.size) chunks.push(event.data); };
+        var stopped = new Promise(function (resolve) { recorder.onstop = resolve; });
+        recorder.start(100);
+        for (var frame = 0; frame < 18; frame++) {
+            context.fillStyle = frame % 6 < 3 ? settings.colourA : settings.colourB;
+            context.fillRect(0, 0, canvas.width, canvas.height);
+            await new Promise(function (resolve) { setTimeout(resolve, 50); });
+        }
+        recorder.stop();
+        await stopped;
+        stream.getTracks().forEach(function (track) { track.stop(); });
+        return Array.from(new Uint8Array(await new Blob(chunks, { type: 'video/webm' }).arrayBuffer()));
+    }, { width: width, height: height, colourA: colourA, colourB: colourB });
+    return { name: name, mimeType: 'video/webm', buffer: Buffer.from(bytes) };
+}
+
 function wavMusic() {
     var sampleRate = 8000;
     var samples = sampleRate;
@@ -313,10 +339,10 @@ test('offers slot-local positioning and speed-controlled flow playback', async f
     await page.locator('#flow-play-btn').click();
     await expect(page.locator('#flow-play-btn')).toHaveAttribute('aria-pressed', 'true');
     await expect(page.locator('#position-mode-btn')).toHaveAttribute('aria-pressed', 'false');
-    await expect(page.locator('#flow-play-label')).toHaveText('停止流动');
+    await expect(page.locator('#flow-play-label')).toHaveText('停止轮播');
     await page.waitForTimeout(650);
     await page.locator('#flow-play-btn').click();
-    await expect(page.locator('#flow-play-label')).toHaveText('流动播放');
+    await expect(page.locator('#flow-play-label')).toHaveText('素材轮播');
     await expect(page.locator('#undo-btn')).toBeEnabled();
 });
 
@@ -472,4 +498,70 @@ test('exports a printable PDF document', async function ({ page }) {
     expect(download.suggestedFilename()).toMatch(/\.pdf$/);
     var pdf = await readFile(await download.path());
     expect(pdf.subarray(0, 4).toString()).toBe('%PDF');
+});
+
+test('imported video loops inside its wall cells instead of a static poster', async function ({ page }) {
+    test.setTimeout(60000);
+    /* The clip alternates between orange and violet; a looping wall cell must
+       show both colours over time, while the poster-only wall would freeze on
+       whichever frame the poster extraction happened to capture. */
+    var video = await alternatingWebm(page, 'looping-video.webm', 96, 96, 'rgb(255,140,20)', 'rgb(120,60,230)');
+    await page.locator('#file-input').setInputFiles([video]);
+    await expect(page.locator('.photo-card.is-video')).toHaveCount(1);
+
+    async function canvasColours() {
+        return page.evaluate(function () {
+            var canvas = document.getElementById('wall-canvas');
+            var pixels = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data;
+            var orange = 0, violet = 0;
+            for (var offset = 0; offset < pixels.length; offset += 16) {
+                var red = pixels[offset], green = pixels[offset + 1], blue = pixels[offset + 2], alpha = pixels[offset + 3];
+                if (alpha < 32) continue;
+                if (red > 200 && green > 90 && green < 190 && blue < 90) orange++;
+                if (red > 90 && red < 180 && blue > 180 && green < 110) violet++;
+            }
+            return { orange: orange, violet: violet };
+        });
+    }
+
+    /* Poll across several seconds: each phase of the loop must appear. */
+    var seenOrange = false, seenViolet = false;
+    for (var sample = 0; sample < 90 && !(seenOrange && seenViolet); sample++) {
+        var colours = await canvasColours();
+        if (colours.orange > 40) seenOrange = true;
+        if (colours.violet > 40) seenViolet = true;
+        await page.waitForTimeout(150);
+    }
+    expect(seenOrange).toBe(true);
+    expect(seenViolet).toBe(true);
+
+    /* The hidden looping element keeps running while the wall is idle. */
+    var pool = await page.evaluate(function () {
+        var videos = document.querySelectorAll('#wall-video-stage video');
+        var playing = Array.from(videos).filter(function (video) {
+            return !video.paused && !video.ended;
+        });
+        return { entries: videos.length, playing: playing.length };
+    });
+    expect(pool.entries).toBe(1);
+});
+
+test('removing the video releases its looping decoder', async function ({ page }) {
+    test.setTimeout(45000);
+    var video = await recordedWebm(page, 'single-loop.webm', 96, 96, 'rgb(60,180,240)');
+    await page.locator('#file-input').setInputFiles([video]);
+    await expect(page.locator('.photo-card.is-video')).toHaveCount(1);
+    await expect.poll(function () {
+        return page.evaluate(function () {
+            return document.querySelectorAll('#wall-video-stage video').length;
+        });
+    }).toBe(1);
+
+    page.once('dialog', function (dialog) { dialog.accept(); });
+    await page.locator('#clear-btn').click();
+    await expect.poll(function () {
+        return page.evaluate(function () {
+            return document.querySelectorAll('#wall-video-stage video').length;
+        });
+    }).toBe(0);
 });

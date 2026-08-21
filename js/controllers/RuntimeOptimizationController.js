@@ -92,6 +92,7 @@ function installWallPlaybackRenderer(app) {
     wall._drawPhoto = function (ctx, item, hovered, scale, dropTarget, imageOverride) {
         if (!item || !item.photo) return;
         var source = imageOverride ||
+            (wall.videoPlayer && wall.videoPlayer.get(item.photo)) ||
             manager.peekBitmap(item.photo, 'working') ||
             manager.peekBitmap(item.photo, 'thumbnail') ||
             item.photo.img;
@@ -193,6 +194,10 @@ function installWallPlaybackRenderer(app) {
 
         function sourceFor(photo) {
             if (!photo) return Promise.resolve(null);
+            /* Export rendering is paced in wall-clock time, so drawing the
+               looping video element captures its live frames directly. */
+            var live = wall.videoPlayer && wall.videoPlayer.get(photo);
+            if (live) return Promise.resolve(live);
             var key = photo.id || photo;
             if (sourcePromises.has(key)) return sourcePromises.get(key);
             var first = preferThumbnail ? 'thumbnail' : 'working';

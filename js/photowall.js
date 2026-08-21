@@ -20,6 +20,7 @@ import { drawOverlays, getOverlayAt } from './overlay/OverlayRenderer.js';
         this.ctx = canvas.getContext('2d');
         this.maxDevicePixelRatio = Math.max(1, Math.min(2, Number(options.maxDevicePixelRatio) || 2));
         this.assetManager = options.assetManager || null;
+        this.videoPlayer = options.videoPlayer || null;
         this.dpr = Math.min(window.devicePixelRatio || 1, this.maxDevicePixelRatio);
         this.shape = null;
         this.shapeKey = null;
@@ -79,6 +80,7 @@ import { drawOverlays, getOverlayAt } from './overlay/OverlayRenderer.js';
         this._transitionProgress = 1;
         this._transitionRAF = null;
         this._playbackFrame = null;
+        this._videoLoopToken = null;
         this._autoCropCache = new Map();
         this._bindEvents();
     }
@@ -129,6 +131,7 @@ import { drawOverlays, getOverlayAt } from './overlay/OverlayRenderer.js';
     };
     PhotoWall.prototype.setPhotos = function (photos) {
         this.photos = photos || [];
+        if (this.videoPlayer) this.videoPlayer.sync(this.photos);
         if (this.shape) this.generateLayout();
     };
     PhotoWall.prototype.setInteractionMode = function (mode) {
@@ -573,6 +576,9 @@ import { drawOverlays, getOverlayAt } from './overlay/OverlayRenderer.js';
 
     PhotoWall.prototype.generateLayout = function (forceRandom, skipAnimation) {
         if (!this.shape || !this.cssWidth) return;
+        /* restoreState() swaps this.photos directly before regenerating, so
+           the looping-video pool is diffed here as well as in setPhotos(). */
+        if (this.videoPlayer) this.videoPlayer.sync(this.photos);
         this.generateMask();
         if (!this.photos.length || !this.maskData.insideCount) {
             this.layout = [];
@@ -748,6 +754,7 @@ import { drawOverlays, getOverlayAt } from './overlay/OverlayRenderer.js';
             this.renderPlaybackFrame(ctx, this._playbackFrame, {
                 sourceFrame: { x: 0, y: 0, width: w, height: h }
             });
+            this._ensureVideoLoop();
             return;
         }
 
@@ -788,6 +795,13 @@ import { drawOverlays, getOverlayAt } from './overlay/OverlayRenderer.js';
             } else {
                 ctx.drawImage(layer, 0, 0, w, h);
             }
+        }
+        /* Looping video cells repaint every frame on top of the cached
+           poster layer once the layer transition has settled. */
+        if (this.assetManager && this.videoPlayer &&
+            this._hasComposedLayer && this._transitionProgress >= 1) {
+            this._drawLiveVideoCells(ctx, w, h);
+            this._ensureVideoLoop();
         }
         if (!exportMode && this.localAdjustIndex >= 0 && this.layout[this.localAdjustIndex]) {
             this._drawPhoto(ctx, this.layout[this.localAdjustIndex], false, 1, false);
@@ -847,6 +861,68 @@ import { drawOverlays, getOverlayAt } from './overlay/OverlayRenderer.js';
         this._photoPath(ctx, 0, 0, width, height);
         ctx.stroke();
         ctx.restore();
+    };
+
+    /* ================================================================ */
+    /* Looping video cells                                               */
+    /* ================================================================ */
+
+    /**
+     * Repaint every cell whose photo is a looping video with its current
+     * frame. Called once per animation frame while videos are active; the
+     * cached layer below still holds the poster as a loading placeholder.
+     */
+    PhotoWall.prototype._drawLiveVideoCells = function (ctx, w, h) {
+        if (!this.maskData || !this.layout.length || !this.videoPlayer) return;
+        var drew = false;
+        for (var i = 0; i < this.layout.length; i++) {
+            var item = this.layout[i];
+            var video = item && item.photo && this.videoPlayer.get(item.photo);
+            if (!video) continue;
+            this._drawPhoto(ctx, item, false, 1, false, video);
+            drew = true;
+        }
+        if (drew) {
+            /* Boundary cells can extend past the silhouette; clip the fresh
+               frames exactly like the cached layer underneath them. */
+            ctx.save();
+            ctx.globalCompositeOperation = 'destination-in';
+            ctx.drawImage(this.maskData.maskCanvas, 0, 0, w, h);
+            ctx.restore();
+        }
+    };
+
+    /** Keep repainting the wall while any looping video has frames to show. */
+    PhotoWall.prototype._ensureVideoLoop = function () {
+        if (this._videoLoopToken || !this.videoPlayer || !this.cssWidth) return;
+        if (!this.layout.length || !this.videoPlayer.hasReady()) return;
+        if (typeof document !== 'undefined' && document.hidden) return;
+        var self = this;
+        /* A token (not the rAF handle) guards the chain: render() re-enters
+           this method mid-tick, and an rAF handle cannot cancel callbacks
+           that are already queued, which multiplied parallel chains. */
+        var token = {};
+        this._videoLoopToken = token;
+        function tick() {
+            if (self._videoLoopToken !== token) return;
+            if (!self.videoPlayer || !self.videoPlayer.hasReady() ||
+                (typeof document !== 'undefined' && document.hidden)) {
+                self._videoLoopToken = null;
+                return;
+            }
+            self.render();
+            if (self._videoLoopToken !== token) return;
+            if (!self.videoPlayer.hasReady()) {
+                self._videoLoopToken = null;
+                return;
+            }
+            requestAnimationFrame(tick);
+        }
+        requestAnimationFrame(tick);
+    };
+
+    PhotoWall.prototype._stopVideoLoop = function () {
+        this._videoLoopToken = null;
     };
 
     /* ================================================================ */
@@ -1171,6 +1247,7 @@ import { drawOverlays, getOverlayAt } from './overlay/OverlayRenderer.js';
         width *= scale;
         height *= scale;
         var img = imageOverride ||
+            (this.videoPlayer && this.videoPlayer.get(item.photo)) ||
             (this.assetManager && this.assetManager.peekBitmap(item.photo, 'working')) ||
             (this.assetManager && this.assetManager.peekBitmap(item.photo, 'thumbnail')) ||
             item.photo.img;

@@ -82,12 +82,54 @@ body {
     font-size: 12px;
 }
 
+.mobile-sidebar-header { display: none; }
+
+.workflow-nav {
+    position: sticky;
+    z-index: 8;
+    top: -20px;
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 4px;
+    padding: 7px;
+    border: 1px solid var(--border);
+    border-radius: 11px;
+    background: rgba(22, 22, 31, .96);
+    backdrop-filter: blur(16px);
+}
+
+.workflow-nav button {
+    min-width: 0;
+    height: 32px;
+    border: 0;
+    border-radius: 7px;
+    background: transparent;
+    color: var(--text-dim);
+    font: inherit;
+    font-size: 11px;
+    cursor: pointer;
+    transition: color .18s, background .18s, box-shadow .18s;
+}
+
+.workflow-nav button:hover { color: var(--text); background: rgba(255,255,255,.05); }
+.workflow-nav button.active {
+    color: #fff;
+    background: linear-gradient(135deg, rgba(124,108,240,.9), rgba(112,88,224,.75));
+    box-shadow: 0 5px 16px rgba(80,62,190,.22);
+}
+
+.material-panel {
+    border-color: rgba(124,108,240,.38);
+    background: linear-gradient(145deg, rgba(124,108,240,.1), var(--panel-bg) 42%);
+}
+
 /* ---------- Panels ---------- */
 .panel {
     background: var(--panel-bg);
     border-radius: var(--radius);
     padding: 14px 14px 16px;
     border: 1px solid var(--border);
+    scroll-margin-top: 62px;
 }
 
 .panel-title {
@@ -454,10 +496,14 @@ body {
     margin-top: 10px;
     font-size: 12px;
     color: var(--text-dim);
-    text-align: center;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
 }
 
 .photo-count-bar strong { color: var(--accent-hi); }
+.photo-count-bar span:last-child { font-size: 10px; }
 
 /* ---------- Settings ---------- */
 .setting-row {
@@ -2053,8 +2099,8 @@ body {
         bottom: 0;
         width: 100%;
         min-width: 0;
-        max-height: 70vh;
-        max-height: 70dvh;
+        max-height: 82vh;
+        max-height: 82dvh;
         border-right: none;
         border-top: 1px solid var(--border);
         border-radius: 16px 16px 0 0;
@@ -2082,6 +2128,39 @@ body {
         border-radius: 2px;
         background: var(--border);
     }
+
+    .mobile-sidebar-header {
+        position: sticky;
+        z-index: 12;
+        top: -10px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        min-height: 50px;
+        margin: -4px -2px 0;
+        padding: 5px 2px 7px;
+        background: linear-gradient(var(--sidebar-bg) 82%, rgba(22,22,31,0));
+    }
+    .mobile-sidebar-header > div { display: flex; align-items: center; gap: 9px; font-size: 15px; }
+    .mobile-sidebar-header img { width: 28px; height: 28px; border-radius: 8px; }
+    .mobile-sidebar-header button {
+        width: 40px;
+        height: 40px;
+        border: 0;
+        border-radius: 50%;
+        background: rgba(255,255,255,.07);
+        color: var(--text);
+        font-size: 23px;
+    }
+    .workflow-nav {
+        top: 40px;
+        flex: 0 0 auto;
+        padding: 5px;
+        border-color: rgba(124,108,240,.25);
+        border-radius: 10px;
+    }
+    .workflow-nav button { min-height: 40px; font-size: 12px; }
+    .panel { scroll-margin-top: 104px; }
 
     .workspace-bar {
         min-height: 52px;
@@ -2149,6 +2228,8 @@ body {
     .background-options { grid-template-columns: repeat(2, 1fr); }
     .photo-editor-layout { grid-template-columns: 1fr; }
     .photo-editor-preview { min-height: 220px; }
+    .toolbar-btn:disabled,
+    .toolbar-icon-btn:disabled { display: none; }
 }
 
 @media (max-width: 640px) {

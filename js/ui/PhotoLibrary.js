@@ -88,6 +88,10 @@ export function createPhotoLibrary(options) {
             image.alt = photo.name || '';
             var mediaBadge = card.querySelector('.photo-media-badge');
             mediaBadge.hidden = photo.mediaType !== 'video';
+            mediaBadge.textContent = photo.playbackStatus === 'converting' ? '…' :
+                (photo.posterFallback && !photo.playbackBlob ? '!' : '▶');
+            mediaBadge.title = photo.playbackStatus === 'converting' ? '正在生成兼容播放副本' :
+                (photo.posterFallback && !photo.playbackBlob ? '当前显示视频封面，点击可转码播放' : '视频素材');
             card.classList.toggle('is-video', photo.mediaType === 'video');
             card.querySelector('.photo-remove').setAttribute('aria-label', '移除 ' + (photo.name || '照片'));
             card.querySelector('.photo-edit').setAttribute('aria-label', '精修 ' + (photo.name || '照片'));

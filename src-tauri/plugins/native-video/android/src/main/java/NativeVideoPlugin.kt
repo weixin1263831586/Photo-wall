@@ -259,20 +259,20 @@ class NativeVideoPlugin(private val activity: Activity) : Plugin(activity) {
                 )
             } else bitmap
             FileOutputStream(output).use { stream ->
-                if (!scaledBitmap!!.compress(Bitmap.CompressFormat.JPEG, 90, stream)) {
+                if (!scaledBitmap.compress(Bitmap.CompressFormat.JPEG, 90, stream)) {
                     throw IllegalStateException("Android poster JPEG encode failed")
                 }
             }
             val ret = JSObject()
             ret.put("outputPath", output.absolutePath)
-            ret.put("width", scaledBitmap!!.width)
-            ret.put("height", scaledBitmap!!.height)
+            ret.put("width", scaledBitmap.width)
+            ret.put("height", scaledBitmap.height)
             ret.put("duration", durationMs / 1000.0)
             invoke.resolve(ret)
         } catch (error: Throwable) {
             invoke.reject(error.message ?: "Android video poster extraction failed")
         } finally {
-            if (scaledBitmap != null && scaledBitmap !== sourceBitmap) scaledBitmap?.recycle()
+            if (scaledBitmap != null && scaledBitmap !== sourceBitmap) scaledBitmap.recycle()
             sourceBitmap?.recycle()
             retriever.release()
         }
@@ -346,12 +346,7 @@ class NativeVideoPlugin(private val activity: Activity) : Plugin(activity) {
                 .setAudioMimeType(MimeTypes.AUDIO_AAC)
                 .addListener(object : Transformer.Listener {
                     override fun onCompleted(composition: Composition, exportResult: ExportResult) {
-                        val ret = JSObject()
-                        ret.put("outputPath", output.absolutePath)
-                        ret.put("encoder", "Android Media3 image sequence / H.264")
-                        activeInvoke?.resolve(ret)
-                        activeInvoke = null
-                        activeTransformer = null
+                        resolveExport(output, "Android Media3 image sequence / H.264")
                     }
 
                     override fun onError(
@@ -359,18 +354,16 @@ class NativeVideoPlugin(private val activity: Activity) : Plugin(activity) {
                         exportResult: ExportResult,
                         exportException: ExportException
                     ) {
-                        activeInvoke?.reject(exportException.message ?: "Android frame export failed")
-                        activeInvoke = null
-                        activeTransformer = null
+                        rejectExport(exportException.message ?: "Android frame export failed")
                     }
                 })
                 .build()
             activeInvoke = invoke
             activeTransformer = transformer
+            activeOutputFile = output
             transformer.start(composition, output.absolutePath)
         } catch (error: Throwable) {
-            activeInvoke = null
-            activeTransformer = null
+            clearActiveExport(true)
             invoke.reject(error.message ?: "Android frame export failed")
         }
     }

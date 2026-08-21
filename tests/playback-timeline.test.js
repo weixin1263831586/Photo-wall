@@ -70,6 +70,24 @@ test('shuffle timeline staggers cell swaps using the selected playback order', f
     assert.equal(frame.transitionProgresses[2], 0);
 });
 
+test('shuffle carousel brings every imported media item into a limited cell set', function () {
+    var smallLayout = layout().slice(0, 2);
+    var photos = Array.from({ length: 7 }, function (_, index) { return { id: 'p' + index }; });
+    var timeline = createTimeline(smallLayout, 'left-right', {
+        mode: 'shuffle',
+        photos: photos,
+        seed: 31,
+        interval: 1000,
+        transition: 300,
+        cycles: Math.ceil(photos.length / smallLayout.length)
+    });
+    var shown = new Set(timeline.cycleStates.flat());
+    photos.forEach(function (_, index) {
+        assert.equal(shown.has(index), true, 'media #' + index + ' receives a carousel turn');
+    });
+    assert.equal(timeline.carousel, true);
+});
+
 test('custom playback origin is honoured by reveal timeline', function () {
     var timeline = createTimeline(layout(), 'custom', {
         canvasWidth: 100,

@@ -65,8 +65,10 @@ export function pickVideoMimeType(format) {
 }
 
 /** Record a timeline-driven animation from a PhotoWall instance. */
-export async function recordTimelineCanvas(wall, timeline, options) {
+async function recordTimelineCanvasInternal(wall, timeline, options) {
     options = options || {};
+    var signal = options.signal || null;
+    throwIfAborted(signal);
     var cssWidth = Math.round(options.width || wall.cssWidth || 1080);
     var cssHeight = Math.round(options.height || wall.cssHeight || 1920);
     var fps = Math.max(10, Math.min(60, Number(options.fps) || 30));
@@ -134,7 +136,7 @@ export async function recordTimelineCanvas(wall, timeline, options) {
 
     var now = typeof performance !== 'undefined' && performance.now ?
         function () { return performance.now(); } : function () { return Date.now(); };
-    var startedAt = now();
+    var startedAt = 0;
 
     async function waitUntil(target) {
         var remaining = target - now();
@@ -168,14 +170,22 @@ export async function recordTimelineCanvas(wall, timeline, options) {
     /* Compute the export frame layout once — it doesn't change between frames. */
     var sourceFrame = wall.getExportFrame(options.aspectRatio || 'auto');
     var background = options.background || 'transparent';
+    var videoPlayer = wall.videoPlayer;
 
     try {
+        if (videoPlayer && typeof videoPlayer.beginExport === 'function') {
+            onStatus('正在准备视频素材…');
+            await videoPlayer.beginExport(wall.photos, { manualFrames: false });
+        }
+        startedAt = now();
         var recordingStartedAt = now();
         recorder.start();
         /* MediaRecorder timestamps frames in wall-clock time, so rendering is
            paced to the selected FPS instead of running one frame per display RAF. */
         for (var frame = 0; frame < totalFrames; frame++) {
+            throwIfAborted(signal);
             await waitUntil(startedAt + frame * frameDuration);
+            throwIfAborted(signal);
             var time = Math.min(timeline.duration, frame * frameDuration);
             var playbackFrame = timeline.getFrame(time);
 
@@ -220,6 +230,7 @@ export async function recordTimelineCanvas(wall, timeline, options) {
         await new Promise(function (resolve) { setTimeout(resolve, frameDuration); });
 
         onStatus('正在保存视频…');
+        throwIfAborted(signal);
         if (recorderError) throw recorderError;
         var stopPromise = new Promise(function (resolve, reject) {
             recorder.onstop = resolve;
@@ -237,6 +248,7 @@ export async function recordTimelineCanvas(wall, timeline, options) {
         if (recorder.state === 'recording') {
             try { recorder.stop(); } catch (_) {}
         }
+        if (videoPlayer && typeof videoPlayer.endExport === 'function') videoPlayer.endExport();
     }
 
     var recordedType = String(recorder.mimeType || mimeType || 'video/webm').split(';')[0];
@@ -269,4 +281,31 @@ export async function recordTimelineCanvas(wall, timeline, options) {
     /* Stream tracks and the recorder are already torn down in the finally
        block above; the export canvas is garbage-collected with this scope. */
     return webmBlob;
+}
+
+/** Public wrapper owns cancellation/progress lifecycle across every platform. */
+export async function recordTimelineCanvas(wall, timeline, options) {
+    options = Object.assign({}, options || {});
+    var signal = currentSignal(options);
+    var userStatus = options.onStatus;
+    var userProgress = options.onProgress;
+    options.signal = signal;
+    options.onStatus = function (message) {
+        var text = message && message.message ? message.message : String(message || '正在导出视频…');
+        dispatchExportEvent('status', { message: text });
+        if (typeof userStatus === 'function') userStatus(message);
+    };
+    options.onProgress = function (frame, total) {
+        var percent = total ? Math.max(0, Math.min(100, frame / total * 100)) : 0;
+        dispatchExportEvent('progress', { frame: frame, total: total, percent: percent });
+        if (typeof userProgress === 'function') userProgress(frame, total);
+    };
+    dispatchExportEvent('start', { platform: isAndroidNativeApp() ? 'android' : 'web' });
+    try {
+        throwIfAborted(signal);
+        return await recordTimelineCanvasInternal(wall, timeline, options);
+    } finally {
+        dispatchExportEvent('end', { cancelled: Boolean(signal && signal.aborted) });
+        if (activeAbortSignal === signal) activeAbortSignal = null;
+    }
 }

@@ -65,9 +65,11 @@ export function applyPhotoTransform(photo, transform) {
 }
 
 export function photoImageDimensions(image) {
+    /* Live <video> elements report their intrinsic size through videoWidth /
+       videoHeight; naturalWidth/width would fall back to the element box. */
     return {
-        width: Math.max(1, Number(image && (image.naturalWidth || image.width)) || 1),
-        height: Math.max(1, Number(image && (image.naturalHeight || image.height)) || 1)
+        width: Math.max(1, Number(image && (image.videoWidth || image.naturalWidth || image.width)) || 1),
+        height: Math.max(1, Number(image && (image.videoHeight || image.naturalHeight || image.height)) || 1)
     };
 }
 

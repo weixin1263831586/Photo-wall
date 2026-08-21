@@ -14,11 +14,38 @@
     <aside class="sidebar">
         <div class="sidebar-header">
             <h1><img class="brand-logo" src="assets/app-icon.svg" alt="">照片拼贴墙</h1>
-            <p class="subtitle">上传照片，拼出你想要的形状</p>
+            <p class="subtitle">照片与视频，一起拼出会动的故事</p>
         </div>
 
+        <div class="mobile-sidebar-header">
+            <div><img src="assets/app-icon.svg" alt=""><strong>创作工具</strong></div>
+            <button id="mobile-sidebar-close" type="button" aria-label="关闭创作工具">×</button>
+        </div>
+
+        <nav class="workflow-nav" aria-label="创作工具分类">
+            <button type="button" class="active" data-workflow-target="material-import">素材</button>
+            <button type="button" data-workflow-target="design-presets">模板</button>
+            <button type="button" data-workflow-target="design-layout">排版</button>
+            <button type="button" data-workflow-target="design-decorate">装饰</button>
+        </nav>
+
+        <!-- Material import comes first to match the normal create workflow. -->
+        <section class="panel material-panel" id="material-import">
+            <h3 class="panel-title">上传素材</h3>
+            <div class="drop-zone" id="drop-zone" role="button" tabindex="0" aria-label="导入素材，点击或拖放照片与视频">
+                <div class="drop-zone-icon">📁</div>
+                <p class="drop-zone-text">点击或拖放照片、视频到这里</p>
+                <p class="drop-zone-hint">支持 JPG / PNG / WebP 与 MP4 / MOV / WebM / MKV 等 · 原文件仅保存在本机</p>
+            </div>
+            <input type="file" id="file-input" multiple accept=".jpg,.jpeg,.png,.webp,.mp4,.webm,.mov,.m4v,.mkv,.avi,.3gp,.mpeg,.mpg,image/jpeg,image/png,image/webp,video/mp4,video/webm,video/quicktime,video/x-m4v,video/x-matroska,video/x-msvideo,video/3gpp,video/mpeg" hidden>
+            <div class="photo-count-bar">
+                <span>素材 <strong id="photo-count">0</strong> 个</span>
+                <span id="media-count-summary">0 张照片 · 0 个视频</span>
+            </div>
+        </section>
+
         <!-- Product presets -->
-        <section class="panel preset-panel">
+        <section class="panel preset-panel" id="design-presets">
             <div class="panel-title-row">
                 <h3 class="panel-title">场景模板</h3>
                 <button class="text-action" id="save-template-btn" type="button">保存当前</button>
@@ -44,7 +71,7 @@
         </section>
 
         <!-- Shape selection -->
-        <section class="panel">
+        <section class="panel" id="design-shape">
             <h3 class="panel-title">选择形状</h3>
             <div class="shape-buttons" id="shape-buttons"></div>
 
@@ -61,22 +88,8 @@
             <input type="file" id="shape-file-input" accept="image/*" hidden>
         </section>
 
-        <!-- Upload -->
-        <section class="panel">
-            <h3 class="panel-title">上传素材</h3>
-            <div class="drop-zone" id="drop-zone" role="button" tabindex="0" aria-label="上传素材，点击或拖放照片">
-                <div class="drop-zone-icon">📁</div>
-                <p class="drop-zone-text">点击或拖放照片、视频到这里</p>
-                <p class="drop-zone-hint">照片 + 视频混合 · 照片 40 MB / 视频 200 MB · 最多 1000 个素材</p>
-            </div>
-            <input type="file" id="file-input" multiple accept=".jpg,.jpeg,.png,.webp,.mp4,.webm,.mov,.m4v,image/jpeg,image/png,image/webp,video/mp4,video/webm,video/quicktime,video/x-m4v" hidden>
-            <div class="photo-count-bar">
-                已上传 <strong id="photo-count">0</strong> 个素材
-            </div>
-        </section>
-
         <!-- Layout mode -->
-        <section class="panel">
+        <section class="panel" id="design-layout">
             <h3 class="panel-title">排版方式</h3>
             <div class="mode-buttons" id="mode-buttons">
                 <button class="mode-btn active" data-mode="grid">紧密方格</button>
@@ -99,7 +112,7 @@
         </section>
 
         <!-- Photo shape -->
-        <section class="panel">
+        <section class="panel" id="design-photo-style">
             <h3 class="panel-title">照片形状</h3>
             <div class="photo-shape-buttons" id="photo-shape-buttons">
                 <button class="ps-btn" data-pshape="circle" title="圆形照片">
@@ -121,7 +134,7 @@
         </section>
 
         <!-- Settings -->
-        <section class="panel">
+        <section class="panel" id="design-smart">
             <h3 class="panel-title">填充设置</h3>
 
             <div class="setting-row">
@@ -158,10 +171,10 @@
                     <span class="switch-track"></span>
                 </label>
             </div>
-            <p class="setting-hint">智能匹配照片内容与格位，优先保证人物、构图和重点照片</p>
+            <p class="setting-hint">智能匹配素材与格位；轮廓边缘自动调整裁切，优先保留人脸与人物主体</p>
         </section>
 
-        <section class="panel overlay-panel">
+        <section class="panel overlay-panel" id="design-decorate">
             <div class="panel-title-row">
                 <h3 class="panel-title">文字与图层</h3>
                 <span class="layer-count" id="layer-count">0 层</span>
@@ -197,7 +210,7 @@
             <div class="layer-list" id="layer-list" aria-label="图层列表"></div>
         </section>
 
-        <section class="panel music-panel">
+        <section class="panel music-panel" id="design-music">
             <div class="panel-title-row">
                 <h3 class="panel-title">背景音乐</h3>
                 <button class="text-action danger" id="music-remove-btn" type="button" hidden>移除</button>
@@ -222,7 +235,7 @@
 
         <section class="panel photo-library-panel" id="photo-library-panel" hidden>
             <div class="panel-title-row">
-                <h3 class="panel-title">照片顺序</h3>
+                <h3 class="panel-title">素材顺序</h3>
                 <div class="panel-title-actions">
                     <span class="drag-tip">拖拽排序</span>
                     <button class="text-action danger" id="clear-btn" type="button">清空</button>
@@ -250,14 +263,14 @@
                 <button class="canvas-control-btn" id="position-mode-btn" type="button" aria-pressed="false" title="局部调图" disabled>
                     <span aria-hidden="true">✥</span><span>局部调图</span>
                 </button>
-                <button class="canvas-control-btn" id="flow-play-btn" type="button" aria-pressed="false" title="流动播放" disabled>
-                    <span aria-hidden="true" id="flow-play-icon">▶</span><span id="flow-play-label">流动播放</span>
+                <button class="canvas-control-btn" id="flow-play-btn" type="button" aria-pressed="false" title="让全部照片与视频依次进入框位轮播" disabled>
+                    <span aria-hidden="true" id="flow-play-icon">▶</span><span id="flow-play-label">素材轮播</span>
                 </button>
                 <label class="flow-speed-field" for="playback-mode">
                     <span>模式</span>
                     <select id="playback-mode" disabled>
                         <option value="reveal">逐张出现</option>
-                        <option value="shuffle" selected>流动换位</option>
+                        <option value="shuffle" selected>素材轮播</option>
                     </select>
                 </label>
                 <label class="flow-speed-field" for="playback-order">
@@ -613,7 +626,7 @@
                 <div class="photo-edit-actions-row">
                     <button class="btn btn-ghost" id="photo-edit-replace" type="button">替换素材</button>
                     <button class="btn btn-ghost" id="photo-edit-reset" type="button">重置调整</button>
-                    <input type="file" id="photo-edit-file" accept=".jpg,.jpeg,.png,.webp,.mp4,.webm,.mov,.m4v,image/jpeg,image/png,image/webp,video/mp4,video/webm,video/quicktime,video/x-m4v" hidden>
+                    <input type="file" id="photo-edit-file" accept=".jpg,.jpeg,.png,.webp,.mp4,.webm,.mov,.m4v,.mkv,.avi,.3gp,.mpeg,.mpg,image/jpeg,image/png,image/webp,video/mp4,video/webm,video/quicktime,video/x-m4v,video/x-matroska,video/x-msvideo,video/3gpp,video/mpeg" hidden>
                 </div>
             </div>
         </div>

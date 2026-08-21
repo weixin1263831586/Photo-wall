@@ -421,7 +421,10 @@ export function createPhotoAssetManager(options) {
                 mediaType: 'video',
                 videoMime: originalBlob.type || 'video/mp4',
                 duration: Math.max(0, Number(posterInfo && posterInfo.duration) || 0),
-                posterFallback: false,
+                /* The native retriever produced a useful cover, but the
+                   WebView already proved it cannot decode the original. Mark
+                   it for the app's background H.264 compatibility pass. */
+                posterFallback: true,
                 nativePoster: true,
                 posterBlank: posterBlank,
                 originalBlob: originalBlob,

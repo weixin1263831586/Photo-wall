@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Photo-wall",
+  "productName": "照片拼贴墙",
   "version": "1.0.0",
   "identifier": "com.photowall.studio",
   "build": {
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "Photo-wall",
+        "title": "照片拼贴墙",
         "width": 1440,
         "height": 960,
         "minWidth": 900,
@@ -30,8 +30,8 @@
     "active": true,
     "targets": ["nsis"],
     "category": "Photography",
-    "shortDescription": "将照片拼成地图、爱心和自定义轮廓",
-    "longDescription": "完全本地运行的照片拼贴墙，支持最多 1000 张照片、智能排版和高清导出。",
+    "shortDescription": "让照片和视频在创意轮廓中播放",
+    "longDescription": "完全本地运行的照片与视频拼贴墙，支持智能排版、素材轮播以及图片、PDF 和视频导出。",
     "windows": {
       "webviewInstallMode": {
         "type": "downloadBootstrapper",

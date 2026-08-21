@@ -27,12 +27,16 @@ function canvasToJpegBlob(canvas, quality) {
 /* Keep the cache-file extension aligned with the container: some OEM
    MediaExtractor builds pick demuxers by extension before probing. */
 function videoExtension(blob, name) {
-    var match = String(name || '').toLowerCase().match(/\.(mp4|webm|mov|m4v)$/);
+    var match = String(name || '').toLowerCase().match(/\.(mp4|webm|mov|m4v|mkv|avi|3gp|mpeg|mpg)$/);
     if (match) return match[1];
     var type = String((blob && blob.type) || '').toLowerCase();
     if (type.indexOf('quicktime') >= 0) return 'mov';
     if (type.indexOf('x-m4v') >= 0) return 'm4v';
     if (type.indexOf('webm') >= 0) return 'webm';
+    if (type.indexOf('matroska') >= 0) return 'mkv';
+    if (type.indexOf('msvideo') >= 0) return 'avi';
+    if (type.indexOf('3gpp') >= 0) return '3gp';
+    if (type.indexOf('mpeg') >= 0) return 'mpeg';
     return 'mp4';
 }
 
@@ -202,11 +206,36 @@ export async function recordTimelineOnAndroid(wall, timeline, options) {
     var audioPath = '';
     var onProgress = options.onProgress || function () {};
     var onStatus = options.onStatus || function () {};
+    var signal = options.signal || null;
+    var videoPlayer = wall.videoPlayer;
+    var nativeEncodingStarted = false;
+
+    function throwIfAborted() {
+        if (!signal || !signal.aborted) return;
+        var error = new Error('视频导出已取消');
+        error.name = 'AbortError';
+        throw error;
+    }
+
+    function cancelNativeEncoding() {
+        if (!nativeEncodingStarted) return;
+        native.invoke('plugin:native-video|cancel_export').catch(function () {});
+    }
 
     try {
+        throwIfAborted();
+        if (videoPlayer && typeof videoPlayer.beginExport === 'function') {
+            onStatus('Android 原生导出：正在准备视频素材…');
+            await videoPlayer.beginExport(wall.photos, { manualFrames: true });
+        }
         onStatus('Android 原生导出：正在生成视频帧…');
         for (var frame = 0; frame < totalFrames; frame++) {
+            throwIfAborted();
             var time = Math.min(timeline.duration, frame * frameDuration);
+            if (videoPlayer && typeof videoPlayer.prepareFrame === 'function') {
+                await videoPlayer.prepareFrame(time);
+            }
+            throwIfAborted();
             ctx.clearRect(0, 0, pixelWidth, pixelHeight);
             if (typeof wall.renderPlaybackFrameAsync === 'function') {
                 await wall.renderPlaybackFrameAsync(ctx, timeline.getFrame(time), {
@@ -231,6 +260,7 @@ export async function recordTimelineOnAndroid(wall, timeline, options) {
             if ((frame & 7) === 7) await new Promise(function (resolve) { setTimeout(resolve, 0); });
         }
 
+        throwIfAborted();
         var music = options.backgroundMusic;
         var musicBlob = music && (music.originalBlob || music.blob);
         if (musicBlob instanceof Blob) {
@@ -242,6 +272,8 @@ export async function recordTimelineOnAndroid(wall, timeline, options) {
         }
 
         onStatus('Android 原生导出：正在使用 MediaCodec 编码 H.264…');
+        nativeEncodingStarted = true;
+        if (signal) signal.addEventListener('abort', cancelNativeEncoding, { once: true });
         var result = await native.invoke('plugin:native-video|transcode_frames', {
             payload: {
                 framePaths: framePaths,
@@ -257,10 +289,13 @@ export async function recordTimelineOnAndroid(wall, timeline, options) {
                 fadeOut: music ? music.fadeOut : 0
             }
         });
+        throwIfAborted();
         var exportBlob = await readFileAsBlob(native.fs, result.outputPath || outputPath, 'video/mp4');
         if (!exportBlob || exportBlob.size < 512) throw new Error('Android 原生编码器没有生成有效视频');
         return exportBlob;
     } finally {
+        if (signal) signal.removeEventListener('abort', cancelNativeEncoding);
+        if (videoPlayer && typeof videoPlayer.endExport === 'function') videoPlayer.endExport();
         canvas.width = 1;
         canvas.height = 1;
         for (var i = 0; i < framePaths.length; i++) {

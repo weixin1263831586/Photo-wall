@@ -31,9 +31,13 @@ function execWithStallWatchdog(ffmpeg, args, timeout, label) {
 
 function extensionFor(blob, name) {
     var match = String(name || '').toLowerCase().match(/\.([a-z0-9]{2,5})$/);
-    if (match && /^(mp4|mov|m4v|webm)$/.test(match[1])) return match[1];
+    if (match && /^(mp4|mov|m4v|webm|mkv|avi|3gp|mpeg|mpg)$/.test(match[1])) return match[1];
     if (blob.type === 'video/webm') return 'webm';
     if (blob.type === 'video/quicktime') return 'mov';
+    if (blob.type === 'video/x-matroska') return 'mkv';
+    if (blob.type === 'video/x-msvideo') return 'avi';
+    if (blob.type === 'video/3gpp') return '3gp';
+    if (blob.type === 'video/mpeg') return 'mpeg';
     return 'mp4';
 }
 
