@@ -43,13 +43,19 @@ impl<R: Runtime> NativeVideo<R> {
             .map_err(Into::into)
     }
 
-    pub fn extract_poster(&self, payload: ExtractPosterRequest) -> crate::Result<ExtractPosterResponse> {
+    pub fn extract_poster(
+        &self,
+        payload: ExtractPosterRequest,
+    ) -> crate::Result<ExtractPosterResponse> {
         self.0
             .run_mobile_plugin("extractPoster", payload)
             .map_err(Into::into)
     }
 
-    pub fn transcode_frames(&self, payload: TranscodeFramesRequest) -> crate::Result<TranscodeResponse> {
+    pub fn transcode_frames(
+        &self,
+        payload: TranscodeFramesRequest,
+    ) -> crate::Result<TranscodeResponse> {
         self.0
             .run_mobile_plugin("transcodeFrames", payload)
             .map_err(Into::into)

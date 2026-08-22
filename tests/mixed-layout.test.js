@@ -101,20 +101,33 @@ test('export ratios expand from tight bounds in both orientations', function () 
     assert.equal(wall.getExportFrame('4:3').y + wall.getExportFrame('4:3').height / 2, 280);
 });
 
-test('slot-local photo offsets survive a layout snapshot round trip', function () {
+test('slot-local photo position and zoom survive a layout snapshot round trip', function () {
     var wall = createWall(8, true);
-    wall.layout[0].localOffsetX = 0.65;
-    wall.layout[0].localOffsetY = -0.4;
+    wall.layout[0].localOffsetX = 1.75;
+    wall.layout[0].localOffsetY = -1.4;
+    wall.layout[0].localZoom = 2.35;
     wall.layout[0].visibleFocusX = 0;
     wall.layout[0].visibleFocusY = 0;
     var snapshot = wall.getLayoutSnapshot();
     wall.layout[0].localOffsetX = 0;
     wall.layout[0].localOffsetY = 0;
+    wall.layout[0].localZoom = 1;
     assert.equal(wall.setLayoutSnapshot(snapshot), true);
-    assert.equal(wall.layout[0].localOffsetX, 0.65);
-    assert.equal(wall.layout[0].localOffsetY, -0.4);
+    assert.equal(wall.layout[0].localOffsetX, 1.75);
+    assert.equal(wall.layout[0].localOffsetY, -1.4);
+    assert.equal(wall.layout[0].localZoom, 2.35);
     assert.equal(wall.layout[0].visibleFocusX, 0);
     assert.equal(wall.layout[0].visibleFocusY, 0);
+});
+
+test('slot-local zoom clamps to its safe range and resets with position', function () {
+    var wall = createWall(4, false);
+    wall.layout[0].localOffsetX = 0.6;
+    assert.equal(wall.setLocalZoom(0, 20), true);
+    assert.equal(wall.layout[0].localZoom, 4);
+    assert.equal(wall.resetLocalAdjust(0), true);
+    assert.equal(wall.layout[0].localZoom, 1);
+    assert.equal(wall.layout[0].localOffsetX, 0);
 });
 
 test('flow randomization is seeded, changes assignments and preserves every slot', function () {

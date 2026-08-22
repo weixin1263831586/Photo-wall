@@ -3,9 +3,14 @@ import assert from 'node:assert/strict';
 import { BUILT_IN_MUSIC, createBuiltInMusicFile, getBuiltInMusic } from '../js/audio/BuiltInMusic.js';
 
 test('built-in music catalog has unique reusable tracks', function () {
-    assert.ok(BUILT_IN_MUSIC.length >= 6);
+    assert.ok(BUILT_IN_MUSIC.length >= 12);
     assert.equal(new Set(BUILT_IN_MUSIC.map(function (track) { return track.id; })).size, BUILT_IN_MUSIC.length);
     assert.equal(getBuiltInMusic('warm-memory').name, '温暖回忆');
+    BUILT_IN_MUSIC.forEach(function (track) {
+        assert.ok(track.bpm >= 60 && track.bpm <= 140);
+        assert.equal(track.progression.length, 4);
+        assert.equal(track.melody.length, 8);
+    });
 });
 
 test('built-in music synthesizer creates a valid WAV file', async function () {

@@ -4,6 +4,13 @@ function clamp(value, min, max, fallback) {
     return Math.max(min, Math.min(max, value));
 }
 
+/** A slot can be panned by up to one full slot in either direction. */
+export const SLOT_LOCAL_OFFSET_LIMIT = 2;
+
+/** Slot-local zoom keeps the crop filled while allowing a focused close-up. */
+export const SLOT_LOCAL_ZOOM_MIN = 1;
+export const SLOT_LOCAL_ZOOM_MAX = 4;
+
 /** Adds a rounded rectangle to the current path, including pre-Chrome 99 WebViews. */
 export function addRoundedRectPath(context, x, y, width, height, radius) {
     if (!context) return;
@@ -82,17 +89,42 @@ export function photoCoverLayout(image, width, height, photo, placement) {
     var sine = Math.abs(Math.sin(radians));
     var requiredWidth = width * cosine + height * sine;
     var requiredHeight = width * sine + height * cosine;
-    var placementZoom = clamp(placement && placement.zoom, 1, 1.5, 1);
+    /* Boundary auto-cropping contributes up to 1.5x and the user can then add
+       up to 4x slot-local zoom, so retain the full combined range here. */
+    var placementZoom = clamp(placement && placement.zoom,
+        SLOT_LOCAL_ZOOM_MIN, SLOT_LOCAL_ZOOM_MAX * 1.5, 1);
     var scale = Math.max(requiredWidth / dimensions.width, requiredHeight / dimensions.height) * transform.zoom * placementZoom;
     var drawWidth = dimensions.width * scale;
     var drawHeight = dimensions.height * scale;
     placement = placement || {};
     var targetX = clamp(placement.targetX, 0, 1, 0.5);
     var targetY = clamp(placement.targetY, 0, 1, 0.5);
-    var localOffsetX = clamp(placement.offsetX, -1, 1, 0);
-    var localOffsetY = clamp(placement.offsetY, -1, 1, 0);
-    var desiredX = (targetX - 0.5) * requiredWidth - transform.focusX * drawWidth + localOffsetX * requiredWidth * 0.5;
-    var desiredY = (targetY - 0.5) * requiredHeight - transform.focusY * drawHeight + localOffsetY * requiredHeight * 0.5;
+    var localOffsetX = clamp(placement.offsetX, -SLOT_LOCAL_OFFSET_LIMIT, SLOT_LOCAL_OFFSET_LIMIT, 0);
+    var localOffsetY = clamp(placement.offsetY, -SLOT_LOCAL_OFFSET_LIMIT, SLOT_LOCAL_OFFSET_LIMIT, 0);
+    var desiredX = (targetX - 0.5) * requiredWidth - transform.focusX * drawWidth;
+    var desiredY = (targetY - 0.5) * requiredHeight - transform.focusY * drawHeight;
+    var safeBounds = placement.safeBounds && typeof placement.safeBounds === 'object' ? placement.safeBounds : null;
+    var safeX = safeBounds ? clamp(safeBounds.x, 0, 0.99, 0) : 0;
+    var safeY = safeBounds ? clamp(safeBounds.y, 0, 0.99, 0) : 0;
+    var safeWidth = safeBounds ? clamp(safeBounds.width, 0.01, 1 - safeX, 1 - safeX) : 1;
+    var safeHeight = safeBounds ? clamp(safeBounds.height, 0.01, 1 - safeY, 1 - safeY) : 1;
+    var minDrawX = (safeX + safeWidth - 0.5) * requiredWidth - drawWidth;
+    var maxDrawX = (safeX - 0.5) * requiredWidth;
+    var minDrawY = (safeY + safeHeight - 0.5) * requiredHeight - drawHeight;
+    var maxDrawY = (safeY - 0.5) * requiredHeight;
+
+    /* localOffset is a normalised pan control: ±SLOT_LOCAL_OFFSET_LIMIT
+       reaches the corresponding edge of every available source crop. This
+       keeps the whole image reachable after a large local zoom instead of
+       limiting movement to one fixed slot width. */
+    var baseDrawX = clamp(desiredX, minDrawX, maxDrawX, 0);
+    var baseDrawY = clamp(desiredY, minDrawY, maxDrawY, 0);
+    var panX = localOffsetX / SLOT_LOCAL_OFFSET_LIMIT;
+    var panY = localOffsetY / SLOT_LOCAL_OFFSET_LIMIT;
+    var drawX = panX >= 0 ? baseDrawX + (maxDrawX - baseDrawX) * panX :
+        baseDrawX + (baseDrawX - minDrawX) * panX;
+    var drawY = panY >= 0 ? baseDrawY + (maxDrawY - baseDrawY) * panY :
+        baseDrawY + (baseDrawY - minDrawY) * panY;
     return {
         transform: transform,
         radians: radians,
@@ -100,8 +132,8 @@ export function photoCoverLayout(image, width, height, photo, placement) {
         requiredHeight: requiredHeight,
         drawWidth: drawWidth,
         drawHeight: drawHeight,
-        drawX: clamp(desiredX, requiredWidth / 2 - drawWidth, -requiredWidth / 2, -drawWidth / 2),
-        drawY: clamp(desiredY, requiredHeight / 2 - drawHeight, -requiredHeight / 2, -drawHeight / 2)
+        drawX: drawX,
+        drawY: drawY
     };
 }
 

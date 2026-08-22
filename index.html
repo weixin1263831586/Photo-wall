@@ -25,6 +25,7 @@
         <nav class="workflow-nav" aria-label="创作工具分类">
             <button type="button" class="active" data-workflow-target="material-import">素材</button>
             <button type="button" data-workflow-target="design-presets">模板</button>
+            <button type="button" data-workflow-target="design-shape">轮廓</button>
             <button type="button" data-workflow-target="design-layout">排版</button>
             <button type="button" data-workflow-target="design-decorate">装饰</button>
         </nav>
@@ -342,13 +343,9 @@
                     <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16 3h5v5M4 20l5.5-5.5M21 16v5h-5M15 5l-11 11M14.5 14.5 21 21"/></svg>
                     <span>重新排序</span>
                 </button>
-                <button class="toolbar-btn toolbar-video" id="export-video-btn" type="button" disabled title="导出为视频 (MP4 / WebM)">
-                    <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="6" width="13" height="12" rx="2"/><path d="M16 10l5-3v10l-5-3z"/></svg>
-                    <span>导出视频</span>
-                </button>
                 <button class="toolbar-btn toolbar-primary" id="export-btn" type="button" disabled>
                     <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg>
-                    <span class="toolbar-primary-label-long">导出图片</span>
+                    <span class="toolbar-primary-label-long">导出</span>
                     <span class="toolbar-primary-label-short" aria-hidden="true">导出</span>
                 </button>
             </div>
@@ -357,6 +354,20 @@
         <div class="canvas-help" id="canvas-help">拖拽素材可交换位置 · 开启局部调图后可在格位内移动人物</div>
         <div class="canvas-stage" id="canvas-stage">
             <canvas id="wall-canvas" tabindex="0" aria-label="照片墙编辑画布，点击照片可查看原图"></canvas>
+            <div class="local-adjust-toolbar" id="local-adjust-toolbar" aria-label="当前格位照片调整" hidden>
+                <div class="local-adjust-summary">
+                    <strong id="local-adjust-name">当前照片</strong>
+                    <span>拖动可移动</span>
+                </div>
+                <button class="local-adjust-icon-btn" id="local-zoom-out" type="button" aria-label="缩小当前照片" title="缩小">−</button>
+                <label class="local-zoom-field" for="local-zoom-range">
+                    <input id="local-zoom-range" type="range" min="1" max="4" step="0.05" value="1" aria-label="当前照片缩放">
+                </label>
+                <output id="local-zoom-value" for="local-zoom-range">100%</output>
+                <button class="local-adjust-icon-btn" id="local-zoom-in" type="button" aria-label="放大当前照片" title="放大">＋</button>
+                <button class="local-adjust-reset" id="local-adjust-reset" type="button">复位</button>
+                <button class="local-adjust-icon-btn local-adjust-close" id="local-adjust-close" type="button" aria-label="取消选择当前照片" title="取消选择">×</button>
+            </div>
             <div class="playback-origin-marker" id="playback-origin-marker" aria-hidden="true"></div>
             <div class="canvas-status-wrap">
                 <span class="status-dot"></span>
@@ -430,7 +441,10 @@
             <fieldset class="export-field" id="video-export-field" hidden>
                 <legend>视频尺寸</legend>
                 <select id="export-video-preset">
-                    <option value="portrait" selected>竖屏 1080 × 1920</option>
+                    <option value="portrait-720" selected>竖屏 720 × 1280（推荐）</option>
+                    <option value="landscape-720">横屏 1280 × 720（推荐）</option>
+                    <option value="square-720">方形 720 × 720（推荐）</option>
+                    <option value="portrait">竖屏 1080 × 1920（高清）</option>
                     <option value="landscape">横屏 1920 × 1080</option>
                     <option value="square">方形 1080 × 1080</option>
                     <option value="source">跟随当前画布</option>

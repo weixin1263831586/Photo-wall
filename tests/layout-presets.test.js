@@ -6,12 +6,17 @@ import {
     getLayoutPreset,
     layoutPresetMatches
 } from '../js/layout/LayoutPresets.js';
+import { Shapes } from '../js/shapes.js';
 
 test('layout presets have unique product-facing identifiers', function () {
     var ids = LAYOUT_PRESETS.map(function (preset) { return preset.id; });
     assert.equal(new Set(ids).size, ids.length);
-    assert.ok(LAYOUT_PRESETS.length >= 6);
+    assert.ok(LAYOUT_PRESETS.length >= 30);
     assert.equal(getLayoutPreset('missing'), null);
+    LAYOUT_PRESETS.forEach(function (preset) {
+        assert.ok(Shapes[preset.shapeKey], 'missing shape for preset ' + preset.id);
+        assert.ok(preset.palette.length >= 2, 'missing palette for preset ' + preset.id);
+    });
 });
 
 test('applying a layout preset updates the wall in one layout pass', function () {

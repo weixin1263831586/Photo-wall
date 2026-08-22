@@ -8,7 +8,14 @@ import { Shapes } from './shapes.js';
 import { computeDistanceTransform, sampleDistance } from './mask/DistanceTransform.js';
 import { assignPhotosToCells } from './layout/SmartPlacement.js';
 import { createSeededRandom, mixSeed, normalizeSeed } from './layout/SeededRandom.js';
-import { addRoundedRectPath, drawPhotoCover, photoImageDimensions } from './image/PhotoTransform.js';
+import {
+    addRoundedRectPath,
+    drawPhotoCover,
+    photoImageDimensions,
+    SLOT_LOCAL_OFFSET_LIMIT,
+    SLOT_LOCAL_ZOOM_MAX,
+    SLOT_LOCAL_ZOOM_MIN
+} from './image/PhotoTransform.js';
 import { computeOptimalPlacement } from './image/AutoCropOptimizer.js';
 import { drawOverlays, getOverlayAt } from './overlay/OverlayRenderer.js';
 
@@ -51,12 +58,14 @@ import { drawOverlays, getOverlayAt } from './overlay/OverlayRenderer.js';
         this.dragOverIndex = -1;
         this.interactionMode = 'swap';
         this.localAdjustIndex = -1;
+        this.localAdjustPreviewIndex = -1;
         this.pointer = null;
         this.onPhotoClick = null;
         this.onBeforeSwap = null;
         this.onSwap = null;
         this.onBeforeLocalAdjust = null;
         this.onLocalAdjust = null;
+        this.onLocalAdjustSelect = null;
         this.onLayout = null;
         this._animStart = 0;
         this._animRAF = null;
@@ -89,6 +98,7 @@ import { drawOverlays, getOverlayAt } from './overlay/OverlayRenderer.js';
         this._renderRevision++;
         this._cachedLayerRevision = -1;
         this._composeRevision = -1;
+        this.localAdjustPreviewIndex = -1;
         if (this._autoCropCache) this._autoCropCache.clear();
         if (this._composeRetryTimer) {
             clearTimeout(this._composeRetryTimer);
@@ -140,9 +150,48 @@ import { drawOverlays, getOverlayAt } from './overlay/OverlayRenderer.js';
         this.draggingIndex = -1;
         this.dragOverIndex = -1;
         this.localAdjustIndex = -1;
+        this.localAdjustPreviewIndex = -1;
         this.pointer = null;
+        if (this.onLocalAdjustSelect) this.onLocalAdjustSelect(null, -1);
         this.canvas.style.cursor = this.interactionMode === 'adjust' ? 'move' : 'default';
         this.render();
+    };
+    PhotoWall.prototype.selectLocalAdjust = function (index) {
+        index = Number.isInteger(index) && index >= 0 && index < this.layout.length ? index : -1;
+        if (this.interactionMode !== 'adjust') index = -1;
+        if (index === this.localAdjustIndex) return this.layout[index] || null;
+        this.localAdjustIndex = index;
+        var item = index >= 0 ? this.layout[index] : null;
+        if (this.onLocalAdjustSelect) this.onLocalAdjustSelect(item, index);
+        this.render();
+        return item;
+    };
+    PhotoWall.prototype.setLocalZoom = function (index, value) {
+        var item = Number.isInteger(index) ? this.layout[index] : null;
+        if (!item) return false;
+        var zoom = Math.max(SLOT_LOCAL_ZOOM_MIN,
+            Math.min(SLOT_LOCAL_ZOOM_MAX, Number(value) || SLOT_LOCAL_ZOOM_MIN));
+        if (Math.abs(zoom - (Number(item.localZoom) || SLOT_LOCAL_ZOOM_MIN)) < 0.0001) return false;
+        item.localZoom = zoom;
+        this._invalidateRenderCache();
+        this.localAdjustPreviewIndex = index;
+        this.render();
+        return true;
+    };
+    PhotoWall.prototype.resetLocalAdjust = function (index) {
+        var item = Number.isInteger(index) ? this.layout[index] : null;
+        if (!item) return false;
+        var changed = Math.abs(Number(item.localOffsetX) || 0) > 0.0001 ||
+            Math.abs(Number(item.localOffsetY) || 0) > 0.0001 ||
+            Math.abs((Number(item.localZoom) || SLOT_LOCAL_ZOOM_MIN) - SLOT_LOCAL_ZOOM_MIN) > 0.0001;
+        if (!changed) return false;
+        item.localOffsetX = 0;
+        item.localOffsetY = 0;
+        item.localZoom = SLOT_LOCAL_ZOOM_MIN;
+        this._invalidateRenderCache();
+        this.localAdjustPreviewIndex = index;
+        this.render();
+        return true;
     };
     PhotoWall.prototype.setDensity = function (value) {
         this.density = value;
@@ -331,6 +380,72 @@ import { drawOverlays, getOverlayAt } from './overlay/OverlayRenderer.js';
         } : { x: 0.5, y: 0.5 };
     };
 
+    /**
+     * Return the part of a rotated boundary slot that can actually survive
+     * the final silhouette clip. Photo panning only needs to keep this area
+     * covered; requiring the invisible remainder of the rectangular slot to
+     * stay covered made thin stars, aircraft wings and lettering feel locked.
+     *
+     * The rectangle test is intentionally conservative for circle/heart/etc.
+     * It can include pixels outside the photo path, but can never exclude a
+     * visible pixel, so wider panning does not introduce holes in exports.
+     */
+    PhotoWall.prototype._visibleCropBounds = function (item, width, height) {
+        var md = this.maskData;
+        if (!item || !item.isBoundary || !md || !md.mask || width <= 0 || height <= 0) return null;
+        var rotation = Number(item.rotation) || 0;
+        var cacheKey = [this._maskCacheKey, Number(item.x).toFixed(2), Number(item.y).toFixed(2),
+            width.toFixed(2), height.toFixed(2), rotation.toFixed(2)].join('|');
+        if (item._visibleCropCacheKey === cacheKey) return item._visibleCropBounds || null;
+
+        var radians = rotation * Math.PI / 180;
+        var cosine = Math.cos(radians), sine = Math.sin(radians);
+        var halfWidth = width / 2, halfHeight = height / 2;
+        var extentX = Math.abs(halfWidth * cosine) + Math.abs(halfHeight * sine);
+        var extentY = Math.abs(halfWidth * sine) + Math.abs(halfHeight * cosine);
+        var x1 = Math.max(0, Math.floor(item.x - extentX));
+        var y1 = Math.max(0, Math.floor(item.y - extentY));
+        var x2 = Math.min(md.width, Math.ceil(item.x + extentX));
+        var y2 = Math.min(md.height, Math.ceil(item.y + extentY));
+        var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+
+        for (var py = y1; py < y2; py++) {
+            for (var px = x1; px < x2; px++) {
+                if (!md.mask[py * md.width + px]) continue;
+                var dx = px + 0.5 - item.x;
+                var dy = py + 0.5 - item.y;
+                var localX = dx * cosine + dy * sine;
+                var localY = -dx * sine + dy * cosine;
+                if (Math.abs(localX) > halfWidth || Math.abs(localY) > halfHeight) continue;
+                minX = Math.min(minX, localX);
+                minY = Math.min(minY, localY);
+                maxX = Math.max(maxX, localX);
+                maxY = Math.max(maxY, localY);
+            }
+        }
+
+        var bounds = null;
+        if (Number.isFinite(minX)) {
+            /* Include antialiased edge pixels and rounding differences between
+               the editor canvas and high-resolution export canvases. */
+            var padding = Math.max(1.5, Math.min(width, height) * 0.012);
+            var left = Math.max(-halfWidth, minX - padding);
+            var top = Math.max(-halfHeight, minY - padding);
+            var right = Math.min(halfWidth, maxX + padding);
+            var bottom = Math.min(halfHeight, maxY + padding);
+            bounds = {
+                x: Math.max(0, Math.min(1, (left + halfWidth) / width)),
+                y: Math.max(0, Math.min(1, (top + halfHeight) / height)),
+                width: Math.max(0.01, Math.min(1, (right - left) / width)),
+                height: Math.max(0.01, Math.min(1, (bottom - top) / height))
+            };
+            if (bounds.width > 0.985 && bounds.height > 0.985) bounds = null;
+        }
+        item._visibleCropCacheKey = cacheKey;
+        item._visibleCropBounds = bounds;
+        return bounds;
+    };
+
     PhotoWall.prototype._fitBoundaryCell = function (x, y, width, height, allowGrowth) {
         var cellArea = Math.max(1, width * height);
         var visible = this._rectMaskArea(x, y, width, height);
@@ -346,7 +461,7 @@ import { drawOverlays, getOverlayAt } from './overlay/OverlayRenderer.js';
         // Keep the original edge cell covered, then grow it toward nearby
         // interior mask pixels. This turns tiny contour slivers into useful,
         // organically sized photo windows without punching holes in the mask.
-        var grow = [0, 0.35, 0.65];
+        var grow = [0, 0.2, 0.35];
         var best = { x: x, y: y, width: width, height: height, coverage: coverage, visible: visible, score: coverage * 0.28 };
         for (var leftIndex = 0; leftIndex < grow.length; leftIndex++) {
             for (var rightIndex = 0; rightIndex < grow.length; rightIndex++) {
@@ -399,11 +514,12 @@ import { drawOverlays, getOverlayAt } from './overlay/OverlayRenderer.js';
             for (var col = 0; col < cols + extra; col++) {
                 var x = b.x + col * cellW + shift, y = b.y + row * cellH;
                 if (this._rectMaskArea(x, y, cellW, cellH) === 0) continue;
-                // Every automatic mode keeps the original grid ownership for
-                // boundary cells. Organic mode gets its looser feel from the
-                // interior jitter; expanding contour cells here can cover a
-                // neighbouring source completely on sparse mobile layouts.
-                var fitted = this._fitBoundaryCell(x, y, cellW, cellH, false);
+                // Exact grid/brick ownership stays fixed. Organic layouts may
+                // grow a thin contour cell modestly toward visible interior
+                // pixels; the 35% cap avoids the former neighbour-cover risk.
+                var fitted = this._fitBoundaryCell(
+                    x, y, cellW, cellH, this.placementMode === 'organic'
+                );
                 var jitterX = 0, jitterY = 0;
                 if (this.placementMode === 'organic' && !fitted.isBoundary) {
                     var seed = mixSeed(this.layoutSeed,
@@ -803,8 +919,11 @@ import { drawOverlays, getOverlayAt } from './overlay/OverlayRenderer.js';
             this._drawLiveVideoCells(ctx, w, h);
             this._ensureVideoLoop();
         }
-        if (!exportMode && this.localAdjustIndex >= 0 && this.layout[this.localAdjustIndex]) {
-            this._drawPhoto(ctx, this.layout[this.localAdjustIndex], false, 1, false);
+        var previewingLocalAdjust = this.localAdjustPreviewIndex >= 0 &&
+            ((this._pointerDown && this._pointerDown.adjusted) ||
+                this._cachedLayerRevision !== this._renderRevision);
+        if (!exportMode && previewingLocalAdjust && this.layout[this.localAdjustPreviewIndex]) {
+            this._drawPhoto(ctx, this.layout[this.localAdjustPreviewIndex], false, 1, false);
             ctx.save();
             ctx.globalCompositeOperation = 'destination-in';
             ctx.drawImage(this.maskData.maskCanvas, 0, 0, w, h);
@@ -817,6 +936,10 @@ import { drawOverlays, getOverlayAt } from './overlay/OverlayRenderer.js';
         // outlines and the drag ghost are painted over it.
         if (!exportMode && this.hoveredIndex >= 0 && this.draggingIndex < 0) {
             this._drawPhotoHighlight(ctx, this.layout[this.hoveredIndex], false);
+        }
+        if (!exportMode && this.interactionMode === 'adjust' && this.localAdjustIndex >= 0 &&
+            this.localAdjustIndex !== this.hoveredIndex) {
+            this._drawPhotoHighlight(ctx, this.layout[this.localAdjustIndex], false);
         }
         if (!exportMode && this.dragOverIndex >= 0) {
             this._drawPhotoHighlight(ctx, this.layout[this.dragOverIndex], true);
@@ -1075,19 +1198,50 @@ import { drawOverlays, getOverlayAt } from './overlay/OverlayRenderer.js';
         var scaleY = outputHeight / Math.max(1, sourceFrame.height);
         var self = this;
         var scratch = this._scratchAsyncItem || (this._scratchAsyncItem = {});
+        var preferThumbnail = this.photos.length > 64;
+        var sourcePromises = new Map();
+
+        function sourceFor(photo) {
+            if (!photo) return Promise.resolve(null);
+            if (photo.mediaType === 'video' && self.videoPlayer) {
+                return Promise.resolve().then(async function () {
+                    if (Number.isFinite(Number(options.videoTime)) &&
+                        typeof self.videoPlayer.preparePhotoFrame === 'function') {
+                        var prepared = await self.videoPlayer.preparePhotoFrame(photo, Number(options.videoTime));
+                        if (prepared) return prepared;
+                    }
+                    return self.videoPlayer.get(photo);
+                }).then(function (live) {
+                    if (live) return live;
+                    var firstVideoFallback = preferThumbnail ? 'thumbnail' : 'working';
+                    var secondVideoFallback = preferThumbnail ? 'working' : 'thumbnail';
+                    return self.assetManager.getBitmap(photo, firstVideoFallback)
+                        .catch(function () { return self.assetManager.getBitmap(photo, secondVideoFallback); })
+                        .catch(function () { return photo.img || null; });
+                });
+            }
+            var key = photo.id || photo;
+            if (sourcePromises.has(key)) return sourcePromises.get(key);
+            var promise = Promise.resolve().then(async function () {
+                var first = preferThumbnail ? 'thumbnail' : 'working';
+                var second = preferThumbnail ? 'working' : 'thumbnail';
+                try {
+                    return await self.assetManager.getBitmap(photo, first);
+                } catch (workingError) {
+                    try {
+                        return await self.assetManager.getBitmap(photo, second);
+                    } catch (_) {
+                        return photo.img || null;
+                    }
+                }
+            });
+            sourcePromises.set(key, promise);
+            return promise;
+        }
 
         async function drawResolved(photo, item, photoIndex, alpha, cellScale) {
             if (!photo || alpha <= 0) return;
-            var source = null;
-            try {
-                source = await self.assetManager.getBitmap(photo, 'working');
-            } catch (workingError) {
-                try {
-                    source = await self.assetManager.getBitmap(photo, 'thumbnail');
-                } catch (_) {
-                    source = photo.img;
-                }
-            }
+            var source = await sourceFor(photo);
             if (!source) return;
             Object.assign(scratch, item, {
                 photo: photo,
@@ -1215,6 +1369,7 @@ import { drawOverlays, getOverlayAt } from './overlay/OverlayRenderer.js';
             layerContext.clearRect(0, 0, layer.width, layer.height);
             layerContext.drawImage(stage, 0, 0);
             self._cachedLayerRevision = revision;
+            self.localAdjustPreviewIndex = -1;
             self._hasComposedLayer = true;
             self.photos.forEach(function (photo) { self.assetManager.releaseElement(photo); });
             self._startLayerTransition();
@@ -1262,8 +1417,12 @@ import { drawOverlays, getOverlayAt } from './overlay/OverlayRenderer.js';
         }
         this._photoPath(ctx, 0, 0, width, height);
         ctx.clip();
-        var localOffsetX = Math.max(-1, Math.min(1, Number(item.localOffsetX) || 0));
-        var localOffsetY = Math.max(-1, Math.min(1, Number(item.localOffsetY) || 0));
+        var localOffsetX = Math.max(-SLOT_LOCAL_OFFSET_LIMIT,
+            Math.min(SLOT_LOCAL_OFFSET_LIMIT, Number(item.localOffsetX) || 0));
+        var localOffsetY = Math.max(-SLOT_LOCAL_OFFSET_LIMIT,
+            Math.min(SLOT_LOCAL_OFFSET_LIMIT, Number(item.localOffsetY) || 0));
+        var localZoom = Math.max(SLOT_LOCAL_ZOOM_MIN,
+            Math.min(SLOT_LOCAL_ZOOM_MAX, Number(item.localZoom) || SLOT_LOCAL_ZOOM_MIN));
         var visibleFocusX = Number(item.visibleFocusX);
         var visibleFocusY = Number(item.visibleFocusY);
         var maskCoverage = Number(item.maskCoverage);
@@ -1297,15 +1456,25 @@ import { drawOverlays, getOverlayAt } from './overlay/OverlayRenderer.js';
                 this._autoCropCache.set(cropCacheKey, placement);
             }
         } else {
+            var boundaryZoom = item.isBoundary ?
+                1.12 + Math.max(0, 0.75 - (Number.isFinite(maskCoverage) ? maskCoverage : 0.75)) * 0.4 : 1;
             placement = {
                 targetX: item.isBoundary && Number.isFinite(visibleFocusX) ? visibleFocusX : 0.5,
                 targetY: item.isBoundary && Number.isFinite(visibleFocusY) ? visibleFocusY : 0.5,
                 offsetX: localOffsetX,
                 offsetY: localOffsetY,
-                zoom: item.isBoundary ?
-                    1.12 + Math.max(0, 0.75 - (Number.isFinite(maskCoverage) ? maskCoverage : 0.75)) * 0.4 :
-                    (Math.abs(localOffsetX) + Math.abs(localOffsetY) > 0.01 ? 1.12 : 1)
+                /* photoCoverLayout clamps panning to the available source
+                   overflow, so moving a photo must not silently force an
+                   extra zoom that the zoom-out control cannot undo. */
+                zoom: boundaryZoom
             };
+        }
+        if (localZoom !== SLOT_LOCAL_ZOOM_MIN) {
+            placement = Object.assign({}, placement, { zoom: placement.zoom * localZoom });
+        }
+        if (scale >= 0.999 && item.isBoundary) {
+            var safeBounds = this._visibleCropBounds(item, cropWidth, cropHeight);
+            if (safeBounds) placement = Object.assign({}, placement, { safeBounds: safeBounds });
         }
         if (Number(item.playbackZoom) > 0 && Number(item.playbackZoom) !== 1) {
             placement = Object.assign({}, placement, { zoom: placement.zoom * Number(item.playbackZoom) });
@@ -1574,6 +1743,8 @@ import { drawOverlays, getOverlayAt } from './overlay/OverlayRenderer.js';
                     visibleFocusY: item.visibleFocusY,
                     localOffsetX: Number(item.localOffsetX) || 0,
                     localOffsetY: Number(item.localOffsetY) || 0,
+                    localZoom: Math.max(SLOT_LOCAL_ZOOM_MIN,
+                        Math.min(SLOT_LOCAL_ZOOM_MAX, Number(item.localZoom) || SLOT_LOCAL_ZOOM_MIN)),
                     spanRows: item.spanRows,
                     spanCols: item.spanCols,
                     boundaryDistance: item.boundaryDistance
@@ -1618,8 +1789,12 @@ import { drawOverlays, getOverlayAt } from './overlay/OverlayRenderer.js';
                     Math.max(0, Math.min(1, Number(saved.visibleFocusX))) : 0.5,
                 visibleFocusY: Number.isFinite(Number(saved.visibleFocusY)) ?
                     Math.max(0, Math.min(1, Number(saved.visibleFocusY))) : 0.5,
-                localOffsetX: Math.max(-1, Math.min(1, Number(saved.localOffsetX) || 0)),
-                localOffsetY: Math.max(-1, Math.min(1, Number(saved.localOffsetY) || 0)),
+                localOffsetX: Math.max(-SLOT_LOCAL_OFFSET_LIMIT,
+                    Math.min(SLOT_LOCAL_OFFSET_LIMIT, Number(saved.localOffsetX) || 0)),
+                localOffsetY: Math.max(-SLOT_LOCAL_OFFSET_LIMIT,
+                    Math.min(SLOT_LOCAL_OFFSET_LIMIT, Number(saved.localOffsetY) || 0)),
+                localZoom: Math.max(SLOT_LOCAL_ZOOM_MIN,
+                    Math.min(SLOT_LOCAL_ZOOM_MAX, Number(saved.localZoom) || SLOT_LOCAL_ZOOM_MIN)),
                 spanRows: Number(saved.spanRows) || 1,
                 spanCols: Number(saved.spanCols) || 1,
                 boundaryDistance: Math.max(0, Number(saved.boundaryDistance) || 0)
@@ -1701,7 +1876,11 @@ import { drawOverlays, getOverlayAt } from './overlay/OverlayRenderer.js';
                 return;
             }
             var idx = self.getPhotoAt(p.x, p.y);
-            if (idx < 0) return;
+            if (idx < 0) {
+                if (self.interactionMode === 'adjust') self.selectLocalAdjust(-1);
+                return;
+            }
+            if (self.interactionMode === 'adjust') self.selectLocalAdjust(idx);
             var selected = self.layout[idx];
             self._pointerDown = {
                 x: p.x, y: p.y, index: idx, time: Date.now(), adjusted: false,
@@ -1733,13 +1912,13 @@ import { drawOverlays, getOverlayAt } from './overlay/OverlayRenderer.js';
                     var adjustedItem = self.layout[self._pointerDown.index];
                     if (moved > 3 && !self._pointerDown.adjusted) {
                         self._pointerDown.adjusted = true;
-                        self.localAdjustIndex = self._pointerDown.index;
                         if (self.onBeforeLocalAdjust) self.onBeforeLocalAdjust(self._pointerDown.index);
                     }
                     if (self._pointerDown.adjusted && adjustedItem) {
-                        adjustedItem.localOffsetX = Math.max(-1, Math.min(1,
+                        self.localAdjustPreviewIndex = self._pointerDown.index;
+                        adjustedItem.localOffsetX = Math.max(-SLOT_LOCAL_OFFSET_LIMIT, Math.min(SLOT_LOCAL_OFFSET_LIMIT,
                             self._pointerDown.localOffsetX + (p.x - self._pointerDown.x) / Math.max(20, adjustedItem.width * 0.5)));
-                        adjustedItem.localOffsetY = Math.max(-1, Math.min(1,
+                        adjustedItem.localOffsetY = Math.max(-SLOT_LOCAL_OFFSET_LIMIT, Math.min(SLOT_LOCAL_OFFSET_LIMIT,
                             self._pointerDown.localOffsetY + (p.y - self._pointerDown.y) / Math.max(20, adjustedItem.height * 0.5)));
                         self.canvas.style.cursor = 'grabbing';
                         self.render();
@@ -1776,13 +1955,12 @@ import { drawOverlays, getOverlayAt } from './overlay/OverlayRenderer.js';
             if (self.interactionMode === 'adjust') {
                 var wasAdjusted = self._pointerDown.adjusted;
                 self._pointerDown = null;
-                self.localAdjustIndex = -1;
                 self.canvas.style.cursor = 'move';
                 if (wasAdjusted) {
                     self._invalidateRenderCache();
+                    self.localAdjustPreviewIndex = source;
                     if (self.onLocalAdjust) self.onLocalAdjust(source);
                 }
-                else if (!wasAdjusted && self.onPhotoClick) self.onPhotoClick(self.layout[source], source);
                 self.render();
                 try { self.canvas.releasePointerCapture(e.pointerId); } catch (ignore) {}
                 return;

@@ -61,6 +61,7 @@ function createFakeDocument(log) {
     return {
         hidden: false,
         listeners: {},
+        removedListeners: [],
         body: createNode('body'),
         createElement: function (tag) {
             var node = createNode(tag);
@@ -83,6 +84,12 @@ function createFakeDocument(log) {
         },
         addEventListener: function (type, handler) {
             (this.listeners[type] = this.listeners[type] || []).push(handler);
+        },
+        removeEventListener: function (type, handler) {
+            this.removedListeners.push({ type: type, handler: handler });
+            var list = this.listeners[type] || [];
+            var index = list.indexOf(handler);
+            if (index >= 0) list.splice(index, 1);
         }
     };
 }
@@ -182,7 +189,8 @@ test('sync releases entries for photos that left the wall', async function () {
 });
 
 test('a decode error permanently falls the photo back to its poster', async function () {
-    var harness = createHarness();
+    var decoded = [];
+    var harness = createHarness({ onDecodeError: function (photo) { decoded.push(photo.id); } });
     var photo = videoPhoto('v1');
     harness.player.sync([photo]);
     var element = harness.lastElement();
@@ -190,6 +198,7 @@ test('a decode error permanently falls the photo back to its poster', async func
     await flush();
     assert.equal(harness.player.stats().entries, 0);
     assert.equal(harness.player.stats().failed, 1);
+    assert.deepEqual(decoded, ['v1'], 'the platform compatibility queue is notified');
     harness.player.sync([photo]);
     assert.equal(harness.player.stats().entries, 0, 'failed photo is not retried');
 });
@@ -216,7 +225,7 @@ test('videos beyond the decoder cap rotate into active wall playback', async fun
     harness.player.destroy();
 });
 
-test('manual export expands the pool and seeks every video to the frame time', async function () {
+test('manual export remains bounded and seeks visible videos on demand', async function () {
     var harness = createHarness({ maxConcurrent: 2, seekTimeout: 250 });
     var photos = [videoPhoto('v1'), videoPhoto('v2'), videoPhoto('v3')];
     harness.player.sync(photos);
@@ -226,16 +235,27 @@ test('manual export expands the pool and seeks every video to the frame time', a
         element.__markReady();
     });
     await begin;
-    assert.equal(harness.player.stats().entries, 3, 'all export videos receive a decoder');
+    assert.equal(harness.player.stats().entries, 2, 'export keeps the device decoder cap');
 
     var seeking = harness.player.prepareFrame(1500);
     await flush();
-    harness.log.elements.slice(-3).forEach(function (element) { element.dispatch('seeked'); });
+    harness.log.elements.slice(-2).forEach(function (element) { element.dispatch('seeked'); });
     await seeking;
-    harness.log.elements.slice(-3).forEach(function (element) {
+    harness.log.elements.slice(-2).forEach(function (element) {
         assert.equal(element.currentTime, 1.5);
         assert.equal(element.paused, true);
     });
+
+    var thirdFrame = harness.player.preparePhotoFrame(photos[2], 750);
+    await flush();
+    var thirdElement = harness.lastElement();
+    thirdElement.duration = 2;
+    thirdElement.__markReady();
+    await flush();
+    thirdElement.dispatch('seeked');
+    assert.equal(await thirdFrame, thirdElement);
+    assert.equal(thirdElement.currentTime, 0.75);
+    assert.equal(harness.player.stats().entries, 2, 'on-demand source evicts through the LRU');
 
     harness.player.endExport();
     assert.equal(harness.player.stats().entries, 2, 'preview returns to its bounded decoder pool');
@@ -264,4 +284,5 @@ test('destroy tears down every entry', function () {
     harness.player.destroy();
     assert.equal(harness.player.stats().entries, 0);
     assert.equal(harness.revoked.length, 2);
+    assert.equal((harness.document.listeners.visibilitychange || []).length, 0);
 });

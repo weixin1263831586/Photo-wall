@@ -53,7 +53,10 @@ impl<R: Runtime> NativeVideo<R> {
         ))
     }
 
-    pub fn extract_poster(&self, payload: ExtractPosterRequest) -> crate::Result<ExtractPosterResponse> {
+    pub fn extract_poster(
+        &self,
+        payload: ExtractPosterRequest,
+    ) -> crate::Result<ExtractPosterResponse> {
         let _ = payload;
         Err(crate::Error::Message(
             "extract_poster is only available on Android and iOS".into(),

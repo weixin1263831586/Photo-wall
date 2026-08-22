@@ -152,6 +152,25 @@ test('uploads photos, marks a featured photo and toggles mixed sizing', async fu
     await expect(page.locator('.photo-card')).toHaveCount(10);
     await expect(page.locator('#mixed-size-toggle')).toBeChecked();
 
+    var toolbarLayout = await page.evaluate(function () {
+        var toolbar = document.querySelector('.workspace-bar');
+        var motion = document.getElementById('canvas-motion-controls');
+        var actions = document.querySelector('.workspace-actions');
+        var motionRect = motion.getBoundingClientRect();
+        var actionsRect = actions.getBoundingClientRect();
+        return {
+            controlsAreInToolbar: motion.parentElement === toolbar && actions.parentElement === toolbar,
+            controlsShareOneRow: Math.abs(
+                (motionRect.top + motionRect.height / 2) -
+                (actionsRect.top + actionsRect.height / 2)
+            ) < 2,
+            toolbarIsSingleLine: getComputedStyle(toolbar).flexWrap === 'nowrap'
+        };
+    });
+    expect(toolbarLayout.controlsAreInToolbar).toBe(true);
+    expect(toolbarLayout.controlsShareOneRow).toBe(true);
+    expect(toolbarLayout.toolbarIsSingleLine).toBe(true);
+
     var firstFeature = page.locator('.photo-feature').first();
     await firstFeature.click();
     await expect(firstFeature).toHaveAttribute('aria-pressed', 'true');
@@ -176,6 +195,7 @@ test('mobile mixed photo and video import keeps every source visible without con
 
     await expect(page.locator('.photo-card')).toHaveCount(5);
     await expect(page.locator('.photo-card.is-video')).toHaveCount(1);
+    await expect(page.locator('.photo-card.is-video .photo-media-badge')).toHaveText('▶ 视频');
     await expect.poll(function () {
         return page.locator('.photo-card img').evaluateAll(function (images) {
             return images.every(function (image) { return image.naturalWidth > 0 && image.naturalHeight > 0; });
@@ -209,20 +229,37 @@ test('mobile mixed photo and video import keeps every source visible without con
     }
 
     var mobileLayout = await page.evaluate(function () {
-        var motion = document.getElementById('canvas-motion-controls').getBoundingClientRect();
-        var toggle = document.getElementById('sidebar-toggle').getBoundingClientRect();
+        var toolbar = document.querySelector('.workspace-bar');
+        var motion = document.getElementById('canvas-motion-controls');
+        var actions = document.querySelector('.workspace-actions');
+        var motionRect = motion.getBoundingClientRect();
+        var actionsRect = actions.getBoundingClientRect();
         return {
             noHorizontalOverflow: document.documentElement.scrollWidth === innerWidth,
-            controlsDoNotOverlap: motion.right <= toggle.left,
-            toolbarHeight: document.querySelector('.workspace-bar').getBoundingClientRect().height
+            controlsAreInToolbar: motion.parentElement === toolbar,
+            controlsShareOneRow: Math.abs(
+                (motionRect.top + motionRect.height / 2) -
+                (actionsRect.top + actionsRect.height / 2)
+            ) < 2,
+            toolbarCanScroll: toolbar.scrollWidth > toolbar.clientWidth,
+            toolbarHeight: toolbar.getBoundingClientRect().height
         };
     });
     expect(mobileLayout.noHorizontalOverflow).toBe(true);
-    expect(mobileLayout.controlsDoNotOverlap).toBe(true);
-    expect(mobileLayout.toolbarHeight).toBeLessThanOrEqual(110);
+    expect(mobileLayout.controlsAreInToolbar).toBe(true);
+    expect(mobileLayout.controlsShareOneRow).toBe(true);
+    expect(mobileLayout.toolbarCanScroll).toBe(true);
+    expect(mobileLayout.toolbarHeight).toBeLessThanOrEqual(64);
 
     await page.locator('#sidebar-toggle').click();
     await expect(page.locator('.app')).toHaveClass(/sidebar-open/);
+    await expect(page.locator('#material-import')).toBeVisible();
+    await expect(page.locator('#design-presets')).toBeHidden();
+    await page.getByRole('button', { name: '轮廓', exact: true }).click();
+    await expect(page.locator('#design-shape')).toBeVisible();
+    await expect(page.locator('#material-import')).toBeHidden();
+    await page.getByRole('button', { name: '素材', exact: true }).click();
+    await expect(page.locator('#photo-library-panel')).toBeVisible();
     await page.locator('.photo-card.is-video').click();
     await expect(page.locator('#lightbox-video')).toBeVisible();
     await expect(page.locator('#lightbox-video')).toHaveAttribute('src', /^blob:/);
@@ -333,7 +370,15 @@ test('offers slot-local positioning and speed-controlled flow playback', async f
     await expect(page.locator('#position-mode-btn')).toBeEnabled();
     await page.locator('#position-mode-btn').click();
     await expect(page.locator('#position-mode-btn')).toHaveAttribute('aria-pressed', 'true');
-    await expect(page.locator('#canvas-help')).toContainText('上下左右移动');
+    await expect(page.locator('#canvas-help')).toContainText('滚轮缩放');
+    await page.locator('#wall-canvas').click({ position: { x: 550, y: 430 } });
+    await expect(page.locator('#local-adjust-toolbar')).toBeVisible();
+    await page.locator('#local-zoom-range').fill('1.8');
+    await expect(page.locator('#local-zoom-value')).toHaveText('180%');
+    await expect(page.locator('#local-adjust-reset')).toBeEnabled();
+    await page.locator('#local-zoom-out').click();
+    await expect(page.locator('#local-zoom-range')).toHaveValue('1.7');
+    await expect(page.locator('#local-zoom-value')).toHaveText('170%');
 
     await page.locator('#flow-speed').selectOption('fast');
     await page.locator('#flow-play-btn').click();
@@ -418,7 +463,9 @@ test('uses an original built-in track and an exact matrix template', async funct
 
 test('searches templates and saves a custom template', async function ({ page }) {
     await page.locator('#template-search').fill('婚礼');
-    await expect(page.locator('.preset-btn')).toHaveCount(1);
+    await expect(page.locator('.preset-btn')).toHaveCount(2);
+    await expect(page.locator('[data-preset="wedding"]')).toBeVisible();
+    await expect(page.locator('[data-preset="flower-wedding"]')).toBeVisible();
     await page.locator('#template-search').fill('');
     page.once('dialog', function (dialog) { return dialog.accept('我的婚礼版式'); });
     await page.locator('#save-template-btn').click();
@@ -455,7 +502,7 @@ test('exports the selected reveal timeline as a non-empty WebM video', async fun
     await page.locator('#export-btn').click();
     await page.getByRole('radio', { name: /视频/, exact: true }).click({ force: true });
     await page.getByRole('radio', { name: /WebM/, exact: true }).click({ force: true });
-    await expect(page.locator('#export-dimensions')).toContainText('30fps');
+    await expect(page.locator('#export-dimensions')).toContainText('15fps');
 
     var downloadPromise = page.waitForEvent('download', { timeout: 30000 });
     await page.locator('#export-confirm').click();

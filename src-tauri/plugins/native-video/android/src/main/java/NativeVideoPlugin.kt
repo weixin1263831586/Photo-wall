@@ -3,8 +3,10 @@ package com.photowall.nativevideo
 import android.app.Activity
 import android.content.Intent
 import android.graphics.Bitmap
+import android.media.MediaCodecList
 import android.media.MediaMetadataRetriever
 import android.net.Uri
+import android.os.Build
 import androidx.annotation.OptIn
 import androidx.core.content.FileProvider
 import androidx.media3.common.C
@@ -70,6 +72,15 @@ class TranscodeFramesArgs {
     var loopAudio: Boolean = true
     var fadeIn: Double = 0.0
     var fadeOut: Double = 0.0
+}
+
+/** Alternates integer millisecond durations so cumulative frame time stays
+ * aligned with the requested rational FPS instead of truncating every frame. */
+internal fun imageFrameDurationMs(frameIndex: Int, fps: Int): Long {
+    val safeFps = fps.coerceIn(1, 120)
+    val start = Math.round(frameIndex * 1000.0 / safeFps)
+    val end = Math.round((frameIndex + 1) * 1000.0 / safeFps)
+    return (end - start).coerceAtLeast(1L)
 }
 
 /**
@@ -150,23 +161,28 @@ class OpenFileArgs {
     var mimeType: String = "video/mp4"
 }
 
+@OptIn(UnstableApi::class)
 @TauriPlugin
 class NativeVideoPlugin(private val activity: Activity) : Plugin(activity) {
     private var activeTransformer: Transformer? = null
     private var activeInvoke: Invoke? = null
     private var activeOutputFile: File? = null
+    private var activeJobId = 0L
+    private var nextJobId = 1L
 
     private fun clearActiveExport(deleteOutput: Boolean = false) {
         val output = activeOutputFile
         activeInvoke = null
         activeTransformer = null
         activeOutputFile = null
+        activeJobId = 0L
         if (deleteOutput && output?.exists() == true) {
             runCatching { output.delete() }
         }
     }
 
-    private fun resolveExport(output: File, encoder: String) {
+    private fun resolveExport(jobId: Long, output: File, encoder: String) {
+        if (activeJobId != jobId) return
         val pending = activeInvoke
         val ret = JSObject()
         ret.put("outputPath", output.absolutePath)
@@ -175,7 +191,8 @@ class NativeVideoPlugin(private val activity: Activity) : Plugin(activity) {
         pending?.resolve(ret)
     }
 
-    private fun rejectExport(message: String, deleteOutput: Boolean = true) {
+    private fun rejectExport(jobId: Long, message: String, deleteOutput: Boolean = true) {
+        if (activeJobId != jobId) return
         val pending = activeInvoke
         clearActiveExport(deleteOutput)
         pending?.reject(message)
@@ -214,9 +231,21 @@ class NativeVideoPlugin(private val activity: Activity) : Plugin(activity) {
     @Command
     fun capabilities(invoke: Invoke) {
         val ret = JSObject()
-        ret.put("available", true)
+        val h264Encoder = runCatching {
+            MediaCodecList(MediaCodecList.ALL_CODECS).codecInfos.firstOrNull { codec ->
+                codec.isEncoder && codec.supportedTypes.any { type ->
+                    type.equals(MimeTypes.VIDEO_H264, ignoreCase = true)
+                }
+            }
+        }.getOrNull()
+        ret.put("available", h264Encoder != null)
         ret.put("platform", "android")
-        ret.put("encoder", "Android MediaCodec / Media3 Transformer")
+        ret.put("encoder", h264Encoder?.name ?: "unavailable")
+        ret.put("busy", activeTransformer != null)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && h264Encoder != null) {
+            ret.put("hardwareAccelerated", h264Encoder.isHardwareAccelerated)
+            ret.put("softwareOnly", h264Encoder.isSoftwareOnly)
+        }
         invoke.resolve(ret)
     }
 
@@ -297,11 +326,11 @@ class NativeVideoPlugin(private val activity: Activity) : Plugin(activity) {
 
         try {
             val fps = args.fps.coerceIn(8, 30)
-            val frameDurationMs = (1000.0 / fps).toLong().coerceAtLeast(1L)
-            val frameItems = frameFiles.map { frame ->
+            val jobId = nextJobId++
+            val frameItems = frameFiles.mapIndexed { index, frame ->
                 val media = MediaItem.Builder()
                     .setUri(Uri.fromFile(frame))
-                    .setImageDurationMs(frameDurationMs)
+                    .setImageDurationMs(imageFrameDurationMs(index, fps))
                     .build()
                 EditedMediaItem.Builder(media)
                     .setFrameRate(fps)
@@ -346,7 +375,7 @@ class NativeVideoPlugin(private val activity: Activity) : Plugin(activity) {
                 .setAudioMimeType(MimeTypes.AUDIO_AAC)
                 .addListener(object : Transformer.Listener {
                     override fun onCompleted(composition: Composition, exportResult: ExportResult) {
-                        resolveExport(output, "Android Media3 image sequence / H.264")
+                        resolveExport(jobId, output, "Android Media3 image sequence / H.264")
                     }
 
                     override fun onError(
@@ -354,13 +383,14 @@ class NativeVideoPlugin(private val activity: Activity) : Plugin(activity) {
                         exportResult: ExportResult,
                         exportException: ExportException
                     ) {
-                        rejectExport(exportException.message ?: "Android frame export failed")
+                        rejectExport(jobId, exportException.message ?: "Android frame export failed")
                     }
                 })
                 .build()
             activeInvoke = invoke
             activeTransformer = transformer
             activeOutputFile = output
+            activeJobId = jobId
             transformer.start(composition, output.absolutePath)
         } catch (error: Throwable) {
             clearActiveExport(true)
@@ -386,6 +416,7 @@ class NativeVideoPlugin(private val activity: Activity) : Plugin(activity) {
         if (output.exists()) output.delete()
 
         try {
+            val jobId = nextJobId++
             val video = EditedMediaItem.Builder(MediaItem.fromUri(Uri.fromFile(input)))
                 .setRemoveAudio(!(args.keepAudio && args.audioPath == null))
                 .build()
@@ -431,7 +462,7 @@ class NativeVideoPlugin(private val activity: Activity) : Plugin(activity) {
                 .setAudioMimeType(MimeTypes.AUDIO_AAC)
                 .addListener(object : Transformer.Listener {
                     override fun onCompleted(composition: Composition, exportResult: ExportResult) {
-                        resolveExport(output, "Android MediaCodec H.264 / AAC")
+                        resolveExport(jobId, output, "Android MediaCodec H.264 / AAC")
                     }
 
                     override fun onError(
@@ -439,13 +470,14 @@ class NativeVideoPlugin(private val activity: Activity) : Plugin(activity) {
                         exportResult: ExportResult,
                         exportException: ExportException
                     ) {
-                        rejectExport(exportException.message ?: "Android native video export failed")
+                        rejectExport(jobId, exportException.message ?: "Android native video export failed")
                     }
                 })
                 .build()
             activeInvoke = invoke
             activeTransformer = transformer
             activeOutputFile = output
+            activeJobId = jobId
             transformer.start(composition, output.absolutePath)
         } catch (error: Throwable) {
             clearActiveExport(true)
@@ -463,6 +495,7 @@ class NativeVideoPlugin(private val activity: Activity) : Plugin(activity) {
             activeTransformer = null
             activeInvoke = null
             activeOutputFile = null
+            activeJobId = 0L
             try {
                 transformer?.cancel()
                 pending?.reject("Native video export cancelled")

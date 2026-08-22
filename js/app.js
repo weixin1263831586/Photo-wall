@@ -65,6 +65,7 @@ import {
         lightboxTranscodedURL: '',
         lightboxTranscodeToken: 0,
         localAdjustSnapshot: null,
+        localAdjustCommitTimer: null,
         flowPlaying: false,
         flowTimer: null,
         flowSnapshot: null,
@@ -155,7 +156,19 @@ import {
         app.videoPlayer = createWallVideoPlayer({
             maxConcurrent: app.deviceProfile.mobile ? 4 : 10,
             rotationInterval: app.deviceProfile.mobile ? 9000 : 12000,
-            onActivity: function () { if (app.wall) app.wall._ensureVideoLoop(); }
+            onActivity: function () { if (app.wall) app.wall._ensureVideoLoop(); },
+            onDecodeError: function (photo) {
+                /* A WebView may decode the poster yet fail once continuous
+                   playback begins. Close that gap by sending the original to
+                   the same Android H.264 compatibility queue. */
+                if (!isAndroidNativeApp() || !photo || photo.playbackBlob ||
+                    !(photo.originalBlob instanceof Blob)) return;
+                photo.playbackStatus = 'decode-error';
+                if (app.renderPhotoLibrary) app.renderPhotoLibrary();
+                setTimeout(function () {
+                    if (app.photos.indexOf(photo) >= 0) app.prepareIncompatibleVideos([photo]);
+                }, 0);
+            }
         });
         app.wall = new PhotoWall(canvas, {
             maxDevicePixelRatio: app.deviceProfile.maxEditorDpr,
@@ -201,14 +214,12 @@ import {
             app.toast('已交换两张照片的位置');
             app.updateActionState();
         };
-        app.wall.onBeforeLocalAdjust = function () {
-            app.localAdjustSnapshot = app.captureState();
-        };
+        app.wall.onBeforeLocalAdjust = app.beginLocalAdjust;
         app.wall.onLocalAdjust = function () {
-            if (app.localAdjustSnapshot) app.recordHistory(app.localAdjustSnapshot);
-            app.localAdjustSnapshot = null;
-            app.toast('已调整照片在当前格位中的位置');
-            app.updateActionState();
+            app.commitLocalAdjust('已调整当前格位中的照片位置');
+        };
+        app.wall.onLocalAdjustSelect = function () {
+            app.updateLocalAdjustControls();
         };
         app.wall.onLayout = function (slotCount, largeCount) {
             var status = document.getElementById('canvas-status');
@@ -219,6 +230,7 @@ import {
                 '所有素材仅在本地处理';
             app.updateExportDimensions();
             app.updateLayoutPresetSelection();
+            app.updateLocalAdjustControls();
         };
         app.wall.onOverlaySelect = function (id) {
             app.selectedOverlayId = id;
@@ -333,11 +345,6 @@ import {
         var backdrop = document.getElementById('sidebar-backdrop');
         if (!toggleBtn || !backdrop) return;
 
-        var motionControls = document.getElementById('canvas-motion-controls');
-        var workspaceBar = document.querySelector('.workspace-bar');
-        var canvasStage = document.getElementById('canvas-stage');
-        var motionHomeMarker = document.createComment('canvas-motion-controls home');
-
         /* Keep the JS breakpoint in sync with the CSS mobile layout query. */
         function isMobileLayout() {
             return window.matchMedia('(max-width: 768px)').matches;
@@ -345,23 +352,33 @@ import {
 
         function syncToggleVisibility() {
             toggleBtn.hidden = !isMobileLayout();
-            if (!isMobileLayout()) closeSidebar();
-            relocateMotionControls();
+            if (!isMobileLayout()) {
+                closeSidebar();
+                document.querySelectorAll('.sidebar .mobile-category-hidden').forEach(function (panel) {
+                    panel.classList.remove('mobile-category-hidden');
+                });
+            } else {
+                var activeCategory = document.querySelector('.workflow-nav [data-workflow-target].active');
+                if (activeCategory) showMobileCategory(activeCategory.getAttribute('data-workflow-target'));
+            }
         }
 
-        function relocateMotionControls() {
-            if (!motionControls || !workspaceBar || !canvasStage) return;
-            /* On mobile the controls overlay the bottom of the canvas;
-             * on desktop they sit inside the top toolbar at their original
-             * DOM position (before .workspace-actions). */
-            if (isMobileLayout()) {
-                if (motionControls.parentElement !== canvasStage) {
-                    motionHomeMarker.parentNode || workspaceBar.insertBefore(motionHomeMarker, motionControls);
-                    canvasStage.appendChild(motionControls);
-                }
-            } else if (motionControls.parentElement !== workspaceBar) {
-                workspaceBar.insertBefore(motionControls, motionHomeMarker);
-            }
+        var mobileCategoryPanels = {
+            'material-import': ['material-import', 'photo-library-panel'],
+            'design-presets': ['design-presets'],
+            'design-shape': ['design-shape'],
+            'design-layout': ['design-layout', 'design-photo-style', 'design-smart'],
+            'design-decorate': ['design-decorate', 'design-music']
+        };
+
+        function showMobileCategory(category) {
+            if (!isMobileLayout()) return;
+            var visibleIds = new Set(mobileCategoryPanels[category] || [category]);
+            document.querySelectorAll('.sidebar > section.panel').forEach(function (panel) {
+                panel.classList.toggle('mobile-category-hidden', !visibleIds.has(panel.id));
+            });
+            var sidebar = document.querySelector('.sidebar');
+            if (sidebar) sidebar.scrollTo({ top: 0, behavior: 'smooth' });
         }
 
         function openSidebar() {
@@ -403,7 +420,8 @@ import {
                 document.querySelectorAll('.workflow-nav [data-workflow-target]').forEach(function (item) {
                     item.classList.toggle('active', item === button);
                 });
-                target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                if (isMobileLayout()) showMobileCategory(button.getAttribute('data-workflow-target'));
+                else target.scrollIntoView({ behavior: 'smooth', block: 'start' });
             });
         });
 
@@ -767,6 +785,50 @@ import {
         document.getElementById('position-mode-btn').addEventListener('click', function () {
             app.setPositionMode(app.wall.interactionMode !== 'adjust');
         });
+        var localZoomRange = document.getElementById('local-zoom-range');
+        localZoomRange.addEventListener('input', function () {
+            app.setSelectedLocalZoom(Number(this.value));
+        });
+        localZoomRange.addEventListener('change', function () {
+            app.commitLocalAdjust('已缩放当前格位中的照片');
+        });
+        document.getElementById('local-zoom-out').addEventListener('click', function () {
+            if (app.stepSelectedLocalZoom(-0.1)) app.commitLocalAdjust('已缩小当前格位中的照片');
+        });
+        document.getElementById('local-zoom-in').addEventListener('click', function () {
+            if (app.stepSelectedLocalZoom(0.1)) app.commitLocalAdjust('已放大当前格位中的照片');
+        });
+        document.getElementById('local-adjust-reset').addEventListener('click', function () {
+            var index = app.wall.localAdjustIndex;
+            var item = app.wall.layout[index];
+            if (!item) return;
+            app.beginLocalAdjust();
+            if (app.wall.resetLocalAdjust(index)) {
+                app.updateLocalAdjustControls();
+                app.commitLocalAdjust('已复位当前格位中的照片');
+            } else {
+                app.localAdjustSnapshot = null;
+            }
+        });
+        document.getElementById('local-adjust-close').addEventListener('click', function () {
+            app.wall.selectLocalAdjust(-1);
+            document.getElementById('wall-canvas').focus();
+        });
+        document.getElementById('wall-canvas').addEventListener('wheel', function (event) {
+            if (app.wall.interactionMode !== 'adjust') return;
+            var rect = this.getBoundingClientRect();
+            var hovered = app.wall.getPhotoAt(event.clientX - rect.left, event.clientY - rect.top);
+            if (hovered >= 0) app.wall.selectLocalAdjust(hovered);
+            if (app.wall.localAdjustIndex < 0) return;
+            event.preventDefault();
+            var factor = Math.exp(-event.deltaY * 0.002);
+            var item = app.wall.layout[app.wall.localAdjustIndex];
+            if (!item || !app.setSelectedLocalZoom((Number(item.localZoom) || 1) * factor)) return;
+            clearTimeout(app.localAdjustCommitTimer);
+            app.localAdjustCommitTimer = setTimeout(function () {
+                app.commitLocalAdjust('已缩放当前格位中的照片');
+            }, 180);
+        }, { passive: false });
         document.getElementById('flow-play-btn').addEventListener('click', function () {
             if (app.flowPlaying || app.revealTimeline) app.stopAllPlayback(true);
             else app.startPlayback();
@@ -825,18 +887,6 @@ import {
             app.clearPhotos();
         });
         document.getElementById('export-btn').addEventListener('click', function () {
-            /* Reset to image category when opened via the general export button. */
-            var imageCategory = document.querySelector('input[name="export-category"][value="image"]');
-            if (imageCategory) imageCategory.checked = true;
-            var pngRadio = document.querySelector('input[name="export-format"][value="png"]');
-            if (pngRadio) pngRadio.checked = true;
-            app.openExportDialog();
-        });
-        document.getElementById('export-video-btn').addEventListener('click', function () {
-            var videoCategory = document.querySelector('input[name="export-category"][value="video"]');
-            if (videoCategory) videoCategory.checked = true;
-            var mp4Radio = document.querySelector('input[name="export-format"][value="mp4"]');
-            if (mp4Radio) mp4Radio.checked = true;
             app.openExportDialog();
         });
         document.getElementById('undo-btn').addEventListener('click', app.undo);
@@ -1920,7 +1970,8 @@ import {
     app.prepareIncompatibleVideos = function (photos) {
         if (!isAndroidNativeApp()) return Promise.resolve([]);
         var candidates = (Array.isArray(photos) ? photos : []).filter(function (photo) {
-            return photo && photo.mediaType === 'video' && photo.posterFallback === true &&
+            return photo && photo.mediaType === 'video' &&
+                (photo.posterFallback === true || photo.playbackStatus === 'decode-error') &&
                 !photo.playbackBlob && photo.originalBlob instanceof Blob;
         });
         if (!candidates.length) return Promise.resolve([]);
@@ -2556,6 +2607,9 @@ import {
 
     app.restoreState = function (state) {
         if (!state) return;
+        clearTimeout(app.localAdjustCommitTimer);
+        app.localAdjustCommitTimer = null;
+        app.localAdjustSnapshot = null;
         app.stopAllPlayback(false);
         clearTimeout(app.densityTimer);
         clearTimeout(app.overlapTimer);
@@ -2622,25 +2676,86 @@ import {
 
     app.undo = function () {
         app.stopAllPlayback(true);
+        if (app.localAdjustSnapshot) app.commitLocalAdjust();
         if (app.history.undo()) app.toast('已撤销');
     };
 
     app.redo = function () {
         app.stopAllPlayback(true);
+        if (app.localAdjustSnapshot) app.commitLocalAdjust();
         if (app.history.redo()) app.toast('已重做');
+    };
+
+    app.beginLocalAdjust = function () {
+        if (!app.localAdjustSnapshot && app.wall) app.localAdjustSnapshot = app.captureState();
+    };
+
+    app.commitLocalAdjust = function (message) {
+        clearTimeout(app.localAdjustCommitTimer);
+        app.localAdjustCommitTimer = null;
+        if (!app.localAdjustSnapshot) return false;
+        app.recordHistory(app.localAdjustSnapshot);
+        app.localAdjustSnapshot = null;
+        if (message) app.toast(message);
+        app.updateActionState();
+        return true;
+    };
+
+    app.updateLocalAdjustControls = function () {
+        var toolbar = document.getElementById('local-adjust-toolbar');
+        if (!toolbar || !app.wall) return;
+        var index = app.wall.localAdjustIndex;
+        var item = app.wall.interactionMode === 'adjust' && index >= 0 ? app.wall.layout[index] : null;
+        toolbar.hidden = !item;
+        if (!item) return;
+        var zoom = Math.max(1, Math.min(4, Number(item.localZoom) || 1));
+        document.getElementById('local-adjust-name').textContent =
+            item.photo && item.photo.name ? item.photo.name : '当前照片';
+        document.getElementById('local-zoom-range').value = String(zoom);
+        document.getElementById('local-zoom-value').textContent = Math.round(zoom * 100) + '%';
+        document.getElementById('local-zoom-out').disabled = zoom <= 1.0001;
+        document.getElementById('local-zoom-in').disabled = zoom >= 3.9999;
+        document.getElementById('local-adjust-reset').disabled =
+            zoom <= 1.0001 && Math.abs(Number(item.localOffsetX) || 0) < 0.0001 &&
+            Math.abs(Number(item.localOffsetY) || 0) < 0.0001;
+    };
+
+    app.setSelectedLocalZoom = function (value) {
+        var index = app.wall ? app.wall.localAdjustIndex : -1;
+        var item = index >= 0 ? app.wall.layout[index] : null;
+        if (!item) return false;
+        var zoom = Math.max(1, Math.min(4, Number(value) || 1));
+        if (Math.abs(zoom - (Number(item.localZoom) || 1)) < 0.0001) return false;
+        app.beginLocalAdjust();
+        if (!app.wall.setLocalZoom(index, zoom)) return false;
+        app.updateLocalAdjustControls();
+        return true;
+    };
+
+    app.stepSelectedLocalZoom = function (delta) {
+        var index = app.wall ? app.wall.localAdjustIndex : -1;
+        var item = index >= 0 ? app.wall.layout[index] : null;
+        if (!item) return false;
+        var current = Number(item.localZoom) || 1;
+        return app.setSelectedLocalZoom(Math.round((current + delta) * 20) / 20);
     };
 
     app.setPositionMode = function (enabled) {
         if (enabled) app.stopAllPlayback(true);
-        app.localAdjustSnapshot = null;
+        if (app.localAdjustSnapshot) app.commitLocalAdjust();
+        else {
+            clearTimeout(app.localAdjustCommitTimer);
+            app.localAdjustCommitTimer = null;
+        }
         app.wall.setInteractionMode(enabled ? 'adjust' : 'swap');
         var button = document.getElementById('position-mode-btn');
         button.classList.toggle('active', enabled);
         button.setAttribute('aria-pressed', String(enabled));
-        button.title = enabled ? '拖动照片可调整其在当前格位中的可见区域' : '在格位内移动照片以突出人物';
+        button.title = enabled ? '选择照片后可拖动位置，并单独放大或缩小' : '在格位内移动和缩放照片以突出人物';
         document.getElementById('canvas-help').textContent = enabled ?
-            '局部调图模式 · 拖动照片可上下左右移动，点击仍可查看原素材' :
-            '拖拽素材可交换位置 · 开启局部调图后可在格位内移动人物';
+            '局部调图模式 · 点击照片后拖动位置，使用控件或滚轮缩放' :
+            '拖拽素材可交换位置 · 开启局部调图后可移动和缩放单个格位';
+        app.updateLocalAdjustControls();
     };
 
     app.flowTiming = function () {
@@ -2845,7 +2960,6 @@ import {
         var hasPhotos = app.photos.length > 0;
         if (app.flowPlaying && app.photos.length < 2) app.stopAllPlayback(false);
         var exportButton = document.getElementById('export-btn');
-        var exportVideoButton = document.getElementById('export-video-btn');
         var shuffleButton = document.getElementById('shuffle-btn');
         var undoButton = document.getElementById('undo-btn');
         var redoButton = document.getElementById('redo-btn');
@@ -2856,7 +2970,6 @@ import {
         var playbackOrderSelect = document.getElementById('playback-order');
         var playbackTransitionSelect = document.getElementById('playback-transition');
         if (exportButton) exportButton.disabled = !hasPhotos;
-        if (exportVideoButton) exportVideoButton.disabled = !hasPhotos;
         if (shuffleButton) shuffleButton.disabled = !hasPhotos;
         if (undoButton) undoButton.disabled = !app.history || !app.history.canUndo();
         if (redoButton) redoButton.disabled = !app.history || !app.history.canRedo();
@@ -3166,11 +3279,11 @@ import {
         button.disabled = true;
         button.textContent = isAndroidNativeApp() ? '正在使用设备解码器…' : '正在加载视频引擎…';
         var enginePromise = isAndroidNativeApp() ?
-            import('./platform/AndroidMediaBridge.js').then(function (module) {
+            Promise.resolve().then(function () {
                 /* ffmpeg.wasm regularly OOMs on Android WebView, so prefer the
                    hardware-accelerated Media3 pipeline and fall back to the
                    wasm engine only when the device encoder refuses the file. */
-                return module.transcodeVideoForAndroidPlayback(source, {
+                return transcodeVideoForAndroidPlayback(source, {
                     name: photo.name,
                     onStatus: function (status) {
                         if (token !== app.lightboxTranscodeToken) return;
@@ -3405,8 +3518,9 @@ import {
                 cycles: app.playbackMode === 'shuffle' ? app.getPlaybackCycles() : 1
             });
             var durationSec = previewTimeline.duration / 1000;
-            var totalFrames = Math.ceil(durationSec * 30) + 1;
-            target.textContent = width + ' × ' + height + ' · 30fps · ' + durationSec.toFixed(1) + 's · ' + totalFrames + ' 帧';
+            var fps = Math.max(10, Math.min(30, Number(dimensions.fps) || 30));
+            var totalFrames = Math.ceil(durationSec * fps) + 1;
+            target.textContent = width + ' × ' + height + ' · ' + fps + 'fps · ' + durationSec.toFixed(1) + 's · ' + totalFrames + ' 帧';
         } else {
             var megapixels = (width * height / 1000000).toFixed(1);
             target.textContent = width + ' × ' + height + ' px · ' + megapixels + ' MP';
@@ -3522,7 +3636,7 @@ import {
                 outputPromise = recordTimelineCanvas(app.wall, videoTimeline, {
                     width: videoDims.width,
                     height: videoDims.height,
-                    fps: isAndroidNativeApp() ? 15 : 30,
+                    fps: isAndroidNativeApp() ? Math.min(15, videoDims.fps) : videoDims.fps,
                     format: format,
                     scale: videoScale,
                     aspectRatio: videoAspect,

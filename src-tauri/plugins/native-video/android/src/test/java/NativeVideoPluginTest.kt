@@ -10,6 +10,14 @@ import org.junit.Assert.*
 class NativeVideoPluginTest {
 
     @Test
+    fun imageFrameDurations_doNotAccumulateFpsDrift() {
+        val oneMinuteAt15Fps = (0 until 900).sumOf { imageFrameDurationMs(it, 15) }
+        assertEquals(60_000L, oneMinuteAt15Fps)
+        assertTrue(imageFrameDurationMs(0, 15) in 66L..67L)
+        assertTrue(imageFrameDurationMs(1, 15) in 66L..67L)
+    }
+
+    @Test
     fun fade_gain_isZeroAtFadeInStart() {
         val processor = FadeAudioProcessor(
             fadeInSeconds = 1.0f,

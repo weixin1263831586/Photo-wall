@@ -484,10 +484,9 @@ function installExportProgress(app) {
     var cancelledAt = 0;
 
     function startController() {
-        controller = new AbortController();
-        import('../video/VideoRecorder.js').then(function (module) {
-            module.setVideoExportAbortSignal(controller.signal);
-        });
+        controller = window.__PHOTO_WALL_EXPORT_ABORT_CONTROLLER__ || new AbortController();
+        window.__PHOTO_WALL_EXPORT_ABORT_CONTROLLER__ = controller;
+        window.__PHOTO_WALL_EXPORT_ABORT_SIGNAL__ = controller.signal;
     }
 
     document.addEventListener('click', function (event) {
@@ -592,17 +591,7 @@ function installExportUI(app) {
     });
     document.addEventListener('click', function (event) {
         if (!event.target.closest) return;
-        if (event.target.closest('#export-video-btn')) {
-            setTimeout(function () {
-                if (preset && mobileLayout() && preset.value === 'portrait') {
-                    preset.value = 'portrait-720';
-                    preset.dispatchEvent(new Event('change', { bubbles: true }));
-                }
-                syncCopy();
-            }, 0);
-        } else if (event.target.closest('#export-btn')) {
-            setTimeout(syncCopy, 0);
-        }
+        if (event.target.closest('#export-btn')) setTimeout(syncCopy, 0);
     }, true);
     syncCopy();
 }
@@ -629,7 +618,8 @@ function install(app) {
     if (!app || app.__runtimeOptimizationInstalled || !app.wall || !app.assetManager) return false;
     app.__runtimeOptimizationInstalled = true;
     installStyles();
-    installWallPlaybackRenderer(app);
+    /* Playback rendering now lives in PhotoWall itself. Do not replace core
+       methods at runtime: fixes in photowall.js must be the code that runs. */
     installPlaybackPreloader(app);
     installRetryUI(app);
     installMobilePlaybackSheet(app);

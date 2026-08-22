@@ -4,14 +4,15 @@
  * every cell it occupies, looping forever.
  *
  * Elements are created lazily from the photo's original or temporary H.264
- * playback blob. Decoder slots rotate when a project contains many videos;
- * export temporarily includes every source for complete, time-accurate frames.
+ * playback blob. Decoder slots rotate when a project contains many videos.
+ * Export keeps the same bounded pool and seeks visible sources on demand.
  */
 export function createWallVideoPlayer(options) {
     options = options || {};
     var documentRef = options.document || (typeof document !== 'undefined' ? document : null);
     var urlAPI = options.URL || (typeof URL !== 'undefined' ? URL : null);
     var onActivity = typeof options.onActivity === 'function' ? options.onActivity : null;
+    var onDecodeError = typeof options.onDecodeError === 'function' ? options.onDecodeError : null;
     /* Every looping element holds a hardware/software decoder. Bound the
        pool so a wall of many videos keeps the device responsive; cells
        beyond the cap keep their static poster. */
@@ -24,11 +25,13 @@ export function createWallVideoPlayer(options) {
     var failed = new Map();
     var container = null;
     var gestureHooked = false;
+    var gestureRetryHandler = null;
     var desiredPhotos = [];
     var rotationCursor = 0;
     var rotationTimer = null;
     var exporting = false;
     var manualExportFrames = false;
+    var exportLRU = [];
 
     function notifyActivity() {
         if (onActivity) onActivity();
@@ -76,11 +79,11 @@ export function createWallVideoPlayer(options) {
     function hookGestureRetry() {
         if (gestureHooked || !documentRef || typeof documentRef.addEventListener !== 'function') return;
         gestureHooked = true;
-        function retryAll() {
+        gestureRetryHandler = function retryAll() {
             entries.forEach(requestPlay);
-        }
-        documentRef.addEventListener('pointerdown', retryAll, { passive: true });
-        documentRef.addEventListener('keydown', retryAll);
+        };
+        documentRef.addEventListener('pointerdown', gestureRetryHandler, { passive: true });
+        documentRef.addEventListener('keydown', gestureRetryHandler);
     }
 
     function handleVisibility() {
@@ -119,13 +122,17 @@ export function createWallVideoPlayer(options) {
                 notifyActivity();
             }
         });
-        video.addEventListener('error', function () {
+        video.addEventListener('error', function (event) {
             if (entries.get(photo.id) !== entry) return;
             /* The clip cannot be decoded in this runtime — fall back to the
                static poster permanently instead of retrying every sync(). */
             failed.set(photo.id, entry.source);
             release(photo.id);
             notifyActivity();
+            if (onDecodeError) {
+                try { onDecodeError(photo, video.error || event || new Error('Video decode failed')); }
+                catch (callbackError) { console.warn('视频解码失败回调异常:', callbackError); }
+            }
         });
         video.src = entry.url;
         try { video.load(); } catch (ignore) {}
@@ -255,10 +262,28 @@ export function createWallVideoPlayer(options) {
         });
     }
 
+    /** Keep recently-used export decoders within the same device-safe cap. */
+    function touchExportEntry(id) {
+        var index = exportLRU.indexOf(id);
+        if (index >= 0) exportLRU.splice(index, 1);
+        exportLRU.push(id);
+    }
+
+    function evictExportEntry(exceptId) {
+        while (entries.size >= maxConcurrent) {
+            var candidate = exportLRU.shift();
+            if (!candidate || candidate === exceptId || !entries.has(candidate)) {
+                candidate = Array.from(entries.keys()).find(function (id) { return id !== exceptId; });
+            }
+            if (!candidate) break;
+            release(candidate);
+        }
+    }
+
     /**
-     * Video export temporarily expands the decoder pool so every imported
-     * video can contribute frames. Android uses manual seeking because its
-     * JPEG sequence is rendered faster than wall-clock playback.
+     * Export never expands to one decoder per imported clip. Android's manual
+     * renderer requests a visible clip immediately before drawing it; the LRU
+     * can then evict that decoder after its pixels are already on the canvas.
      */
     async function beginExport(photos, options) {
         options = options || {};
@@ -266,7 +291,9 @@ export function createWallVideoPlayer(options) {
         manualExportFrames = options.manualFrames === true;
         clearRotationTimer();
         desiredPhotos = (Array.isArray(photos) ? photos : desiredPhotos).filter(isPlayableVideoPhoto);
-        activate(desiredPhotos, desiredPhotos.length);
+        exportLRU = [];
+        activate(desiredPhotos, maxConcurrent);
+        entries.forEach(function (_, id) { touchExportEntry(id); });
         await Promise.all(Array.from(entries.values()).map(waitForMetadata));
         entries.forEach(function (entry) {
             try { entry.video.currentTime = 0; } catch (ignore) {}
@@ -286,9 +313,31 @@ export function createWallVideoPlayer(options) {
         })).then(function () { notifyActivity(); });
     }
 
+    /** Prepare one manual-export source just before the renderer paints it. */
+    async function preparePhotoFrame(photo, timeMs) {
+        if (!photo || !exporting) return get(photo);
+        if (!manualExportFrames) return get(photo);
+        if (!isPlayableVideoPhoto(photo) || isFailed(photo)) return null;
+        var entry = entries.get(photo.id);
+        if (entry && entry.source !== sourceBlob(photo)) {
+            release(photo.id);
+            entry = null;
+        }
+        if (!entry) {
+            evictExportEntry(photo.id);
+            entry = createEntry(photo);
+            entries.set(photo.id, entry);
+        }
+        touchExportEntry(photo.id);
+        await seekEntry(entry, timeMs);
+        notifyActivity();
+        return get(photo);
+    }
+
     function endExport() {
         exporting = false;
         manualExportFrames = false;
+        exportLRU = [];
         rotationCursor = 0;
         activate(activeWindow(), maxConcurrent);
         entries.forEach(requestPlay);
@@ -330,6 +379,16 @@ export function createWallVideoPlayer(options) {
         Array.from(entries.keys()).forEach(release);
         failed.clear();
         desiredPhotos = [];
+        exportLRU = [];
+        if (documentRef && typeof documentRef.removeEventListener === 'function') {
+            documentRef.removeEventListener('visibilitychange', handleVisibility);
+            if (gestureRetryHandler) {
+                documentRef.removeEventListener('pointerdown', gestureRetryHandler);
+                documentRef.removeEventListener('keydown', gestureRetryHandler);
+            }
+        }
+        gestureRetryHandler = null;
+        gestureHooked = false;
         if (container && container.parentNode) container.parentNode.removeChild(container);
         container = null;
     }
@@ -347,6 +406,7 @@ export function createWallVideoPlayer(options) {
         retry: retry,
         beginExport: beginExport,
         prepareFrame: prepareFrame,
+        preparePhotoFrame: preparePhotoFrame,
         endExport: endExport,
         setOnActivity: function (handler) {
             if (typeof handler === 'function') onActivity = handler;

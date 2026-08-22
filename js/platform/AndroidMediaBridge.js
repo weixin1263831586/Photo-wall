@@ -53,6 +53,17 @@ async function nativeModules() {
     };
 }
 
+async function cancelAndDrainNativeJob(native, pending) {
+    try { await native.invoke('plugin:native-video|cancel_export'); }
+    catch (cancelError) { console.warn('取消超时的 Android 视频任务失败:', cancelError); }
+    /* cancelExport rejects the original Invoke after Transformer.cancel().
+       Drain that rejection before deleting its input/output cache files. */
+    await Promise.race([
+        Promise.resolve(pending).catch(function () {}),
+        new Promise(function (resolve) { setTimeout(resolve, 2000); })
+    ]);
+}
+
 /**
  * Android WebView cannot reliably decode every MP4/HEVC stream. Ask the
  * platform MediaMetadataRetriever to extract a JPEG poster instead.
@@ -112,6 +123,7 @@ export async function transcodeVideoForAndroidPlayback(blob, options) {
 
     async function attempt(keepAudio) {
         var timeoutId;
+        var timeoutError = null;
         var invokePromise = native.invoke('plugin:native-video|transcode', {
             payload: {
                 inputPath: inputPath,
@@ -127,19 +139,22 @@ export async function transcodeVideoForAndroidPlayback(blob, options) {
                 keepAudio: keepAudio
             }
         });
-        /* If the watchdog fires first and we fall back, the native job keeps
-           running; swallow its eventual rejection so it is not captured as an
-           unhandledrejection crash report. */
+        /* The native Invoke rejects when cancelExport drains it. Keep a catch
+           attached immediately so a timeout cannot become unhandled. */
         invokePromise.catch(function () {});
         try {
             return await Promise.race([
                 invokePromise,
                 new Promise(function (_, reject) {
                     timeoutId = setTimeout(function () {
-                        reject(new Error('设备转码超时，请重试或使用系统播放器'));
+                        timeoutError = new Error('设备转码超时，请重试或使用系统播放器');
+                        reject(timeoutError);
                     }, 300000);
                 })
             ]);
+        } catch (error) {
+            if (error === timeoutError) await cancelAndDrainNativeJob(native, invokePromise);
+            throw error;
         } finally {
             clearTimeout(timeoutId);
         }
@@ -232,18 +247,20 @@ export async function recordTimelineOnAndroid(wall, timeline, options) {
         for (var frame = 0; frame < totalFrames; frame++) {
             throwIfAborted();
             var time = Math.min(timeline.duration, frame * frameDuration);
+            var playbackFrame = timeline.getFrame(time);
             if (videoPlayer && typeof videoPlayer.prepareFrame === 'function') {
                 await videoPlayer.prepareFrame(time);
             }
             throwIfAborted();
             ctx.clearRect(0, 0, pixelWidth, pixelHeight);
             if (typeof wall.renderPlaybackFrameAsync === 'function') {
-                await wall.renderPlaybackFrameAsync(ctx, timeline.getFrame(time), {
+                await wall.renderPlaybackFrameAsync(ctx, playbackFrame, {
                     sourceFrame: sourceFrame,
-                    background: background
+                    background: background,
+                    videoTime: time
                 });
             } else {
-                wall.renderPlaybackFrame(ctx, timeline.getFrame(time), {
+                wall.renderPlaybackFrame(ctx, playbackFrame, {
                     sourceFrame: sourceFrame,
                     background: background
                 });

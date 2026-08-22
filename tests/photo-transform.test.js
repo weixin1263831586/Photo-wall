@@ -1,6 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { addRoundedRectPath, applyPhotoTransform, normalizePhotoTransform, photoCoverLayout } from '../js/image/PhotoTransform.js';
+import {
+    addRoundedRectPath,
+    applyPhotoTransform,
+    normalizePhotoTransform,
+    photoCoverLayout,
+    SLOT_LOCAL_OFFSET_LIMIT
+} from '../js/image/PhotoTransform.js';
 
 test('photo transform clamps unsafe editor values', function () {
     assert.deepEqual(normalizePhotoTransform({
@@ -42,6 +48,70 @@ test('slot-local dragging moves the visible photo without changing its saved sub
     assert.ok(moved.drawY <= original.drawY);
     assert.equal(photo.focusX, 0.5);
     assert.equal(photo.focusY, 0.5);
+});
+
+test('slot-local dragging can use a full slot of source overflow', function () {
+    var image = { naturalWidth: 3000, naturalHeight: 1000 };
+    var photo = { focusX: 0.5, focusY: 0.5 };
+    var previousLimit = photoCoverLayout(image, 200, 200, photo, { offsetX: 1 });
+    var expandedLimit = photoCoverLayout(image, 200, 200, photo, { offsetX: SLOT_LOCAL_OFFSET_LIMIT });
+    var clamped = photoCoverLayout(image, 200, 200, photo, { offsetX: SLOT_LOCAL_OFFSET_LIMIT + 10 });
+    assert.ok(expandedLimit.drawX > previousLimit.drawX + 90);
+    assert.equal(clamped.drawX, expandedLimit.drawX);
+});
+
+test('slot-local zoom supports close-ups beyond boundary auto-crop zoom', function () {
+    var image = { naturalWidth: 1000, naturalHeight: 1000 };
+    var normal = photoCoverLayout(image, 200, 200, {}, { zoom: 1 });
+    var closeUp = photoCoverLayout(image, 200, 200, {}, { zoom: 3 });
+    assert.ok(Math.abs(closeUp.drawWidth - normal.drawWidth * 3) < 0.001);
+    assert.ok(Math.abs(closeUp.drawHeight - normal.drawHeight * 3) < 0.001);
+});
+
+test('slot-local pan reaches the complete crop range after a large zoom', function () {
+    var image = { naturalWidth: 1000, naturalHeight: 1000 };
+    var centred = photoCoverLayout(image, 200, 200, {}, { zoom: 4 });
+    var leftEdge = photoCoverLayout(image, 200, 200, {}, {
+        zoom: 4,
+        offsetX: -SLOT_LOCAL_OFFSET_LIMIT
+    });
+    var rightEdge = photoCoverLayout(image, 200, 200, {}, {
+        zoom: 4,
+        offsetX: SLOT_LOCAL_OFFSET_LIMIT
+    });
+    assert.equal(leftEdge.drawX, 100 - leftEdge.drawWidth);
+    assert.equal(rightEdge.drawX, -100);
+    assert.ok(leftEdge.drawX < centred.drawX - 290);
+    assert.ok(rightEdge.drawX > centred.drawX + 290);
+});
+
+test('thin boundary safe bounds widen panning without uncovering the visible mask', function () {
+    var image = { naturalWidth: 1000, naturalHeight: 1000 };
+    var regular = photoCoverLayout(image, 200, 200, {}, {
+        offsetX: SLOT_LOCAL_OFFSET_LIMIT
+    });
+    var boundary = photoCoverLayout(image, 200, 200, {}, {
+        offsetX: SLOT_LOCAL_OFFSET_LIMIT,
+        safeBounds: { x: 0.75, y: 0.2, width: 0.2, height: 0.6 }
+    });
+    var safeLeft = (0.75 - 0.5) * 200;
+    var safeRight = (0.75 + 0.2 - 0.5) * 200;
+    assert.equal(regular.drawX, -100);
+    assert.ok(boundary.drawX > regular.drawX + 140);
+    assert.ok(boundary.drawX <= safeLeft);
+    assert.ok(boundary.drawX + boundary.drawWidth >= safeRight);
+});
+
+test('malformed boundary bounds stay inside the slot', function () {
+    var layout = photoCoverLayout({ naturalWidth: 1000, naturalHeight: 1000 }, 200, 200, {}, {
+        offsetX: SLOT_LOCAL_OFFSET_LIMIT,
+        offsetY: SLOT_LOCAL_OFFSET_LIMIT,
+        safeBounds: { x: 8, y: 8, width: -4, height: -4 }
+    });
+    assert.equal(layout.drawX, 98);
+    assert.equal(layout.drawY, 98);
+    assert.ok(layout.drawX + layout.drawWidth >= 100);
+    assert.ok(layout.drawY + layout.drawHeight >= 100);
 });
 
 test('photo transform writes normalized edit state to a photo', function () {

@@ -89,7 +89,7 @@ body {
     z-index: 8;
     top: -20px;
     display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-template-columns: repeat(5, minmax(0, 1fr));
     gap: 4px;
     padding: 7px;
     border: 1px solid var(--border);
@@ -853,17 +853,24 @@ body {
     top: 50%;
     z-index: 2;
     transform: translate(-50%, -50%);
-    width: 28px;
-    height: 28px;
-    border-radius: 50%;
+    width: max-content;
+    max-width: calc(100% - 8px);
+    height: 24px;
+    border-radius: 12px;
     background: rgba(14,14,20,.72);
     color: #fff;
-    font-size: 12px;
-    line-height: 28px;
+    font-size: 9px;
+    font-weight: 700;
+    line-height: 24px;
     text-align: center;
-    padding-left: 2px;
+    padding: 0 7px;
+    white-space: nowrap;
+    backdrop-filter: blur(4px);
     pointer-events: none;
 }
+.photo-media-badge[data-state="converting"] { color: #ffe09a; }
+.photo-media-badge[data-state="poster"] { color: #ffd0ca; background: rgba(93,31,30,.82); }
+.photo-media-badge[data-state="compatible"] { color: #baf8e7; background: rgba(16,72,59,.82); }
 
 .photo-order {
     position: absolute;
@@ -978,13 +985,28 @@ body {
     display: flex;
     flex-wrap: nowrap;
     align-items: center;
-    justify-content: space-between;
+    justify-content: flex-start;
     gap: 12px;
     padding: 12px 18px;
+    overflow-x: auto;
+    overflow-y: hidden;
     border-bottom: 1px solid rgba(255,255,255,.07);
     background: rgba(14,14,20,.8);
     backdrop-filter: blur(16px);
+    scrollbar-width: thin;
+    scrollbar-color: rgba(255,255,255,.14) transparent;
+    overscroll-behavior-x: contain;
+    -webkit-overflow-scrolling: touch;
 }
+
+.workspace-bar::-webkit-scrollbar { height: 6px; }
+
+.workspace-bar::-webkit-scrollbar-thumb {
+    border-radius: 3px;
+    background: rgba(255,255,255,.14);
+}
+
+.workspace-bar::-webkit-scrollbar-track { background: transparent; }
 
 /* Stats pill anchored to the canvas bottom-left corner; the operation hint
    (canvas-help) mirrors it on the bottom-right. */
@@ -1042,31 +1064,15 @@ body {
     border-right: 1px solid var(--border);
 }
 
-/* The workspace actions always share one row; when the bar gets too narrow
-   they scroll horizontally inside it instead of wrapping. The extra vertical
-   padding (cancelled by negative margins) keeps button glows from being
-   clipped by the scroll container. */
+/* Motion settings and project actions form one continuous toolbar. The parent
+   owns horizontal scrolling, so neither group can wrap onto a second row. */
 .workspace-actions {
-    flex-shrink: 1;
-    min-width: 0;
-    overflow-x: auto;
-    padding-block: 8px;
-    margin-block: -8px;
-    scrollbar-width: thin;
-    scrollbar-color: rgba(255,255,255,.14) transparent;
+    flex: 0 0 auto;
+    min-width: max-content;
 }
 
 /* Without photos the motion strip is hidden; keep the actions right-aligned. */
 .main-area:not(.has-photos) .workspace-actions { margin-left: auto; }
-
-.workspace-actions::-webkit-scrollbar { height: 6px; }
-
-.workspace-actions::-webkit-scrollbar-thumb {
-    border-radius: 3px;
-    background: rgba(255,255,255,.14);
-}
-
-.workspace-actions::-webkit-scrollbar-track { background: transparent; }
 
 .toolbar-btn,
 .toolbar-icon-btn {
@@ -1142,9 +1148,8 @@ body {
 .canvas-motion-controls {
     display: none;
     align-items: center;
-    flex: 1;
-    min-width: 0;
-    overflow-x: auto;
+    flex: 0 0 auto;
+    min-width: max-content;
     gap: 6px;
     padding: 6px;
     border: 1px solid rgba(255,255,255,.09);
@@ -1152,18 +1157,7 @@ body {
     background: rgba(18,18,27,.55);
     box-shadow: 0 4px 14px rgba(0,0,0,.18);
     backdrop-filter: blur(12px);
-    scrollbar-width: thin;
-    scrollbar-color: rgba(255,255,255,.14) transparent;
 }
-
-.canvas-motion-controls::-webkit-scrollbar { height: 6px; }
-
-.canvas-motion-controls::-webkit-scrollbar-thumb {
-    border-radius: 3px;
-    background: rgba(255,255,255,.14);
-}
-
-.canvas-motion-controls::-webkit-scrollbar-track { background: transparent; }
 
 .main-area.has-photos .canvas-motion-controls { display: flex; }
 
@@ -1233,6 +1227,70 @@ body {
 }
 
 #wall-canvas.selecting-playback-origin { cursor: crosshair !important; }
+
+.local-adjust-toolbar {
+    position: absolute;
+    z-index: 6;
+    top: 16px;
+    left: 50%;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    max-width: calc(100% - 32px);
+    padding: 8px 10px;
+    border: 1px solid rgba(169,156,255,.42);
+    border-radius: 13px;
+    background: rgba(22,22,31,.9);
+    box-shadow: 0 12px 34px rgba(0,0,0,.32), 0 0 0 1px rgba(124,108,240,.12);
+    backdrop-filter: blur(16px);
+    transform: translateX(-50%);
+}
+
+.local-adjust-toolbar[hidden] { display: none; }
+
+.local-adjust-summary {
+    display: grid;
+    min-width: 104px;
+    max-width: 180px;
+    padding-right: 8px;
+    border-right: 1px solid var(--border);
+    line-height: 1.25;
+}
+
+.local-adjust-summary strong {
+    overflow: hidden;
+    color: var(--text);
+    font-size: 11px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.local-adjust-summary span { color: var(--text-dim); font-size: 9px; }
+
+.local-adjust-icon-btn,
+.local-adjust-reset {
+    min-width: 32px;
+    height: 32px;
+    padding: 0 8px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: rgba(255,255,255,.05);
+    color: var(--text);
+    font: inherit;
+    cursor: pointer;
+}
+
+.local-adjust-icon-btn { padding: 0; font-size: 18px; }
+.local-adjust-reset { color: var(--text-dim); font-size: 10px; }
+.local-adjust-icon-btn:hover:not(:disabled),
+.local-adjust-reset:hover:not(:disabled) { border-color: var(--accent); color: #fff; }
+.local-adjust-icon-btn:disabled,
+.local-adjust-reset:disabled { opacity: .35; cursor: not-allowed; }
+.local-adjust-close { margin-left: 2px; border-color: transparent; background: transparent; color: var(--text-dim); }
+
+.local-zoom-field { display: flex; align-items: center; }
+.local-zoom-field input { width: clamp(100px, 15vw, 190px); accent-color: var(--accent); }
+#local-zoom-value { width: 40px; color: var(--accent-hi); font-size: 10px; text-align: center; }
 
 .playback-origin-marker {
     position: absolute;
@@ -2053,16 +2111,6 @@ body {
     transition: opacity .22s;
 }
 
-@media (max-width: 1920px) {
-    /* Two-row toolbar: actions keep row 1, the motion strip gets its own
-       full-width row 2, so neither is ever squeezed into wrapping.
-       Single-row layout only resumes once the bar is wide enough for
-       full strip + labelled actions (>1920px viewport). */
-    .workspace-bar { flex-wrap: wrap; align-content: flex-start; row-gap: 6px; }
-    .workspace-actions { order: 1; margin-left: auto; }
-    .canvas-motion-controls { order: 2; flex-basis: 100%; }
-}
-
 @media (max-width: 1440px) {
     .toolbar-btn:not(.toolbar-primary) span { display: none; }
     .toolbar-btn:not(.toolbar-primary) { width: 40px; padding: 0; }
@@ -2159,7 +2207,8 @@ body {
         border-color: rgba(124,108,240,.25);
         border-radius: 10px;
     }
-    .workflow-nav button { min-height: 40px; font-size: 12px; }
+    .workflow-nav button { min-height: 40px; font-size: 11px; }
+    .sidebar .mobile-category-hidden { display: none !important; }
     .panel { scroll-margin-top: 104px; }
 
     .workspace-bar {
@@ -2168,24 +2217,24 @@ body {
         gap: 6px;
     }
     #wall-canvas { touch-action: none; }
-    /* The bottom sheet's motion strip covers the canvas bottom edge, so the
-       stats pill has no room on mobile. */
+    /* Keep the canvas uncluttered on narrow screens. */
     .canvas-status-wrap { display: none; }
     .history-actions { padding-right: 6px; }
     .toolbar-primary { min-width: 92px; }
     .canvas-help { display: none; }
-    .canvas-motion-controls {
-        position: absolute;
-        z-index: 4;
-        bottom: 12px;
-        left: 8px;
-        right: 80px;
-        width: auto;
-        justify-content: flex-start;
-        overflow-x: auto;
-        background: rgba(18,18,27,.82);
-        box-shadow: 0 4px 16px rgba(0,0,0,.25);
+    .local-adjust-toolbar {
+        top: 10px;
+        gap: 6px;
+        width: calc(100% - 20px);
+        max-width: 520px;
+        padding: 7px 8px;
     }
+    .local-adjust-summary { display: none; }
+    .local-zoom-field { flex: 1; }
+    .local-zoom-field input { width: 100%; }
+    .local-adjust-icon-btn,
+    .local-adjust-reset { min-width: 40px; height: 40px; }
+    .canvas-motion-controls { padding: 2px; }
     .canvas-control-btn { padding: 0 8px; }
     .canvas-control-btn span:last-child { display: none; }
     .flow-speed-field span:first-child { display: none; }
@@ -2244,10 +2293,10 @@ body {
     .shape-btn svg { width: 32px; height: 32px; }
     .drop-zone { padding: 14px 10px; }
     .photo-library { max-height: 132px; grid-template-columns: repeat(6, 1fr); }
-    .workspace-bar { justify-content: flex-end; }
+    .workspace-bar { justify-content: flex-start; }
     .canvas-status-wrap { display: none; }
     .workspace-actions { flex-wrap: nowrap; justify-content: flex-end; gap: 5px; }
-    .history-actions { margin-right: auto; }
+    .history-actions { margin-right: 0; }
     .toolbar-primary-label-long { display: none; }
     .toolbar-primary-label-short { display: inline; }
     .toolbar-primary { min-width: 72px; white-space: nowrap; }

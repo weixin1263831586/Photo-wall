@@ -88,10 +88,16 @@ export function createPhotoLibrary(options) {
             image.alt = photo.name || '';
             var mediaBadge = card.querySelector('.photo-media-badge');
             mediaBadge.hidden = photo.mediaType !== 'video';
-            mediaBadge.textContent = photo.playbackStatus === 'converting' ? '…' :
-                (photo.posterFallback && !photo.playbackBlob ? '!' : '▶');
-            mediaBadge.title = photo.playbackStatus === 'converting' ? '正在生成兼容播放副本' :
-                (photo.posterFallback && !photo.playbackBlob ? '当前显示视频封面，点击可转码播放' : '视频素材');
+            var videoState = photo.playbackStatus === 'converting' ? 'converting' :
+                ((photo.posterFallback || photo.playbackStatus === 'poster' || photo.playbackStatus === 'decode-error') &&
+                    !photo.playbackBlob ? 'poster' : (photo.playbackBlob ? 'compatible' : 'video'));
+            mediaBadge.setAttribute('data-state', videoState);
+            mediaBadge.textContent = videoState === 'converting' ? '⏳ 转码' :
+                videoState === 'poster' ? '⚠ 封面' :
+                    videoState === 'compatible' ? '✓ 兼容' : '▶ 视频';
+            mediaBadge.title = videoState === 'converting' ? '正在生成兼容播放副本' :
+                videoState === 'poster' ? '当前显示视频封面，点击可转码播放' :
+                    videoState === 'compatible' ? '已生成本机兼容播放副本' : '可播放视频素材';
             card.classList.toggle('is-video', photo.mediaType === 'video');
             card.querySelector('.photo-remove').setAttribute('aria-label', '移除 ' + (photo.name || '照片'));
             card.querySelector('.photo-edit').setAttribute('aria-label', '精修 ' + (photo.name || '照片'));
